@@ -17,7 +17,7 @@ export async function rendererDeliverySmoke(
 ) {
   const endpoint = new URL(`/api/render-sessions/${renderSessionId}`, page.url()).href
   const state = async () => (await (await page.request.get(endpoint)).json()).session
-  const frame = page.frames().find((frame) => frame.url().endsWith(`/${mode}-runtime.html`))!
+  const frame = page.frames().find((frame) => new URL(frame.url()).pathname === `/${mode}-runtime.html`)!
   assert.ok(frame)
   // Count the real Workbench -> iframe commands, without replacing either renderer.
   await page.evaluate(`(() => {

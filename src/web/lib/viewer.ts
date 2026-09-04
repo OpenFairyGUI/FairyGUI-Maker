@@ -21,6 +21,7 @@ import {
 import { getProject, refreshProject, registerViewerRenderer } from "./api"
 import { startRendererDelivery } from "./renderer-delivery"
 import { createRenderSessionClient, type RenderSessionClient } from "./render-session"
+import { prepareRuntimeFrame } from "../../runtime-channel"
 import {
   getProjectBinding,
   queryProjectBindingPermission,
@@ -242,8 +243,10 @@ type ViewerFrameSession = {
 async function connectViewerFrame(
   frame: HTMLIFrameElement,
   bundle: ViewerProjectBundle,
+  signal: AbortSignal,
 ): Promise<ViewerFrameSession> {
   if (!frame.contentWindow) throw new Error("Viewer iframe 尚未就绪。")
+  const connection = await prepareRuntimeFrame(frame, signal)
   const channel = new MessageChannel()
   const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timeout: number }>()
   let interactionHandler: ((event: ViewerInteractionEvent) => void) | null = null
@@ -259,7 +262,8 @@ async function connectViewerFrame(
     const message = event.data
     if (message.kind === "ready") {
       window.clearTimeout(readyTimeout)
-      resolveReady()
+      if (message.sourceRevision === bundle.sourceRevision) resolveReady()
+      else rejectReady(new Error("Viewer runtime 连接到了错误的工程版本。"))
       return
     }
     if (message.kind === "fatal") {
@@ -285,9 +289,16 @@ async function connectViewerFrame(
     type: "fairygui.viewer.connect",
     protocolVersion: VIEWER_PROTOCOL_VERSION,
     sourceRevision: bundle.sourceRevision,
+    ...connection,
   }
-  frame.contentWindow.postMessage(connectMessage, location.origin, [channel.port2])
-  await ready
+  const abortReady = () => rejectReady(signal.reason)
+  signal.addEventListener("abort", abortReady, { once: true })
+  try {
+    signal.throwIfAborted()
+    frame.contentWindow.postMessage(connectMessage, "*", [channel.port2])
+    await ready
+  } catch (error) { channel.port1.close(); channel.port2.close(); throw error }
+  finally { window.clearTimeout(readyTimeout); signal.removeEventListener("abort", abortReady) }
 
   const send = <T>(command: ViewerCommandInput, transfer: Transferable[] = []): Promise<T> => {
     const requestId = crypto.randomUUID()
@@ -329,7 +340,7 @@ async function connectViewerFrame(
 }
 
 export async function startViewerRenderer(projectId: string, bundle: ViewerProjectBundle, iframe: HTMLIFrameElement, onState: (state: RenderSessionState) => void, onError: (error: Error) => void, signal: AbortSignal) {
-  const frame = await connectViewerFrame(iframe, bundle)
+  const frame = await connectViewerFrame(iframe, bundle, signal)
   if (signal.aborted) { frame.destroy(); signal.throwIfAborted() }
   signal.addEventListener("abort", () => frame.destroy(), { once: true })
   let client: RenderSessionClient | undefined

@@ -1,8 +1,9 @@
 import { parseJta, type UamAssetResource, type UamComponentResource, type UamDisplayNode, type UamGearBinding, type UamTextProperties, type UamTransitionItem, type UamTransitionModel } from "@openfairygui/core"
-import { installResourceLoadBudget, loadRuntimeTexture, reserveImage } from "./image-budget"
+import { installResourceLoadBudget, loadRuntimeTexture, reserveImage, setImageProbeWorker } from "./image-budget"
+import { acceptRuntimeConnection } from "../runtime-channel"
+import { disableRuntimeStorage, nextRuntimeFrame } from "./platform"
 import { checkBudget, checkImageDimensions, checkRuntimeMetadata, ObservationBudget, ResourceBudget, RUNTIME_LIMITS } from "./resource-budget"
 import {
-  isViewerConnectMessage,
   type ViewerControlKind,
   type ViewerCommand,
   type ViewerDiagnostic,
@@ -116,31 +117,17 @@ const runtime = {
   interactionSeq: 0,
 }
 
-let bootPromise: Promise<void> | null = null
 let commandQueue = Promise.resolve()
-let connectionSequence = 0
 window.addEventListener("pagehide", () => runtime.loading.abort())
 
-window.addEventListener("message", (event: MessageEvent<unknown>) => {
-  if (event.origin !== location.origin || !isViewerConnectMessage(event.data) || event.ports.length !== 1) return
-  void connect(event.data.sourceRevision, event.ports[0])
-})
+acceptRuntimeConnection(connect)
 
-async function connect(sourceRevision: string, port: MessagePort) {
-  const sequence = ++connectionSequence
+async function connect(sourceRevision: string, port: MessagePort, imageProbeWorker: string) {
   try {
-    await (bootPromise ??= boot())
-    if (sequence !== connectionSequence) { port.close(); return }
-    runtime.port?.close()
-    runtime.port = null
-    runtime.loading.abort()
-    await commandQueue
-    if (sequence !== connectionSequence) { port.close(); return }
-    resetScene()
+    setImageProbeWorker(imageProbeWorker)
+    await boot()
     runtime.port = port
     runtime.sourceRevision = sourceRevision
-    runtime.interactionSeq = 0
-    commandQueue = Promise.resolve()
     port.onmessage = (event: MessageEvent<ViewerCommand>) => {
       commandQueue = commandQueue.then(() => runtime.port === port ? handleCommand(event.data) : undefined)
     }
@@ -164,6 +151,7 @@ async function boot() {
   }
   Object.assign(Laya.PlayerConfig, { resolution: stageConfig })
   Object.assign(Laya.Config, { FPS: 60, isAntialias: true, useRetinalCanvas: false, isAlpha: false })
+  disableRuntimeStorage()
   await Laya.init(stageConfig)
   if (!fgui.GRoot.inst.displayObject.parent) Laya.stage.addChild(fgui.GRoot.inst.displayObject)
   installResourceLoadBudget(runtime.loaderUrls, runtime.imageUrls)
@@ -207,7 +195,7 @@ async function handleCommand(command: ViewerCommand) {
         checkRuntimeMetadata(command.operations)
         const budget = new ObservationBudget()
         const observations = command.operations.map((operation) => applyOperation(operation, budget))
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        await nextRuntimeFrame()
         respond(command.requestId, { observations, observation: createObservation(budget) })
         return
       }
@@ -248,7 +236,7 @@ async function renderScene(scene: ViewerScene): Promise<ViewerRendered> {
   fgui.GRoot.inst.addChild(current)
   layoutCurrent()
   playAutoTransitions()
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  await nextRuntimeFrame()
 
   return {
     packageId: rootEntry.packageId,

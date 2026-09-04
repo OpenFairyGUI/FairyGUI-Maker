@@ -752,7 +752,7 @@ function ArtifactPlayer({ artifact }: { artifact: ArtifactListItem }) {
           </ResizablePanel>
           <ResizableHandle withHandle />
           <ResizablePanel id="player-canvas" minSize={360} className="min-w-0"><div className="relative h-full min-h-0 bg-[#202226]">
-            <iframe ref={iframeRef} src="/player-runtime.html" title="FairyGUI LayaAir Player Runtime" sandbox="allow-scripts allow-same-origin" className="absolute inset-0 size-full border-0" />
+            <iframe ref={iframeRef} data-runtime="/player-runtime.html" title="FairyGUI LayaAir Player Runtime" sandbox="allow-scripts" className="absolute inset-0 size-full border-0" />
             {!session && !runtimeError ? <div className="absolute inset-0 grid place-items-center bg-background/80 backdrop-blur-sm"><ViewerLoading message="正在启动原生 UIPackage runtime…" /></div> : null}
             {runtimeError ? <div role="alert" className="absolute inset-0 grid place-items-center bg-background/90 p-8 text-center"><div className="max-w-lg"><ServerCog className="mx-auto mb-4 size-9 text-destructive" /><p className="font-medium">Player 已停止</p><p className="mt-2 text-sm text-muted-foreground">{runtimeError}</p><div className="mt-4 flex justify-center gap-2"><Button variant="outline" onClick={() => window.location.reload()}>重新连接</Button><Button asChild><Link to="/player">返回 Player</Link></Button></div></div></div> : null}
             {rendered && session && !runtimeError ? <div className="pointer-events-none absolute bottom-3 right-3 rounded-md border bg-background/85 px-2.5 py-1.5 text-[11px] text-muted-foreground shadow-sm backdrop-blur">{rendered.packageName}/{rendered.componentName} · {rendered.width}×{rendered.height}</div> : null}
@@ -999,12 +999,9 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
         }
       }
     }
-    // A newly keyed iframe starts at about:blank; wait for the actual runtime document before handshaking.
-    if (frame.contentDocument?.readyState === "complete" && frame.contentDocument.URL === frame.src) void connect()
-    else frame.addEventListener("load", connect, { once: true })
+    void connect()
     return () => {
       disposed = true
-      frame.removeEventListener("load", connect)
       lifetime.abort()
       stopRenderer?.()
       setSession(null)
@@ -1110,7 +1107,7 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
             <ResizableHandle withHandle />
             <ResizablePanel id="viewer-canvas" minSize={360} className="min-w-0">
               <div className="relative h-full min-h-0 bg-[#202226]">
-                <iframe key={`${bundle.dataUpdatedAt}:${bundle.isFetching}`} ref={iframeRef} src="/viewer-runtime.html" title="FairyGUI LayaAir Viewer Runtime" sandbox="allow-scripts allow-same-origin" className="absolute inset-0 size-full border-0" />
+                <iframe key={`${bundle.dataUpdatedAt}:${bundle.isFetching}`} ref={iframeRef} data-runtime="/viewer-runtime.html" title="FairyGUI LayaAir Viewer Runtime" sandbox="allow-scripts" className="absolute inset-0 size-full border-0" />
                 {(bundle.isFetching || (bundle.data && !session && !runtimeError && !bundle.isError && !scanCancelled)) && (
                   <div className="absolute inset-0 grid place-items-center bg-background/80 backdrop-blur-sm">
                     <ViewerLoading message={bundle.isFetching ? scanProgress || "正在读取当前工程模型…" : "正在启动 LayaAir 3.3.10…"} />

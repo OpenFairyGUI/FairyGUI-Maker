@@ -4,10 +4,11 @@ import path from "node:path"
 import { deflateRawSync } from "node:zlib"
 import { Document, liftDocumentToUamProject, normalizeUamProject, ProjectType } from "@openfairygui/core"
 import { NodeIO } from "@openfairygui/core/node"
-import type { BrowserContext, Page } from "playwright"
+import type { BrowserContext, Frame } from "playwright"
 import type { ArtifactManifest } from "../src/artifact-protocol"
-import { VIEWER_PROTOCOL_VERSION, type ViewerCommand, type ViewerScene } from "../src/viewer-protocol"
+import { type ViewerCommand, type ViewerScene } from "../src/viewer-protocol"
 import { compileViewerScene } from "../src/web/lib/viewer"
+import { openTestRuntime } from "./runtime-isolation-smoke"
 
 const revision = "runtime-budget-smoke"
 
@@ -59,30 +60,10 @@ function texturedDocument(count: number, png: Buffer) {
   return document
 }
 
-async function connect(page: Page, sourceRevision: string) {
-  await page.evaluate(`new Promise((resolve, reject) => {
-    const channel = new MessageChannel();
-    const pending = new Map();
-    const timer = setTimeout(() => reject(new Error("Runtime connect timeout")), 8000);
-    channel.port1.onmessage = ({ data }) => {
-      if (data.kind === "ready") { clearTimeout(timer); resolve(true); }
-      if (data.kind === "fatal") { clearTimeout(timer); reject(new Error(data.error)); }
-      if (data.kind === "response") { pending.get(data.requestId)?.(data); pending.delete(data.requestId); }
-    };
-    channel.port1.start();
-    window.budgetRequest = (command) => new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Runtime command timeout: " + command.kind)), 8000);
-      pending.set(command.requestId, (data) => { clearTimeout(timer); resolve(data); });
-      channel.port1.postMessage(command);
-    });
-    window.postMessage({ type: "fairygui.viewer.connect", protocolVersion: ${VIEWER_PROTOCOL_VERSION}, sourceRevision: ${JSON.stringify(sourceRevision)} }, location.origin, [channel.port2]);
-  })`)
-}
-
 let requestId = 0
-async function request(page: Page, command: Omit<ViewerCommand, "requestId"> | Record<string, unknown>) {
+async function request(page: Frame, command: Omit<ViewerCommand, "requestId"> | Record<string, unknown>) {
   const json = JSON.stringify({ ...command, requestId: `budget-${++requestId}` }, (_, value) => value instanceof ArrayBuffer ? { runtimeBytes: Array.from(new Uint8Array(value)) } : value)
-  return page.evaluate(`window.budgetRequest(JSON.parse(${JSON.stringify(json)}, (_, value) => value?.runtimeBytes ? Uint8Array.from(value.runtimeBytes).buffer : value))`) as Promise<{ ok: boolean; error?: string; value?: any }>
+  return page.page().evaluate(`window.budgetRequest(JSON.parse(${JSON.stringify(json)}, (_, value) => value?.runtimeBytes ? Uint8Array.from(value.runtimeBytes).buffer : value))`) as Promise<{ ok: boolean; error?: string; value?: any }>
 }
 
 function accepted(result: { ok: boolean; error?: string }) { assert.equal(result.ok, true, result.error ?? "runtime command failed") }
@@ -91,7 +72,7 @@ function rejected(result: { ok: boolean; error?: string }, pattern: RegExp) {
   assert.match(result.error ?? "", pattern)
 }
 
-async function trackBlobs(page: Page) {
+async function trackBlobs(page: Frame) {
   await page.evaluate(`(() => {
     const create = URL.createObjectURL;
     const revoke = URL.revokeObjectURL;
@@ -102,15 +83,22 @@ async function trackBlobs(page: Page) {
   })()`)
 }
 
-async function assertClean(page: Page) {
+async function assertClean(page: Frame) {
   assert.equal(await page.evaluate("window.budgetBlobs.size"), 0, "failed/replaced render leaked Blob URLs")
   assert.equal(await page.evaluate("window.budgetAllBlobs.some(url => !!Laya.loader.getRes(url))"), false, "failed/replaced render leaked decoded cache entries")
+  assert.equal(await page.evaluate("Promise.all(window.budgetAllBlobs.map(url => fetch(url).then(() => false, () => true))).then(results => results.every(Boolean))"), true, "Blob URL was not revoked")
 }
 
 export async function runtimeBudgetSmoke(context: BrowserContext, origin: string, artifact: ArtifactManifest, publishDir: string) {
   const normal = makeDocument("normal")
   const deep = makeDocument("deep")
   const wide = makeDocument("wide")
+  const sound = makeDocument("normal")
+  sound.getRoot().listPackages()[0].addResource(sound.createSoundResource("tone").setId("SOUND001").setFile("tone.wav"))
+  const wav = Buffer.alloc(46)
+  wav.write("RIFF"); wav.writeUInt32LE(38, 4); wav.write("WAVEfmt ", 8); wav.writeUInt32LE(16, 16)
+  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28)
+  wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write("data", 36); wav.writeUInt32LE(2, 40)
   const base = scene(normal)
   const giant = Buffer.alloc(24)
   Buffer.from("89504e470d0a1a0a", "hex").copy(giant)
@@ -122,12 +110,12 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     assets: [{ packageId: "SMOKE001", packageName: "Smoke", resource: { id: "IMAGE001", kind, name: "image", fileName } as any, data: new Uint8Array(data).buffer }],
   })
   const errors: string[] = []
-  const viewer = await context.newPage()
-  const player = await context.newPage()
-  for (const page of [viewer, player]) page.on("pageerror", (error) => errors.push(error.message))
+  const viewerPage = await context.newPage()
+  const playerPage = await context.newPage()
+  for (const page of [viewerPage, playerPage]) page.on("pageerror", (error) => errors.push(error.message))
   try {
-    await viewer.goto(`${origin}/viewer-runtime.html`)
-    await connect(viewer, revision)
+    await viewerPage.goto(origin)
+    let viewer = await openTestRuntime(viewerPage, "viewer", revision)
     await trackBlobs(viewer)
     assert.equal(await viewer.evaluate('Laya.loader.load("https://invalid.example/unbudgeted.png")'), null, "unvalidated native image bypassed the resource gate")
     accepted(await request(viewer, { kind: "render", scene: withAsset(png) }))
@@ -150,6 +138,10 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     accepted(await request(viewer, { kind: "render", scene: withAsset(safeSvg, "image", "test.svg") }))
     accepted(await request(viewer, { kind: "render", scene: base }))
     await assertClean(viewer)
+    await viewerPage.locator("#runtime-harness").evaluate((frame) => { frame.style.top = "5000px" })
+    accepted(await request(viewer, { kind: "render", scene: base }))
+    accepted(await request(viewer, { kind: "capture" }))
+    await viewerPage.locator("#runtime-harness").evaluate((frame) => { frame.style.top = "0" })
     const repeatedOperations = Array.from({ length: 2500 }, () => ({ op: "set-property", targetId: "/SMOKE001/MAIN0001", property: "visible", value: true }))
     rejected(await request(viewer, { kind: "apply-operations", operations: repeatedOperations }), /observation_nodes/)
     await viewer.evaluate('fgui.GRoot.inst.getChildAt(0).name = "x".repeat(16385)')
@@ -157,7 +149,7 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     accepted(await request(viewer, { kind: "render", scene: base }))
     accepted(await request(viewer, { kind: "observe" }))
 
-    // Hold a decoded result across reconnect, then deliver it late. It must not revive a cache entry.
+    // Hold a decoded result across pagehide cancellation. It must not revive a cache entry.
     await viewer.evaluate(`(() => {
       window.budgetOriginalLoad = fgui.AssetProxy.inst.load.bind(fgui.AssetProxy.inst);
       fgui.AssetProxy.inst.load = (...args) => new Promise(resolve => {
@@ -165,16 +157,21 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
       });
     })()`)
     const delayed = JSON.stringify({ kind: "render", requestId: "delayed-image", scene: withAsset(png) }, (_, value) => value instanceof ArrayBuffer ? { runtimeBytes: Array.from(new Uint8Array(value)) } : value)
-    await viewer.evaluate(`void window.budgetRequest(JSON.parse(${JSON.stringify(delayed)}, (_, value) => value?.runtimeBytes ? Uint8Array.from(value.runtimeBytes).buffer : value)).catch(() => {})`)
+    await viewerPage.evaluate(`void window.budgetRequest(JSON.parse(${JSON.stringify(delayed)}, (_, value) => value?.runtimeBytes ? Uint8Array.from(value.runtimeBytes).buffer : value)).catch(() => {})`)
     await viewer.waitForFunction(() => Boolean((window as any).budgetLateResolve))
-    await connect(viewer, revision)
+    await viewer.evaluate('dispatchEvent(new PageTransitionEvent("pagehide"))')
     await viewer.evaluate("fgui.AssetProxy.inst.load = window.budgetOriginalLoad; window.budgetLateResolve(window.budgetLateTexture)")
     accepted(await request(viewer, { kind: "render", scene: base }))
     await assertClean(viewer)
+    await viewerPage.evaluate("window.replayRuntimeConnect()")
+    accepted(await request(viewer, { kind: "observe" }))
+    assert.equal(await viewerPage.evaluate("window.rejectedConnections"), 0, "replayed port replaced the live channel")
+    viewer = await openTestRuntime(viewerPage, "viewer", revision)
+    accepted(await request(viewer, { kind: "render", scene: base }))
 
     const io = new NodeIO()
     const files = new Map<string, Buffer>()
-    for (const [id, document] of [["normal", normal], ["deep", deep], ["wide", wide], ["image-a", texturedDocument(1, png)], ["textures", texturedDocument(1024, png)]] as const) {
+    for (const [id, document] of [["normal", normal], ["deep", deep], ["wide", wide], ["audio", sound], ["image-a", texturedDocument(1, png)], ["textures", texturedDocument(1024, png)]] as const) {
       const target = path.join(publishDir, `budget-${id}.fui`)
       await io.writeBinary(document, target, { compressed: true })
       files.set(id, await readFile(target))
@@ -183,23 +180,25 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     const header = Buffer.alloc(33)
     header.writeUInt32BE(0x46475549); header.writeInt32BE(2, 4); header[8] = 1
     files.set("bomb", Buffer.concat([header, deflateRawSync(Buffer.alloc(1024 * 1024))]))
-    await player.route("**/api/artifacts/*/files/**", (route) => {
-      const url = new URL(route.request().url())
-      const id = url.pathname.split("/")[3]!.replace("budget-", "")
-      return route.fulfill({ status: 200, contentType: url.pathname.endsWith(".png") ? "image/png" : "application/octet-stream", body: url.pathname.endsWith(".png") ? id === "giant" ? giant : png : files.get(id) ?? files.get("normal")! })
-    })
-    await player.goto(`${origin}/player-runtime.html`)
-    await connect(player, artifact.digest)
+    await playerPage.goto(origin)
+    const player = await openTestRuntime(playerPage, "player", artifact.digest)
     await trackBlobs(player)
     assert.equal(await player.evaluate('Laya.loader.load("https://invalid.example/unbudgeted.png")'), null, "unvalidated Player image bypassed the resource gate")
     const render = (id: string, image?: Buffer) => request(player, { kind: "render-artifact", source: {
       packageId: "SMOKE001", componentId: "MAIN0001", artifact: {
         ...artifact, artifactId: `budget-${id}`,
         files: [{ path: "Smoke.fui", size: (files.get(id) ?? files.get("normal")!).length, sha256: "0".repeat(64), mimeType: "application/octet-stream" },
+          ...(id === "audio" ? [{ path: "Smoke_SOUND001.wav", size: wav.length, sha256: "0".repeat(64), mimeType: "audio/wav" }] : []),
           ...(image ? [{ path: "Smoke_atlas0.png", size: image.length, sha256: "0".repeat(64), mimeType: "image/png" }] : [])],
       },
+      files: [{ path: "Smoke.fui", data: new Uint8Array(files.get(id) ?? files.get("normal")!).buffer },
+        ...(id === "audio" ? [{ path: "Smoke_SOUND001.wav", data: new Uint8Array(wav).buffer }] : []),
+        ...(image ? [{ path: "Smoke_atlas0.png", data: new Uint8Array(image).buffer }] : [])],
     } })
+    await playerPage.locator("#runtime-harness").evaluate((frame) => { frame.style.top = "5000px" })
     accepted(await render("normal"))
+    accepted(await request(player, { kind: "capture" }))
+    await playerPage.locator("#runtime-harness").evaluate((frame) => { frame.style.top = "0" })
     rejected(await render("bomb"), /resource_budget_exceeded: stream_bytes/)
     rejected(await render("deep"), /scene_depth/)
     rejected(await render("wide"), /scene_nodes/)
@@ -207,12 +206,17 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     rejected(await render("textures", png), /textures/)
     await assertClean(player)
     accepted(await render("image-a", png))
-    assert.equal(await player.evaluate('Laya.loader.load("https://invalid.example/api/artifacts/budget-image-a/files/Smoke_atlas0.png")'), null, "foreign-origin resource reused a trusted path")
+    assert.equal(await player.evaluate('Laya.loader.load("https://invalid.example/runtime-artifact/budget-image-a/Smoke_atlas0.png")'), null, "foreign-origin resource reused a trusted path")
     assert.equal(await player.evaluate('fgui.GRoot.inst.getChildAt(0).getChild("texture0").image.texture.width'), 1, "native Player did not use the validated atlas")
     assert.equal(await player.evaluate("window.budgetBlobs.size"), 1)
     accepted(await render("image-b", png))
     assert.equal(await player.evaluate("window.budgetBlobs.size"), 1)
-    assert.equal(await player.evaluate('!!Laya.loader.getRes("/api/artifacts/budget-image-a/files/Smoke_atlas0.png")'), false)
+    assert.equal(await player.evaluate('!!Laya.loader.getRes("/runtime-artifact/budget-image-a/Smoke_atlas0.png")'), false)
+    accepted(await render("normal"))
+    await assertClean(player)
+    accepted(await render("audio"))
+    assert.match(await player.evaluate('fgui.UIPackage.getById("SMOKE001").getItemById("SOUND001").file'), /^blob:/)
+    assert.equal(await player.evaluate('fetch(fgui.UIPackage.getById("SMOKE001").getItemById("SOUND001").file).then(response => response.arrayBuffer()).then(bytes => bytes.byteLength)'), wav.length)
     accepted(await render("normal"))
     await assertClean(player)
     rejected(await request(player, { kind: "apply-operations", operations: repeatedOperations }), /observation_nodes/)
@@ -221,6 +225,6 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     accepted(await render("normal"))
     accepted(await request(player, { kind: "observe" }))
     assert.deepEqual(errors, [], "budget failures escaped the command error boundary")
-    return { fuiBomb: true, giantImages: true, textures: true, sceneNodes: true, sceneDepth: true, observation: true, recoveryAndCleanup: true }
-  } finally { await viewer.close(); await player.close() }
+    return { fuiBomb: true, giantImages: true, textures: true, sceneNodes: true, sceneDepth: true, observation: true, recoveryAndCleanup: true, offscreenCapture: true, nonceHandshake: true, audioBlob: true }
+  } finally { await viewerPage.close(); await playerPage.close() }
 }

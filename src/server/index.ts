@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto"
-import { access, realpath, writeFile } from "node:fs/promises"
+import { access, readdir, realpath, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { basename, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -437,6 +437,8 @@ function registerApi(
           const data = source?.readFile(query.path)
           if (!data) return c.json({ error: "Host project file not found" }, 404)
           c.header("Content-Type", "application/octet-stream")
+          c.header("Content-Disposition", "attachment")
+          c.header("Content-Security-Policy", "default-src 'none'; sandbox")
           c.header("Content-Length", String(data.byteLength))
           return c.body(Uint8Array.from(data).buffer)
         } catch (error) {
@@ -568,7 +570,9 @@ function registerApi(
         if (!opened) return c.json({ error: "Artifact file not found" }, 404)
         try {
           const data = await opened.handle.readFile()
-          c.header("Content-Type", opened.metadata.mimeType)
+          c.header("Content-Type", "application/octet-stream")
+          c.header("Content-Disposition", "attachment")
+          c.header("Content-Security-Policy", "default-src 'none'; sandbox")
           c.header("Content-Length", String(data.byteLength))
           c.header("ETag", `"${opened.metadata.sha256}"`)
           c.header("Cache-Control", "private, immutable, max-age=31536000")
@@ -586,6 +590,11 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   await access(resolve(WEB_DIST, "index.html")).catch(() => {
     throw new Error("FairyGUI Maker web assets are missing. Reinstall the package or run `pnpm build`.")
   })
+  // Only installed build outputs are anonymous/CORS-readable; never user uploads or APIs.
+  const publicAssets = new Set([
+    ...(await readdir(resolve(WEB_DIST, "assets"), { withFileTypes: true })).filter((entry) => entry.isFile()).map(({ name }) => `/assets/${name}`),
+    "/viewer-runtime/laya.core.js", "/viewer-runtime/laya.webgl_2D.js", "/viewer-runtime/fairygui.js",
+  ])
   const parsed = hostOptionsSchema.parse({
     port: options.port ?? Number(process.env.FAIRYGUI_MAKER_PORT ?? 3847),
     token: options.token ?? process.env.FAIRYGUI_MAKER_TOKEN,
@@ -670,11 +679,21 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     if (!allowedHosts.has((c.req.header("host") ?? "").toLowerCase())) {
       return c.json({ error: "Invalid Host header" }, 403)
     }
+    const runtimePage = /^\/(viewer|player)-runtime\.html$/.test(c.req.path)
+    if ((c.req.method === "GET" || c.req.method === "HEAD") && (publicAssets.has(c.req.path) || runtimePage)) {
+      if (runtimePage) {
+        const assetOrigin = new URL(c.req.url).origin
+        c.header("Content-Security-Policy", `default-src 'none'; sandbox allow-scripts; script-src ${assetOrigin}/assets/ ${assetOrigin}/viewer-runtime/; style-src 'unsafe-inline'; img-src blob: data:; media-src blob:; font-src blob: data:; connect-src blob:; worker-src blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'`)
+      } else {
+        c.header("Access-Control-Allow-Origin", "*")
+      }
+      await next()
+      return
+    }
     const requestOrigin = c.req.header("origin")
     if (requestOrigin && !allowedOrigins.has(requestOrigin)) {
       return c.json({ error: "Invalid Origin header" }, 403)
     }
-
     const url = new URL(c.req.url)
     const queryToken = url.searchParams.get("token")
     if (c.req.method === "GET" && tokensMatch(queryToken, token)) {
@@ -682,6 +701,11 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
       setCookie(c, COOKIE_NAME, token, { httpOnly: true, sameSite: "Strict", path: "/" })
       return c.redirect(`${url.pathname}${url.search}`)
     }
+
+    // Opaque frames also make GET/no-cors/navigation requests without an Origin header.
+    // A valid explicit bootstrap token above is allowed; Cookie alone is not.
+    const site = c.req.header("sec-fetch-site")
+    if (site && site !== "same-origin" && site !== "none") return c.json({ error: "Cross-origin Host access denied" }, 403)
 
     const authorization = c.req.header("authorization")
     const bearer = authorization?.startsWith("Bearer ") ? authorization.slice(7) : undefined

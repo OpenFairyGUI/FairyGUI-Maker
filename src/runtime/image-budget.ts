@@ -1,8 +1,10 @@
-import ImageProbeWorker from "./image-probe.worker?worker"
 import { checkBudget, checkImageDimensions, checkPngDimensions, RUNTIME_LIMITS, type ResourceBudget } from "./resource-budget"
 
 declare const Laya: any
 declare const fgui: any
+
+let imageProbeWorkerSource = ""
+export function setImageProbeWorker(source: string) { imageProbeWorkerSource = source }
 
 export function installResourceLoadBudget(urls: Set<string>, images: Set<string>) {
   const load = Laya.loader.load
@@ -52,16 +54,21 @@ export async function reserveImage(data: ArrayBuffer, type: string, budget: Reso
   checkBudget(budget.textures + 1, RUNTIME_LIMITS.textures, "textures")
   checkPngDimensions(new Uint8Array(data))
   signal.throwIfAborted()
-  const worker = new ImageProbeWorker()
+  if (!imageProbeWorkerSource) throw new Error("Image probe worker is unavailable")
+  // Keep URL ownership here: an opaque worker cannot reliably revoke its creator's URL.
+  const workerUrl = URL.createObjectURL(new Blob([imageProbeWorkerSource], { type: "text/javascript" }))
+  let worker: Worker | undefined
   let abort: () => void = () => {}
   try {
+    worker = new Worker(workerUrl)
+    const probe = worker
     const result = await new Promise<{ width?: number; height?: number; svg?: string }>((resolve, reject) => {
       abort = () => reject(signal.reason)
       signal.addEventListener("abort", abort, { once: true })
-      worker.onerror = () => reject(new Error("Image validation worker failed"))
-      worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data.result)
+      probe.onerror = () => reject(new Error("Image validation worker failed"))
+      probe.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data.result)
       // Keep the source buffer owned by the scene; validation is terminated on timeout/cancel.
-      worker.postMessage({ bytes: data, svg: type === "image/svg+xml" })
+      probe.postMessage({ bytes: data, svg: type === "image/svg+xml" })
     })
     let { width, height } = result
     if (result.svg) {
@@ -90,6 +97,7 @@ export async function reserveImage(data: ArrayBuffer, type: string, budget: Reso
     return { width: width!, height: height!, data }
   } finally {
     signal.removeEventListener("abort", abort)
-    worker.terminate()
+    worker?.terminate()
+    URL.revokeObjectURL(workerUrl)
   }
 }

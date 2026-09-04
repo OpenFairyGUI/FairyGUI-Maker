@@ -53,7 +53,8 @@ FairyGUI-Maker/
 ├─ src/server/                Node Host、MCP、Artifact Store、Render Broker
 ├─ src/web/                   React Maker Workbench、Project Source Client、Renderer Client
 ├─ src/runtime/               Viewer 与 Player 的独立 iframe runtime
-├─ src/viewer-protocol.ts     共用的 render session/runtime 协议（v5）
+├─ src/viewer-protocol.ts     共用的 render session/runtime 协议（v6）
+├─ src/runtime-channel.ts     不透明源 iframe 的 nonce/MessageChannel 握手
 ├─ src/artifact-protocol.ts   Artifact manifest 与 Player source 契约
 ├─ .agents/skills/            通用/Codex Agent Skill
 ├─ .claude/skills/            Claude Skill 兼容入口
@@ -67,7 +68,7 @@ FairyGUI-Maker/
 
 ```text
 Viewer: Dashboard read-only binding -> Project Source Client -> UAM ViewerScene -> viewer-runtime
-Player: published folder import -> Artifact Store -> manifest + files -> player-runtime / UIPackage
+Player: published folder import -> Artifact Store -> parent validates bytes -> MessageChannel -> player-runtime / UIPackage
 
 Agent -> Maker MCP -> Render Session Broker -> Renderer Client -> MessageChannel -> selected runtime
 Workbench controls -> REST -> same Render Session Broker
@@ -142,9 +143,9 @@ Viewer 与 Player 是两条独立渲染链路：
 | 行为语义 | Maker 的 UAM 交互适配层；不推断工程中未表达的业务脚本 | 发布 runtime 的原生 Controller、Gear、Transition 和控件行为 |
 | 持久化边界 | 不发布、不生成 artifact、不写回工程 | Artifact 内容寻址且不可变；运行态更新不改写 Artifact |
 
-两者只共用 Host Render Session Broker、协议 v5、白名单 operation、observation、人工交互上报和 PNG capture，不共用 renderer 实现，也不互相降级。Workbench 控件与 Agent 经过同一个 Broker；MessageChannel 仅供 Renderer 内部使用，语义版本与视图版本独立校验。
+两者只共用 Host Render Session Broker、协议 v6、白名单 operation、observation、人工交互上报和 PNG capture，不共用 renderer 实现，也不互相降级。Workbench 控件与 Agent 经过同一个 Broker；MessageChannel 仅供 Renderer 内部使用，语义版本与视图版本独立校验。
 
-第一种视觉 runtime 固定为 LayaAir 3.3.10 与配套 FairyGUI Web runtime，并运行在隔离 iframe。Viewer iframe 只接收 Project Source Client 编译的结构化 `ViewerScene` 及所选组件依赖资产，不获得目录句柄或整个工程。Maker 自己维护 Viewer 的 UAM Scene compiler 和直接对象构造；FairyGUI Editor Online 只作为工程态 Canvas 行为与视觉效果的参考。Player 使用独立 runtime，按 manifest 加载 Artifact 文件并调用原生 `fgui.UIPackage.addPackage/createObject`，因此发布包中的原生 Controller、Gear、Transition 和控件行为由 FairyGUI runtime 执行。压缩 `.fui` 在浏览器中用标准 `DecompressionStream('deflate-raw')` 解压后加载，不恢复旧 `RawInflate` 生成物。
+第一种视觉 runtime 固定为 LayaAir 3.3.10 与配套 FairyGUI Web runtime，并运行在不透明源 iframe（`sandbox="allow-scripts"`，Host 同时提供 CSP sandbox）。Viewer iframe 只接收 Project Source Client 编译的结构化 `ViewerScene` 及所选组件依赖资产，不获得目录句柄或整个工程。Maker 自己维护 Viewer 的 UAM Scene compiler 和直接对象构造；FairyGUI Editor Online 只作为工程态 Canvas 行为与视觉效果的参考。Player 父页面按 manifest 有界读取、校验并转移 Artifact 字节，独立 runtime 调用原生 `fgui.UIPackage.addPackage/createObject`；两种 iframe 都不获得 Host Cookie、MCP/审批 token 或 Source/API 访问权限。父窗口/来源/一次性 nonce 绑定、Blob Worker、主动内容下载响应头和实际浏览器验证见 [Workbench 批次 16](./workbench.md#211-iframe-隔离批次-16)。压缩 `.fui` 在浏览器中用标准 `DecompressionStream('deflate-raw')` 解压后加载，不恢复旧 `RawInflate` 生成物。
 
 Viewer 的“只读”只约束工程目录：Button、TextInput、List/Tree、ComboBox、Slider、Scroll 和 Controller/Transition 都可修改当前 render session 的内存状态。人类输入与 Agent 的 `dispatch-event`、`set-controller-page`、`play-transition` 进入同一个 UAM 交互适配层，并由 `observe` 返回对象树、控件值和 Controller page；任何变化都不写回 `.fairy`。未被 UAM 表达的业务脚本、网络请求和宿主逻辑不在 Viewer 中推断或执行，发布后行为仍以 Player 为准。
 

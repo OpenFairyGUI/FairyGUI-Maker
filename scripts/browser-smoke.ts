@@ -14,6 +14,7 @@ import { rendererDeliverySmoke } from "./renderer-delivery-smoke"
 import { brokerStateSmoke } from "./broker-state-smoke"
 import { projectRevisionSmoke } from "./project-revision-smoke"
 import { saveGrantSmoke } from "./save-grant-smoke"
+import { assertRuntimeIsolated, runtimeNavigationSmoke } from "./runtime-isolation-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -21,6 +22,7 @@ const dataDir = await mkdtemp(path.join(tmpdir(), "fairygui-maker-browser-data-"
 const publishDir = await mkdtemp(path.join(tmpdir(), "fairygui-maker-browser-publish-"))
 let host: Awaited<ReturnType<typeof startMakerHost>> | undefined
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
+const browserDiagnostics: string[] = []
 
 type McpCall = { result: { content: Array<{ type: string; text?: string; data?: string }>; isError?: boolean } }
 
@@ -119,6 +121,14 @@ try {
 
   browser = await chromium.launch({ headless: true, channel: browserChannel })
   const context = await browser.newContext()
+  const iframeCredentials: Array<Promise<boolean>> = []
+  context.on("request", (request) => {
+    if (request.frame().parentFrame()) iframeCredentials.push(request.allHeaders().then((headers) => !headers.cookie && !headers.authorization))
+  })
+  context.on("page", (page) => {
+    page.on("console", (message) => { if (message.type() === "error") browserDiagnostics.push(message.text().slice(0, 1000)) })
+    page.on("pageerror", (error) => browserDiagnostics.push(error.message))
+  })
   const page = await context.newPage()
   const pageErrors: string[] = []
   page.on("pageerror", (error) => pageErrors.push(error.message))
@@ -149,6 +159,7 @@ try {
     capture: true,
   })
   const viewerPng = assertPng(viewerRender.body)
+  const viewerIsolation = await assertRuntimeIsolated(page, "viewer", `/api/projects/${projectId}/source-index`)
   if (!viewerRender.value?.value?.observation?.objectTree?.children?.length) {
     throw new Error("Viewer observation did not include imported FIG children")
   }
@@ -211,6 +222,7 @@ try {
     capture: true,
   })
   assertPng(playerRender.body)
+  const playerIsolation = await assertRuntimeIsolated(page, "player", `/api/artifacts/${artifact.artifactId}/files/Smoke.fui`)
   if (!JSON.stringify(playerRender.value).includes("TITLE001")) throw new Error("Player observation did not include the rendered title")
   const playerState = await brokerStateSmoke(page, "player", playerRender.value.renderSessionId,
     (name, args) => callTool(host!.origin, sessionId, 90, name, args))
@@ -219,14 +231,17 @@ try {
   const runtimeBudgets = await runtimeBudgetSmoke(page.context(), host.origin, artifact, publishDir)
   const projectRevision = await projectRevisionSmoke(context, host.origin)
   const saveGrants = await saveGrantSmoke(context, host, publishDir)
+  const runtimeNavigation = await runtimeNavigationSmoke(context, host.origin, artifact)
+  if (!(await Promise.all(iframeCredentials)).every(Boolean)) throw new Error("Runtime iframe request carried Host credentials")
   if (pageErrors.length) throw new Error(`Browser page errors: ${pageErrors.join("; ")}`)
 
   await fetch(`${host.origin}/mcp`, {
     method: "DELETE",
     headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
   })
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, projectRevision, saveGrants, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, projectRevision, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
 } catch (error) {
+  process.stderr.write(browserDiagnostics.slice(-30).join("\n") + "\n")
   for (const page of browser?.contexts().flatMap((context) => context.pages()) ?? []) {
     process.stderr.write(`${page.url()}\n${await page.locator("body").innerText().catch(() => "Page unavailable")}\n`)
   }

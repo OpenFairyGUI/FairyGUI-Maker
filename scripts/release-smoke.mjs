@@ -186,12 +186,23 @@ try {
   if (!status.ok) throw new Error(await status.text())
   const home = await fetch(origin, { headers })
   if (!home.ok || !(await home.text()).includes("FairyGUI Workbench")) throw new Error("Installed Host did not serve the Workbench")
+  for (const mode of ["viewer", "player"]) {
+    const entry = await fetch(`${origin}/${mode}-runtime.html`)
+    if (!entry.ok || !entry.headers.get("content-security-policy")?.includes("sandbox allow-scripts;")) throw new Error("Installed runtime entry is not sandboxed")
+  }
+  const workerFiles = (await readdir(path.join(installedRoot, "dist", "web", "assets"))).filter((name) => /^image-probe\.worker-.*\.js$/.test(name))
+  if (!workerFiles.length) throw new Error("Installed image probe worker is missing")
+  for (const name of workerFiles) {
+    const response = await fetch(`${origin}/assets/${name}`, { headers: { Origin: "null" } })
+    if (!response.ok || response.headers.get("access-control-allow-origin") !== "*") throw new Error("Installed runtime assets are not anonymously readable")
+  }
+  if ((await fetch(`${origin}/api/status`, { headers: { ...headers, Origin: "null" } })).status !== 403) throw new Error("Installed Host accepts opaque-origin API access")
   const toolNames = await initializeMcp(origin, token, importedDirectory)
   if (!toolNames.includes("list_viewer_components") || !toolNames.some((name) => name.startsWith("openfairygui_backend_"))) {
     throw new Error("Installed Host MCP tool surface is incomplete")
   }
   if ([token, approvalToken].some((secret) => stdout.includes(secret) || stderr.includes(secret))) throw new Error("Installed Host exposed a configured token in process output")
-  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), version: version.stdout.trim(), host: true, mcp: true, saveGrants: true }) + "\n")
+  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), version: version.stdout.trim(), host: true, mcp: true, saveGrants: true, runtimeIsolation: true }) + "\n")
 } finally {
   if (host && host.exitCode === null) {
     const exited = new Promise((resolve) => host.once("exit", resolve))

@@ -1,7 +1,7 @@
 import type { UamAssetResource, UamComponentResource } from "@openfairygui/core"
 import type { PlayerRenderSource } from "./artifact-protocol"
 
-export const VIEWER_PROTOCOL_VERSION = 5
+export const VIEWER_PROTOCOL_VERSION = 6
 export const MAX_RENDERER_INTERACTION_BYTES = 64 * 1024
 
 export type ViewerComponent = {
@@ -55,6 +55,8 @@ export type ViewerConnectMessage = {
   type: "fairygui.viewer.connect"
   protocolVersion: typeof VIEWER_PROTOCOL_VERSION
   sourceRevision: string
+  nonce: string
+  imageProbeWorker: string
 }
 
 export type ViewerCommand = { expectedRuntimeEventSeq?: number } & (
@@ -207,4 +209,7 @@ export function isViewerConnectMessage(value: unknown): value is ViewerConnectMe
   return message?.type === "fairygui.viewer.connect"
     && message.protocolVersion === VIEWER_PROTOCOL_VERSION
     && typeof message.sourceRevision === "string"
+    && message.sourceRevision.length > 0 && message.sourceRevision.length <= 128
+    && typeof message.nonce === "string" && /^[a-f0-9-]{36}$/.test(message.nonce)
+    && typeof message.imageProbeWorker === "string" && message.imageProbeWorker.length > 0 && message.imageProbeWorker.length <= 256 * 1024
 }

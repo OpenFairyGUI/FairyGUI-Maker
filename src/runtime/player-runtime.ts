@@ -1,8 +1,9 @@
 import type { ArtifactManifest, ArtifactPackage, PlayerRenderSource } from "../artifact-protocol"
-import { installResourceLoadBudget, loadRuntimeTexture, reserveImage } from "./image-budget"
-import { checkBudget, checkImageDimensions, checkRuntimeMetadata, decompressFuiIfNeeded, ObservationBudget, readBoundedStream, ResourceBudget, RUNTIME_LIMITS } from "./resource-budget"
+import { installResourceLoadBudget, loadRuntimeTexture, reserveImage, setImageProbeWorker } from "./image-budget"
+import { acceptRuntimeConnection } from "../runtime-channel"
+import { disableRuntimeStorage, nextRuntimeFrame } from "./platform"
+import { checkBudget, checkImageDimensions, checkRuntimeMetadata, decompressFuiIfNeeded, ObservationBudget, ResourceBudget, RUNTIME_LIMITS } from "./resource-budget"
 import {
-  isViewerConnectMessage,
   type ViewerCommand,
   type ViewerControlKind,
   type ViewerInteractionEvent,
@@ -39,36 +40,17 @@ const runtime = {
   height: Math.max(1, innerHeight),
 }
 
-let bootPromise: Promise<void> | null = null
 let commandQueue = Promise.resolve()
-let connectionSequence = 0
 window.addEventListener("pagehide", () => runtime.loading.abort())
 
-window.addEventListener("message", (event: MessageEvent<unknown>) => {
-  const ping = event.data as { type?: string; nonce?: string } | null
-  if (event.origin === location.origin && ping?.type === "fairygui.player.ping" && typeof ping.nonce === "string") {
-    event.source?.postMessage({ type: "fairygui.player.pong", nonce: ping.nonce }, { targetOrigin: event.origin })
-    return
-  }
-  if (event.origin !== location.origin || !isViewerConnectMessage(event.data) || event.ports.length !== 1) return
-  void connect(event.data.sourceRevision, event.ports[0])
-})
+acceptRuntimeConnection(connect)
 
-async function connect(sourceRevision: string, port: MessagePort) {
-  const sequence = ++connectionSequence
+async function connect(sourceRevision: string, port: MessagePort, imageProbeWorker: string) {
   try {
-    await (bootPromise ??= boot())
-    if (sequence !== connectionSequence) { port.close(); return }
-    runtime.port?.close()
-    runtime.port = null
-    runtime.loading.abort()
-    await commandQueue
-    if (sequence !== connectionSequence) { port.close(); return }
-    resetArtifact()
+    setImageProbeWorker(imageProbeWorker)
+    await boot()
     runtime.port = port
     runtime.sourceRevision = sourceRevision
-    runtime.interactionSeq = 0
-    commandQueue = Promise.resolve()
     port.onmessage = (event: MessageEvent<ViewerCommand>) => {
       commandQueue = commandQueue.then(() => runtime.port === port ? handleCommand(event.data) : undefined)
     }
@@ -92,6 +74,7 @@ async function boot() {
   }
   Object.assign(Laya.PlayerConfig, { resolution })
   Object.assign(Laya.Config, { FPS: 60, isAntialias: true, useRetinalCanvas: false, isAlpha: false })
+  disableRuntimeStorage()
   await Laya.init(resolution)
   if (!fgui.GRoot.inst.displayObject.parent) Laya.stage.addChild(fgui.GRoot.inst.displayObject)
   installResourceLoadBudget(runtime.loaderUrls, runtime.imageUrls)
@@ -137,7 +120,7 @@ async function handleCommand(command: ViewerCommand) {
         checkRuntimeMetadata(command.operations)
         const budget = new ObservationBudget()
         const observations = command.operations.map((operation) => applyOperation(operation, budget))
-        await nextFrame()
+        await nextRuntimeFrame()
         respond(command.requestId, { observations, observation: createObservation(budget) })
         return
       }
@@ -164,7 +147,7 @@ async function handleCommand(command: ViewerCommand) {
 async function renderArtifact(source: PlayerRenderSource): Promise<ViewerRendered> {
   validateSource(source)
   if (runtime.artifactId !== source.artifact.artifactId || runtime.sourceRevision !== source.artifact.digest) {
-    await loadArtifact(source.artifact)
+    await loadArtifact(source.artifact, source.files)
   }
   clearCurrent()
   const pkgSpec = source.artifact.packages.find(({ packageId }) => packageId === source.packageId)
@@ -180,7 +163,7 @@ async function renderArtifact(source: PlayerRenderSource): Promise<ViewerRendere
   fgui.GRoot.inst.addChild(current)
   indexObjects(current, `/${pkgSpec.packageId}/${componentSpec.id}`)
   layoutCurrent()
-  await nextFrame()
+  await nextRuntimeFrame()
   const observation = createObservation()
   return {
     packageId: pkgSpec.packageId,
@@ -195,17 +178,27 @@ async function renderArtifact(source: PlayerRenderSource): Promise<ViewerRendere
   }
 }
 
-async function loadArtifact(artifact: ArtifactManifest) {
+async function loadArtifact(artifact: ArtifactManifest, files: PlayerRenderSource["files"]) {
   if (artifact.runtimeProfile !== "layaair-3.3.10/fairygui") throw new Error(`Player 不支持 runtime profile：${artifact.runtimeProfile}`)
   resetArtifact()
   for (const file of artifact.files) runtime.budget.encoded(file.size)
+  if (!Array.isArray(files) || files.length !== artifact.files.length) throw new Error("Player requires parent-transferred Artifact files")
+  const bytesByPath = new Map(files.map(({ path, data }) => [path, data]))
+  if (bytesByPath.size !== files.length) throw new Error("Duplicate Artifact bytes")
+  const readFile = (path: string) => {
+    const file = artifact.files.find((file) => file.path === path)
+    const data = bytesByPath.get(path)
+    if (!file || !(data instanceof ArrayBuffer) || data.byteLength !== file.size) throw new Error(`Artifact file size mismatch: ${path}`)
+    return new Uint8Array(data)
+  }
+  for (const file of artifact.files) readFile(file.path)
   let inflatedBytes = 0
   let packageItems = 0
   const metadataBudget = new ObservationBudget()
   for (const pkg of sortPackages(artifact.packages)) {
     const binaryUrl = artifactFileUrl(artifact.artifactId, pkg.binaryPath)
     const signal = AbortSignal.any([runtime.loading.signal, AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
-    const bytes = await decompressFuiIfNeeded(await fetchArtifactFile(artifact, pkg.binaryPath, signal), signal, RUNTIME_LIMITS.inflatedBytes - inflatedBytes)
+    const bytes = await decompressFuiIfNeeded(readFile(pkg.binaryPath), signal, RUNTIME_LIMITS.inflatedBytes - inflatedBytes)
     inflatedBytes += bytes.byteLength
     packageItems += validatePackageMetadata(bytes, metadataBudget)
     checkBudget(packageItems, RUNTIME_LIMITS.nodes, "package_items")
@@ -213,20 +206,19 @@ async function loadArtifact(artifact: ArtifactManifest) {
     runtime.packageIds.push(loaded.id)
     if (loaded.id !== pkg.packageId || loaded.name !== pkg.packageName) throw new Error(`FairyGUI 包身份不匹配：${pkg.binaryPath}`)
   }
-  await preloadArtifactFiles(artifact)
+  await preloadArtifactFiles(artifact, readFile)
   runtime.artifactId = artifact.artifactId
   runtime.manifest = artifact
 }
 
-async function preloadArtifactFiles(artifact: ArtifactManifest) {
+async function preloadArtifactFiles(artifact: ArtifactManifest, readFile: (path: string) => Uint8Array<ArrayBuffer>) {
   for (const file of artifact.files) {
     if (/(?:\.fui|_fui\.bytes)$/i.test(file.path)) continue
     const url = artifactFileUrl(artifact.artifactId, file.path)
     runtime.loaderUrls.add(url)
-    // ponytail: PCM/audio duration is not a batch-11 budget; leave decoding to native playback.
-    if (file.mimeType.startsWith("audio/")) continue
     const signal = AbortSignal.any([runtime.loading.signal, AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
-    const bytes = await fetchArtifactFile(artifact, file.path, signal)
+    signal.throwIfAborted()
+    const bytes = readFile(file.path)
     if (file.mimeType.startsWith("image/")) {
       const image = await reserveImage(bytes.buffer, file.mimeType, runtime.budget, signal)
       const blobUrl = URL.createObjectURL(new Blob([image.data], { type: file.mimeType }))
@@ -236,6 +228,16 @@ async function preloadArtifactFiles(artifact: ArtifactManifest) {
       runtime.imageUrls.add(url)
       const texture = await loadRuntimeTexture(blobUrl, signal)
       Laya.loader.cacheRes(url, texture)
+    } else if (file.mimeType.startsWith("audio/")) {
+      // ponytail: native audio decoding still has no PCM/duration budget (batch 11).
+      const blobUrl = URL.createObjectURL(new Blob([bytes], { type: file.mimeType }))
+      runtime.blobUrls.push(blobUrl)
+      runtime.loaderUrls.add(blobUrl)
+      for (const packageId of runtime.packageIds) {
+        for (const item of fgui.UIPackage.getById(packageId).getItems()) {
+          if (item.file === url) item.file = blobUrl
+        }
+      }
     } else {
       Laya.loader.cacheRes(url, bytes.buffer)
     }
@@ -268,17 +270,6 @@ function validatePackageMetadata(bytes: Uint8Array<ArrayBuffer>, budget: Observa
   const items = buffer.getInt16()
   checkBudget(items, RUNTIME_LIMITS.nodes, "package_items")
   return items
-}
-
-async function fetchArtifactFile(artifact: ArtifactManifest, path: string, signal: AbortSignal) {
-  const file = artifact.files.find((file) => file.path === path)
-  if (!file) throw new Error(`Artifact file is not declared: ${path}`)
-  checkBudget(file.size, RUNTIME_LIMITS.fileBytes, "file_bytes")
-  const response = await fetch(artifactFileUrl(artifact.artifactId, path), { signal })
-  if (!response.ok || !response.body) throw new Error(`读取 Artifact 失败：${path} (${response.status})`)
-  const bytes = await readBoundedStream(response.body, file.size, signal)
-  if (bytes.byteLength !== file.size) throw new Error(`Artifact file size mismatch: ${path}`)
-  return bytes
 }
 
 function sortPackages(packages: ArtifactPackage[]) {
@@ -592,7 +583,8 @@ function layoutCurrent() {
 }
 
 function artifactFileUrl(artifactId: string, filePath: string) {
-  return `/api/artifacts/${encodeURIComponent(artifactId)}/files/${filePath.split("/").map(encodeURIComponent).join("/")}`
+  // Virtual cache keys only, never authenticated Host URLs.
+  return `/runtime-artifact/${encodeURIComponent(artifactId)}/${filePath.split("/").map(encodeURIComponent).join("/")}`
 }
 
 function respond(requestId: string, value?: unknown, error?: string) {
@@ -601,10 +593,6 @@ function respond(requestId: string, value?: unknown, error?: string) {
 
 function post(message: ViewerRuntimeMessage) {
   runtime.port?.postMessage(message)
-}
-
-function nextFrame() {
-  return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
 }
 
 function number(value: unknown) {

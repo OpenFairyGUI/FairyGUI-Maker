@@ -62,7 +62,7 @@ FairyGUI 视觉渲染发生在真实浏览器环境中。Workbench 不在 Node �
 
 Player 使用另一份 iframe runtime。Dashboard 或 Player 页由用户显式选择一个发布目录，浏览器只在本次导入中读取文件并上传给 Host；目录句柄不持久化，Host 也不获得源目录写权限。Host 校验安全相对路径、文件数和容量、`.fui` / `_fui.bytes` magic、包 ID、依赖与组件目录，为每个文件计算 SHA-256，并按整体 digest 固化到本地 Artifact Store。源目录之后发生变化不会修改既有 Artifact。
 
-Player 按 `artifactId + digest` 读取 manifest，预加载图集，再以原生 `fgui.UIPackage` 注册包并创建组件；不经过 Viewer 的 UAM renderer。Player 与 Viewer 共用 Host Broker、Renderer 交付循环、MessageChannel envelope、白名单 operation、observation 和 capture 契约。
+Player 的父页面按 `artifactId + digest` 读取 manifest 和资源，校验大小与 SHA-256 后通过 MessageChannel 转移字节；iframe 预加载图集，再以原生 `fgui.UIPackage` 注册包并创建组件，不直接请求 Host 文件 API，也不经过 Viewer 的 UAM renderer。Player 与 Viewer 共用 Host Broker、Renderer 交付循环、MessageChannel envelope、白名单 operation、observation 和 capture 契约。
 
 Agent 不直接操作 iframe 或 Canvas。它只向 Host 提交语义命令，并读取结构化观察结果。
 
@@ -78,7 +78,7 @@ Agent 不直接操作 iframe 或 Canvas。它只向 Host 提交语义命令，�
 | 交互语义 | Maker 解释 UAM Controller/Gear/Transition 与常用控件 | 发布 runtime 执行原生 Controller/Gear/Transition 与控件行为 |
 | 持久化 | 工程和临时运行态都不写回；session 仅 Host 内存 | Artifact 内容寻址并持久化；session 仍仅 Host 内存 |
 
-当前共享协议为 v5，分成两层：Host 与 Workbench 页面通过 `/api/renderers`、命令长轮询、结果 ACK 和 interaction 上报通信；Renderer 与 iframe 通过同源校验后的 `MessageChannel` 通信。Host 命令统一为 `render / update / view / observe / capture`，Renderer 再分别转换为 Viewer 的 `render` 或 Player 的 `render-artifact`，因此共享控制面不会把两种 renderer 混为一套。Workbench 不持有可直接修改 iframe 的 FrameSession。
+当前共享协议为 v6，分成两层：Host 与 Workbench 页面通过 `/api/renderers`、命令长轮询、结果 ACK 和 interaction 上报通信；Renderer 与不透明源 iframe 通过绑定父窗口、来源和一次性 nonce 的 `MessageChannel` 通信。Host 命令统一为 `render / update / view / observe / capture`，Renderer 再分别转换为 Viewer 的 `render` 或 Player 的 `render-artifact`，因此共享控制面不会把两种 renderer 混为一套。Workbench 控件不持有可直接修改 iframe 的 FrameSession。
 
 对应实现边界：`src/web/lib/viewer.ts` 与 `src/runtime/viewer-runtime.ts` 负责工程态；`src/web/lib/player.ts`、`src/runtime/player-runtime.ts` 与 `src/server/artifacts.ts` 负责发布态；`src/server/viewer.ts` 只负责两者共用的 Render Session Broker 和 MCP 工具。
 
@@ -139,7 +139,7 @@ PNG 在任何解码器运行前检查 IHDR；PNG/JPEG 的完整校验复用 Core
 
 Player 仍使用原生 `UIPackage`，在工厂、组件构造与纹理创建边界计数；不另写一套 FUI 组件解析器，也不改动冻结的 vendor 文件。构造失败会恢复原生 constructing 计数并回收部分实例。Observation 超限明确失败，不截断、更不把不完整树伪装为完整结果；批量 operation 的子结果与末尾 observation 共用同一预算。
 
-这些是输入与资源句柄预算，不是浏览器进程的硬内存沙箱：纹理估算不含驱动/mipmap/字体排版等额外开销；音频不再预解码，PCM 时长预算和组件级按需资源闭包仍未实现。ACK/outbox 由批次 12 提供，Broker 状态统一见批次 13；iframe 权限隔离继续留在后续批次。
+这些是输入与资源句柄预算，不是浏览器进程的硬内存沙箱：纹理估算不含驱动/mipmap/字体排版等额外开销；音频不再预解码，PCM 时长预算和组件级按需资源闭包仍未实现。ACK/outbox 由批次 12 提供，Broker 状态统一见批次 13；iframe 权限隔离见批次 16。
 
 验证：`test/runtime-budget.test.ts` 覆盖压缩炸弹、绝对/累计输出限制、流中断/超时/块数、图像尺寸、纹理、节点、Observation 与稀疏元数据；`pnpm test:browser` 中的 `scripts/runtime-budget-smoke.ts` 验证真实 Viewer/Player 的超深/展开超量场景、巨型 PNG/SVG、MovieClip 与原生 atlas 子纹理上限、正常 PNG/JPEG/WebP/SVG、Observation 拒绝、重连后的迟到解码回收及 Artifact A→B→正常场景的缓存释放。
 
@@ -253,9 +253,25 @@ X-Maker-Approval-Token: <owner-only credential>
 
 `view <path>` 不注册 backend 写工具，也不能批准保存。现有 CLI/Import Draft 向**尚不存在的新目录**物化的工作流保持原边界，不被解释成已有工程的保存授权。当前 MCP 没有 `restore` 或独立的落盘 delete/move 工具；将来开放前必须先接入同一授权策略，不能直接注册。内存中的资源删除/移动会在本次授权保存时落盘，因此界面明确提示覆盖和删除风险。
 
-此边界约束只持有 Maker API 凭证的客户端，不是针对可读 Host 进程环境/终端或可直接写工程的本机进程的 OS 沙箱；同源 runtime iframe/XSS 权限隔离仍由后续批次处理。使用指南同步要求 Agent 等待所有者确认，不读取确认密钥或绕到文件系统自行写盘。
+此边界约束只持有 Maker API 凭证的客户端，不是针对可读 Host 进程环境/终端或可直接写工程的本机进程的 OS 沙箱；runtime iframe 权限隔离见批次 16，Workbench 自身的 XSS 不因此获得隔离。使用指南同步要求 Agent 等待所有者确认，不读取确认密钥或绕到文件系统自行写盘。
 
 验证：`test/save-grants.test.ts` 验证真实 HTTP/MCP 的拒绝、独立凭证、写盘、force/materialize、并发一次性、旧 revision、后端排队 CAS、目标策略、失败消耗、关闭重开、过期、撤销、容量和只读模式；`scripts/save-grant-smoke.ts` 在 Chromium 里操作真实 Dashboard 的密码输入、批准/拒绝/撤销、刷新及状态回显，并验证确认前磁盘不变、确认后真实写盘。原有 Renderer、预算、FIG 视觉与快照回归继续执行。
+
+### 2.11 Iframe 隔离（批次 16）
+
+Viewer 与 Player 均使用 `sandbox="allow-scripts"`，不再授予 `allow-same-origin`，并启用 `credentialless`，使 iframe 导航与子资源请求也不携带 Host Cookie。Host 对两个 runtime HTML 额外返回 CSP `sandbox allow-scripts`，因此直接打开 runtime URL、父页面移除 iframe 属性也不会恢复 Host 同源权限。Runtime 无法访问父页面 DOM、Cookie、Storage、IndexedDB 中的目录句柄，也不能打开弹窗或导航顶层页面。`credentialless` 不受支持时明确停止连接，不退回带凭证 iframe；当前 Chrome/Edge 基线支持该能力，参见 [Chromium 的说明](https://developer.chrome.com/blog/iframe-credentialless)。
+
+保留单个 Host 端口，采用浏览器原生的不透明源隔离，而不是新增第二个带权限的服务。Cookie 本身不按端口隔离，单纯换到另一个 `127.0.0.1` 端口并不足够，参见 [HTTP Cookie 规范](https://httpwg.org/http-extensions/draft-ietf-httpbis-rfc6265bis.html#section-8.5)。这不是浏览器进程或操作系统沙箱，不限制已获本机文件权限的程序。
+
+- **握手**：每次连接导航到新 Document，URL fragment 带随机 nonce。父页面只接受该 Window 的 `origin: "null"` 和匹配 nonce 的 pong；runtime 只接受 `event.source === parent`、固定父来源、协议 v6、匹配 nonce 和唯一 MessagePort。首次连接同步锁定，错误 nonce、兄弟窗口、旧文档 nonce 和重放不能替换端口。对不透明源发送时必须用 `targetOrigin: "*"`，身份验证不能省略。nonce 不是 Host 凭证。
+- **资源**：Viewer 继续转移选中组件闭包的 ArrayBuffer；Player 父页面先检查文件数、单文件 128 MiB、总编码 256 MiB 预算，再逐文件有界读取、校验大小和 SHA-256、禁止重定向并支持取消，首次成功加载后同一 Artifact 不重复转移。失败后的下一次 render 重新加载。runtime 只使用虚拟缓存键和自身创建的 Blob URL；原生包音频文件也映射到 Blob，不恢复 Host URL 读取。
+- **图片 Worker**：父页面读取安装包内的受信任 Worker 代码（最多 256 KiB），随连接传入；runtime 用原生 Blob Worker 验证图片，并在成功、失败或取消时终止 Worker、由创建方撤销 URL。既不在 iframe 内请求 Host，也不依赖不透明源 Worker 撤销父方 URL。
+- **网络与主动内容**：runtime CSP 只允许安装包脚本、Blob/data 图片和字体、Blob 音频/Worker/连接，禁止 Host/API 网络连接、表单与外部 frame/object。仅启动时枚举的构建文件和三个固定供应商脚本可匿名 CORS 读取，不开放 Source/Artifact/MCP/审批 API；runtime 入口不执行 token-to-Cookie bootstrap。受保护路由拒绝 `Origin: null` 和浏览器 cross-site/same-site Fetch Metadata 请求，CLI 无该请求头时仍需 Bearer。Source 与 Artifact 文件统一返回 octet-stream、attachment、nosniff、`default-src 'none'; sandbox`，HTML/SVG/JS 导航只能下载。
+- **兼容**：通过 Laya 现有 PAL 接口禁用 runtime 持久存储，不替换浏览器真实 Storage API。跨源 iframe 不可见时 Chromium 会暂停 rAF，命令采用 50ms 定时回退，不阻塞离屏 render/update/capture；截图仍调用实际 `drawToCanvas`，不承诺隐藏动画已 settle。刷新/重连始终新建文档与 nonce，旧协议页需要刷新。
+
+安全验收针对 `pnpm build` 后由 Maker Host 提供的页面；Vite `dev:web` 是可信源码 UI 调试入口，不作为隔离或真实导入预览的验收服务。不要为了开发调试放宽 Host 的 Origin、CORS 或 sandbox 策略。
+
+验证：`test/runtime-isolation.test.ts` 覆盖匿名静态白名单、API 认证/空来源/跨站拒绝、主动内容响应头、资源预算/摘要/取消。`scripts/runtime-isolation-smoke.ts` 和更新后的预算烟测使用真实 Chromium iframe，验证父 DOM/凭证/目录能力不可达、Host 请求与写请求被阻断、错误/旧 nonce 与兄弟窗口/重放拒绝、直接打开 runtime 仍为沙箱、主动上传仅下载，以及图片 Worker 回收、图集、音频 Blob 和离屏截图。原有 FIG golden、Broker 状态、交付故障、Revision 与 Host Save Grant 回归继续执行。
 
 ## 3. 核心领域契约
 

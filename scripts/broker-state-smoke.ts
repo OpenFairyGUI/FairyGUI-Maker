@@ -22,7 +22,7 @@ export async function brokerStateSmoke(page: Page, mode: "viewer" | "player", id
   assert.equal(background.viewStateVersion, zoom.viewStateVersion + 1)
   const view = await call("set_render_view", { renderSessionId: id, requestId: randomUUID(), expectedViewStateVersion: background.viewStateVersion, view: { zoom: 1 } })
   await page.getByText("100%", { exact: true }).waitFor()
-  const frame = page.frames().find((frame) => frame.url().endsWith(`/${mode}-runtime.html`))!
+  const frame = page.frames().find((frame) => new URL(frame.url()).pathname === `/${mode}-runtime.html`)!
   assert.equal(await frame.evaluate("Laya.stage.bgColor"), "#f4f4f5")
 
   // Hold a real Workbench command while an Agent changes the view. No overwrite/retry after 409.

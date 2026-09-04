@@ -15,6 +15,8 @@ import {
 import { registerPlayerRenderer } from "./api"
 import { startRendererDelivery } from "./renderer-delivery"
 import { createRenderSessionClient, type RenderSessionClient } from "./render-session"
+import { prepareRuntimeFrame } from "../../runtime-channel"
+import { checkBudget, readBoundedStream, ResourceBudget, RUNTIME_LIMITS } from "../../runtime/resource-budget"
 
 type PlayerFrameSession = {
   render(packageId: string, componentId: string, expectedRuntimeEventSeq?: number): Promise<ViewerRendered & { runtimeEventSeq: number }>
@@ -26,9 +28,12 @@ type PlayerFrameSession = {
   destroy(): void
 }
 
-async function connectPlayerFrame(frame: HTMLIFrameElement, artifact: ArtifactManifest): Promise<PlayerFrameSession> {
+async function connectPlayerFrame(frame: HTMLIFrameElement, artifact: ArtifactManifest, signal: AbortSignal): Promise<PlayerFrameSession> {
   if (!frame.contentWindow) throw new Error("Player iframe 尚未就绪。")
-  await waitForPlayerRuntime(frame)
+  const connection = await prepareRuntimeFrame(frame, signal)
+  const loading = new AbortController()
+  const lifetime = AbortSignal.any([signal, loading.signal])
+  let loaded = false
   const channel = new MessageChannel()
   const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timeout: number }>()
   let interactionHandler: ((event: ViewerInteractionEvent) => void) | null = null
@@ -56,21 +61,35 @@ async function connectPlayerFrame(frame: HTMLIFrameElement, artifact: ArtifactMa
     else request.reject(new Error(message.error))
   }
   channel.port1.start()
-  const connectMessage: ViewerConnectMessage = { type: "fairygui.viewer.connect", protocolVersion: VIEWER_PROTOCOL_VERSION, sourceRevision: artifact.digest }
-  frame.contentWindow.postMessage(connectMessage, location.origin, [channel.port2])
-  await ready
+  const connectMessage: ViewerConnectMessage = { type: "fairygui.viewer.connect", protocolVersion: VIEWER_PROTOCOL_VERSION, sourceRevision: artifact.digest, ...connection }
+  const abortReady = () => rejectReady(signal.reason)
+  signal.addEventListener("abort", abortReady, { once: true })
+  try {
+    signal.throwIfAborted()
+    frame.contentWindow.postMessage(connectMessage, "*", [channel.port2])
+    await ready
+  } catch (error) { channel.port1.close(); channel.port2.close(); throw error }
+  finally { window.clearTimeout(readyTimeout); signal.removeEventListener("abort", abortReady) }
 
-  const send = <T>(command: PlayerCommandInput): Promise<T> => {
+  const send = <T>(command: PlayerCommandInput, transfer: Transferable[] = []): Promise<T> => {
     const requestId = crypto.randomUUID()
     return new Promise<T>((resolve, reject) => {
       const timeout = window.setTimeout(() => { pending.delete(requestId); reject(new Error(`Player runtime command timed out: ${command.kind}`)) }, 30_000)
       pending.set(requestId, { resolve: resolve as (value: unknown) => void, reject, timeout })
-      channel.port1.postMessage({ ...command, requestId } as ViewerCommand)
+      channel.port1.postMessage({ ...command, requestId } as ViewerCommand, transfer)
     })
   }
 
   return {
-    render: (packageId, componentId, expectedRuntimeEventSeq) => send<ViewerRendered & { runtimeEventSeq: number }>({ kind: "render-artifact", source: { artifact, packageId, componentId }, expectedRuntimeEventSeq }),
+    async render(packageId, componentId, expectedRuntimeEventSeq) {
+      try {
+        const files = loaded ? undefined : await readArtifactFiles(artifact, lifetime)
+        lifetime.throwIfAborted()
+        const result = await send<ViewerRendered & { runtimeEventSeq: number }>({ kind: "render-artifact", source: { artifact, packageId, componentId, files }, expectedRuntimeEventSeq }, files?.map(({ data }) => data))
+        loaded = true
+        return result
+      } catch (error) { loaded = false; throw error }
+    },
     async capture() {
       const value = await send<{ data: ArrayBuffer; type: string; runtimeEventSeq: number; observation?: ViewerObservation }>({ kind: "capture" })
       return { blob: new Blob([value.data], { type: value.type }), runtimeEventSeq: value.runtimeEventSeq, observation: value.observation }
@@ -80,6 +99,7 @@ async function connectPlayerFrame(frame: HTMLIFrameElement, artifact: ArtifactMa
     applyOperations: (operations, expectedRuntimeEventSeq) => send<Record<string, unknown>>({ kind: "apply-operations", operations, expectedRuntimeEventSeq }),
     setInteractionHandler(handler) { interactionHandler = handler },
     destroy() {
+      loading.abort()
       window.clearTimeout(readyTimeout)
       for (const request of pending.values()) { window.clearTimeout(request.timeout); request.reject(new Error("Player runtime session closed.")) }
       pending.clear()
@@ -88,28 +108,28 @@ async function connectPlayerFrame(frame: HTMLIFrameElement, artifact: ArtifactMa
   }
 }
 
-async function waitForPlayerRuntime(frame: HTMLIFrameElement) {
-  const target = frame.contentWindow
-  if (!target) throw new Error("Player iframe 尚未就绪。")
-  const nonce = crypto.randomUUID()
-  await new Promise<void>((resolve, reject) => {
-    const onMessage = (event: MessageEvent<unknown>) => {
-      const message = event.data as { type?: string; nonce?: string } | null
-      if (event.origin !== location.origin || event.source !== target || message?.type !== "fairygui.player.pong" || message.nonce !== nonce) return
-      cleanup()
-      resolve()
-    }
-    const ping = () => target.postMessage({ type: "fairygui.player.ping", nonce }, location.origin)
-    const interval = window.setInterval(ping, 100)
-    const timeout = window.setTimeout(() => { cleanup(); reject(new Error("Player runtime 页面加载超时。")) }, 20_000)
-    const cleanup = () => { window.clearInterval(interval); window.clearTimeout(timeout); window.removeEventListener("message", onMessage) }
-    window.addEventListener("message", onMessage)
-    ping()
-  })
+export async function readArtifactFiles(artifact: ArtifactManifest, lifetime: AbortSignal) {
+  checkBudget(artifact.files.length, RUNTIME_LIMITS.nodes, "artifact_files")
+  const budget = new ResourceBudget()
+  for (const file of artifact.files) budget.encoded(file.size)
+  const files: Array<{ path: string; data: ArrayBuffer }> = []
+  for (const file of artifact.files) {
+    lifetime.throwIfAborted()
+    const signal = AbortSignal.any([lifetime, AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
+    const path = file.path.split("/").map(encodeURIComponent).join("/")
+    const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifactId)}/files/${path}`, { signal, redirect: "error" })
+    if (!response.ok || !response.body) throw new Error(`读取 Artifact 失败：${file.path} (${response.status})`)
+    const bytes = await readBoundedStream(response.body, file.size, signal)
+    if (bytes.byteLength !== file.size) throw new Error(`Artifact file size mismatch: ${file.path}`)
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))
+    if (Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("") !== file.sha256) throw new Error(`Artifact file digest mismatch: ${file.path}`)
+    files.push({ path: file.path, data: bytes.buffer })
+  }
+  return files
 }
 
 export async function startPlayerRenderer(artifact: ArtifactManifest, iframe: HTMLIFrameElement, onState: (state: RenderSessionState) => void, onError: (error: Error) => void, signal: AbortSignal) {
-  const frame = await connectPlayerFrame(iframe, artifact)
+  const frame = await connectPlayerFrame(iframe, artifact, signal)
   if (signal.aborted) { frame.destroy(); signal.throwIfAborted() }
   signal.addEventListener("abort", () => frame.destroy(), { once: true })
   let client: RenderSessionClient | undefined

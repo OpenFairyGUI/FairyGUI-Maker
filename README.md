@@ -82,6 +82,8 @@ Agent 的 `save_session` / `materialize_session` 必须携带 `expectedRevision`
 
 ## Agent 与 MCP
 
+Viewer/Player 使用不透明源 iframe：不能访问 Workbench DOM、Cookie、目录句柄或 Host API；资源由父页面校验后通过一次性 nonce 绑定的 MessageChannel 传入。主动上传的 HTML/SVG/JS 只作为文件下载。完整边界与限制见 [Iframe 隔离](./docs/workbench.md#211-iframe-隔离批次-16)。
+
 MCP 客户端连接 `/mcp` 时需要发送：
 
 ```text
@@ -201,7 +203,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 |---|---|
 | Node.js | `>=22.18`；CI 覆盖 Node 22 与 24 |
 | OpenFairyGUI | `@openfairygui/core/backend/mcp` `0.3.1` |
-| MCP | Streamable HTTP；Viewer protocol v5 |
+| MCP | Streamable HTTP；Viewer protocol v6 |
 | Viewer / Player runtime | 冻结的 LayaAir 3.3.10 + FairyGUI Web runtime |
 | 浏览器 | 当前稳定版 Chrome 与 Edge；自动门禁使用 Chromium |
 
@@ -217,12 +219,13 @@ pnpm build
 pnpm test
 ```
 
-`pnpm build` 执行 TypeScript 检查，并分别构建 React Workbench 与可直接由 Node.js 运行的 Host。前端和 Host 可分别启动：
+`pnpm build` 执行 TypeScript 检查，并分别构建 React Workbench 与可直接由 Node.js 运行的 Host。完整导入、runtime 隔离与预览使用构建后的 Host 页面（默认端口 3847）；修改构建后重启 Host，以更新静态文件白名单：
 
 ```powershell
-pnpm dev:web
 pnpm dev:host
 ```
+
+`pnpm dev:web` 仅用于可信源码的前端 UI 调试，不代替 Host 的安全响应头和隔离预览验收。
 
 完整发布门禁还会安装真实 npm tarball 并启动其中的 CLI，以及在 Chromium 中验证 Viewer、Player、两张 MCP PNG 和 Import Draft Visual Evidence：
 
