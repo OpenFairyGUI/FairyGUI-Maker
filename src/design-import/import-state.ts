@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { makerImportSha256, type MakerImportSourceV1 } from './bundle';
 import type { ImportDocument, ImportNode } from './model';
+import { FAIRY_COMPILER_VERSION, FAIRY_PLANNER_VERSION } from './plan';
 import { semanticOverlaySchema, type MakerSemanticOverlayV1 } from './semantic-overlay';
 
 export const MAKER_IMPORT_STATE_VERSION = 2 as const;
@@ -48,6 +49,8 @@ export interface MakerImportStateV2 {
   };
   compiler: {
     makerVersion: string;
+    compilerVersion?: string;
+    plannerVersion?: string;
     profileDigest: string;
     overlayDigest: string;
     conversionIds: Record<string, string>;
@@ -141,6 +144,8 @@ export const makerImportStateV2Schema = z.object({
   }).strict(),
   compiler: z.object({
     makerVersion: z.string().min(1).max(128),
+    compilerVersion: z.string().min(1).max(128).optional(),
+    plannerVersion: z.string().min(1).max(128).optional(),
     profileDigest: sha256Schema,
     overlayDigest: sha256Schema,
     conversionIds: z.record(z.string().min(1), fairyIdSchema),
@@ -192,6 +197,8 @@ export async function createMakerImportStateV2(input: {
     },
     compiler: {
       makerVersion: input.makerVersion,
+      compilerVersion: FAIRY_COMPILER_VERSION,
+      plannerVersion: FAIRY_PLANNER_VERSION,
       profileDigest: await digestImportValue(input.profile),
       overlayDigest: await digestImportValue(input.semanticOverlay),
       conversionIds: sortRecord(input.conversionIds),

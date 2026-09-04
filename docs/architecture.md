@@ -76,6 +76,8 @@ Workbench controls -> REST -> same Render Session Broker
 
 Node Host 是项目记录、import draft、render session 和发布产物的所有者。设计源先复制进 data dir；Parse、Plan 和 Compile 只更新带 revision 的 Draft，Materialize 才通过临时目录写入用户指定的新目录。Draft 的 Visual Evidence 复用同页 Viewer Capture，由浏览器原生 Canvas 生成 Pixel Diff，Host 只持久化经过 PNG 尺寸与 revision 校验的 Reference、Capture、Diff 和原始指标；是否接受差异由 fixture 或人工审查决定，不存在全局相似度阈值。Draft 可在 Host 重启后恢复，过期或损坏的 Draft 会在启动时清理。交互式工程绑定仍由浏览器 Project Source Client 按需读取；用户授权的 `FileSystemDirectoryHandle` 只保存在同源浏览器，不发送给 Host、Agent 或 runtime iframe。自动化 `view` 则由 Host 在启动时读取唯一显式目录并保存只读内存快照，Agent 只能按相对路径读取该快照。两种来源都用 `sourceRevision` 绑定 renderer；源 revision 改变后旧 renderer 和 render session 立即失效。Host 重启时重新校验 Artifact manifest、文件大小、SHA-256、整体 digest 和包目录，并清理不能恢复的中断导入目录；不一致的 Artifact 不载入但也不会被自动删除。
 
+批次 18 的 Host/CLI Compiler 接受严格校验的 `FairyBuildPlanV2`：源结构、图片字节和 imageBindings 绑定内容摘要，Planner/Compiler 各有显式版本；诊断从源和当前计划重新计算。首次生成使用分角色的确定性 8 位 ID，重导入优先复用 State v2 的旧映射；旧计划只能显式重建，不能自动套用新源。身份范围、版本兼容与回归证据见 [Workbench 批次 18](./workbench.md#213-确定性-plannercompiler批次-18)。
+
 Viewer 工程绑定固定为只读。浏览器按需读取当前工程，用 OpenFairyGUI UAM 构建所选组件的 `ViewerScene` 依赖闭包，再传给隔离 iframe 直接构造 FairyGUI 对象；这个过程不调用发布流程、不生成 `.fui`、不写回项目目录，也不生成持久 artifact。完整模式下单独存在的 OpenFairyGUI backend session 才能在 revision 检查和明确 save 后写工程。Agent 对 Viewer 的数据驱动只修改 render session 临时状态。
 
 批次 14 将浏览器和 CLI 的快照规则收敛到 `src/project-snapshot.ts`：复用 Core ProjectReader 确定依赖，默认排除隐藏/敏感/构建路径，读取前限制容量，读取后复核字节和目录索引，以内容摘要固定 UAM 与源文件集合。浏览器使用 `POST /api/projects/:id/refresh` 做身份与旧 sourceRevision CAS，再注册新 Renderer；项目移除清理 Host 记录、快照、分析及旧会话，Workbench 清理对应 IndexedDB handle，不触碰源文件。详细限制和非目标见 [Workbench 批次 14](./workbench.md#29-revision-与快照隐私批次-14)。

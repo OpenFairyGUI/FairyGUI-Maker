@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 import { NodeIO } from '@openfairygui/core/node';
 import { readProjectAsUam, writeProjectFromUam } from '@openfairygui/core/uam';
 import { Resvg } from '@resvg/resvg-js';
@@ -32,11 +34,35 @@ test('imports real FIG and PSD files into new validated projects and refuses ove
       const stateBefore = await readFile(join(outputPath, MAKER_IMPORT_STATE), 'utf8');
       const state = JSON.parse(stateBefore);
       assert.equal(state.schemaVersion, 2);
+      assert.equal(state.compiler.compilerVersion, 'deterministic-v1');
+      assert.equal(state.compiler.plannerVersion, 'deterministic-v1');
       assert.equal(state.source.path, sourcePath);
       assert.ok(Object.keys(result.ids).every((nodeId) => state.sourceNodes[nodeId]));
       assert.equal(await access(join(outputPath, ...MAKER_IMPORT_GENERATED_SNAPSHOT.split('/'))).then(() => true, () => false), true);
       await assert.rejects(importDesignSource({ sourcePath, outputPath }), /EEXIST/);
       assert.equal(await readFile(join(outputPath, MAKER_IMPORT_STATE), 'utf8'), stateBefore);
+
+      const repeatedPath = `${outputPath}-fresh-process`;
+      await promisify(execFile)(process.execPath, [
+        '--import', 'tsx', '--input-type=module', '--eval',
+        "import { importDesignSource } from './src/design-import/node.ts'; await importDesignSource({ sourcePath: process.argv[1], outputPath: process.argv[2] });",
+        sourcePath, repeatedPath,
+      ], { env: { ...process.env, LANG: 'tr_TR.UTF-8', TZ: 'Pacific/Honolulu' } });
+      for (const file of await readdir(outputPath, { recursive: true, withFileTypes: true })) {
+        if (!file.isFile()) continue;
+        const filePath = join(file.parentPath, file.name);
+        const repeatedFilePath = join(repeatedPath, relative(outputPath, filePath));
+        assert.deepEqual(await readFile(repeatedFilePath), await readFile(filePath), `Fresh build bytes differ: ${filePath}`);
+      }
+      const before = await planProjectReimport(outputPath);
+      // A pre-batch-18 State v2 has no compiler/planner version fields and remains readable.
+      delete state.compiler.compilerVersion;
+      delete state.compiler.plannerVersion;
+      await writeFile(join(outputPath, MAKER_IMPORT_STATE), JSON.stringify(state));
+      assert.deepEqual(await planProjectReimport(outputPath), before);
+      state.compiler.compilerVersion = 'future';
+      await writeFile(join(outputPath, MAKER_IMPORT_STATE), JSON.stringify(state));
+      await assert.rejects(planProjectReimport(outputPath), /Planner\/Compiler version/);
     }
   } finally {
     await rm(parent, { recursive: true, force: true });

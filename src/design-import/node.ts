@@ -25,7 +25,7 @@ import {
   type ReimportPlanV1,
 } from './import-state';
 import type { ImportDocument, ImportNode } from './model';
-import { planDocument } from './plan';
+import { FAIRY_COMPILER_VERSION, FAIRY_PLANNER_VERSION, planDocument } from './plan';
 import { parsePsdFile } from './psd-file';
 import {
   assertSemanticTarget,
@@ -219,6 +219,10 @@ export async function planProjectReimport(projectPath: string): Promise<Reimport
   if (state.compiler.makerVersion !== MAKER_VERSION) {
     throw new Error(`Reimport requires Maker ${state.compiler.makerVersion}; current version is ${MAKER_VERSION}`);
   }
+  if ((state.compiler.compilerVersion && state.compiler.compilerVersion !== FAIRY_COMPILER_VERSION)
+    || (state.compiler.plannerVersion && state.compiler.plannerVersion !== FAIRY_PLANNER_VERSION)) {
+    throw new Error('Reimport Planner/Compiler version does not match import state');
+  }
 
   const snapshotPath = join(projectDirectory, ...state.generatedSnapshotPath.split('/'));
   const snapshotStat = await lstat(snapshotPath).catch(() => null);
@@ -250,7 +254,7 @@ export async function planProjectReimport(projectPath: string): Promise<Reimport
     throw new Error('Reimport source does not match the imported document');
   }
   const { overlay, conflicts } = mergeManualOverlay(parsed.document, snapshot.semanticOverlay);
-  const plan = planDocument(parsed.document, { semanticOverlay: overlay });
+  const plan = planDocument(parsed.document, { semanticOverlay: overlay, imageBindings: parsed.imageBindings });
   const proposed = compilePlanToUam(parsed.document, plan, state.compiler.conversionIds, parsed.imageBindings);
   return createReimportPlanV1({
     projectDirectory,

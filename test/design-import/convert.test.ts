@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { GraphType, GroupLayoutType, RelationType } from '@openfairygui/core';
+import { GraphType, GroupLayoutType, ProjectWriter, RelationType } from '@openfairygui/core';
 import { NodeIO } from '@openfairygui/core/node';
 import { readProjectAsUam, writeProjectFromUam } from '@openfairygui/core/uam';
 import {
@@ -14,6 +14,9 @@ import {
   planDocument,
   safeName,
   serializeImportFixture,
+  MemoryFileSystem,
+  type ConversionImageBinding,
+  type FairyBuildPlanV2,
   type ImportDocument,
   type ImportFrame,
   type ImportInstanceOverride,
@@ -224,6 +227,133 @@ test('plans selected roots with their component dependencies and preserves legac
   const expected = convertDocument(source, first.ids);
   const throughPlan = compilePlanToUam(source, planDocument(source), first.ids);
   assert.deepEqual(throughPlan, expected);
+
+  const omittedDependency = structuredClone(plan);
+  omittedDependency.packages[0].components = omittedDependency.packages[0].components.filter(({ exported }) => exported);
+  assert.throws(() => compilePlanToUam(source, omittedDependency), /PLAN_COMPONENT_DEPENDENCY_MISSING/);
+  const missing = structuredClone(source);
+  const instance = missing.pages[0].roots[2].children[0];
+  assert.ok(instance.kind === 'instance');
+  instance.componentId = 'missing-component';
+  const missingPlan = planDocument(missing, { rootIds: ['screen'] });
+  assert.ok(missingPlan.diagnostics.some(({ code, severity }) => code === 'PLAN_COMPONENT_DEPENDENCY_MISSING' && severity === 'error'));
+  missingPlan.diagnostics = [];
+  assert.throws(() => compilePlanToUam(missing, missingPlan), /PLAN_COMPONENT_DEPENDENCY_MISSING/);
+
+  const ignored = structuredClone(plan);
+  ignored.semanticOverlay.nodes.dependency = { target: 'ignore' };
+  assert.throws(() => compilePlanToUam(source, ignored), /PLAN_COMPONENT_DEPENDENCY_MISSING/);
+});
+
+test('fresh builds have stable IDs and project bytes, with collision-safe State v2 reuse', async () => {
+  const original = structuredClone(document);
+  const first = convertDocument(document);
+  assert.deepEqual(convertDocument(document), first);
+  assert.deepEqual(document, original);
+  assert.ok(Object.values(first.ids).every((id) => /^[a-z0-9]{8}$/.test(id)));
+  assert.equal(new Set(Object.values(first.ids)).size, Object.keys(first.ids).length);
+
+  const files = new MemoryFileSystem();
+  const repeatedFiles = new MemoryFileSystem();
+  await writeProjectFromUam({ writeProject: (...args) => new ProjectWriter(files).write(...args) }, first.project, '/Demo.fairy');
+  await writeProjectFromUam({ writeProject: (...args) => new ProjectWriter(repeatedFiles).write(...args) },
+    convertDocument(structuredClone(document)).project, '/Demo.fairy');
+  assert.deepEqual(repeatedFiles.toZipEntries('Demo'), files.toZipEntries('Demo'));
+
+  // The package is visited first, but cannot take an existing project's ID.
+  const previous = { $project: first.ids.$package, 'removed:node': first.ids.$project };
+  const collision = convertDocument(document, previous);
+  assert.equal(collision.ids.$project, previous.$project);
+  assert.notEqual(collision.ids.$package, first.ids.$package);
+  assert.ok(!Object.values(collision.ids).includes(previous['removed:node']));
+  assert.deepEqual(convertDocument(document, previous), collision);
+  assert.deepEqual(convertDocument(document, collision.ids).project, collision.project);
+  assert.deepEqual(previous, { $project: first.ids.$package, 'removed:node': first.ids.$project });
+
+  const legacyIds = Object.fromEntries(Object.keys(first.ids).map((key, index) => [key, index.toString(36).padStart(8, '0')]));
+  assert.deepEqual(convertDocument(document, legacyIds).ids, legacyIds);
+  const changed = structuredClone(document);
+  changed.pages[0].roots[0].width += 10;
+  assert.deepEqual(convertDocument(changed).ids, first.ids);
+  changed.name += ' another document';
+  assert.notEqual(convertDocument(changed).project.projectId, first.project.projectId);
+});
+
+test('BuildPlan v2 binds source bytes and image bindings and rejects untrusted plans', () => {
+  const source = structuredClone(document);
+  source.diagnostics.push({ code: 'SOURCE_WARNING', severity: 'warning', message: 'Original evidence', nodeId: '1:2' });
+  source.diagnostics.push({ code: 'DOCUMENT_WARNING', severity: 'error', message: 'Global evidence', nodeId: '' });
+  const binding: ConversionImageBinding = {
+    pixelRatio: 1, trimOffset: { x: 0, y: 0 }, pixelSize: { width: 2, height: 2 }, scale9Grid: null,
+  };
+  const imageBindings = { '1:2': binding };
+  const plan = planDocument(source, { imageBindings });
+  assert.equal(plan.schemaVersion, 2);
+  assert.match(plan.sourceDigest, /^[a-f0-9]{64}$/);
+  const originalPlan = structuredClone(plan);
+  const originalSource = structuredClone(source);
+  const originalBindings = structuredClone(imageBindings);
+  const expected = compilePlanToUam(source, plan, {}, imageBindings);
+  assert.deepEqual(plan, originalPlan);
+  assert.deepEqual(source, originalSource);
+  assert.deepEqual(imageBindings, originalBindings);
+
+  const alteredDiagnostics = structuredClone(plan);
+  alteredDiagnostics.diagnostics[0].message = 'Forged evidence';
+  assert.deepEqual(source, originalSource);
+  assert.deepEqual(compilePlanToUam(source, alteredDiagnostics, {}, imageBindings), expected);
+  alteredDiagnostics.diagnostics = [];
+  assert.deepEqual(compilePlanToUam(source, alteredDiagnostics, {}, imageBindings), expected);
+  alteredDiagnostics.semanticOverlay.nodes['1:1'] = { target: 'rasterize' };
+  assert.ok(compilePlanToUam(source, alteredDiagnostics, {}, imageBindings).diagnostics
+    .some(({ code }) => code === 'SEMANTIC_RASTERIZE_UNAVAILABLE'));
+
+  const reordered: ImportDocument = { pages: source.pages, diagnostics: source.diagnostics, name: source.name };
+  reordered.diagnostics = source.diagnostics.map((diagnostic) => Object.fromEntries(Object.entries(diagnostic).reverse()) as typeof diagnostic);
+  assert.equal(planDocument(reordered, { imageBindings }).sourceDigest, plan.sourceDigest);
+  assert.equal(JSON.stringify(planDocument(reordered, { imageBindings })), JSON.stringify(plan));
+  const renamedPlan = structuredClone(plan);
+  renamedPlan.sourceName = 'Renamed';
+  renamedPlan.packages[0].name = 'Renamed package';
+  renamedPlan.packages[0].components[0].name = 'Renamed component';
+  assert.deepEqual(compilePlanToUam(source, renamedPlan, {}, imageBindings).ids, expected.ids);
+  assert.throws(() => compilePlanToUam(source, plan), /source digest mismatch/);
+  assert.throws(() => compilePlanToUam(source, plan, {}, { '1:2': { ...binding, pixelRatio: 2 } }), /source digest mismatch/);
+  assert.throws(() => planDocument(source, { imageBindings: { missing: binding } }), /missing image node/);
+  assert.throws(() => planDocument(source, { imageBindings: { '1:2': { ...binding, pixelRatio: 0 } } }));
+  for (const mutate of [
+    (value: ImportDocument) => { value.pages[0].roots[0].width += 1; },
+    (value: ImportDocument) => { (value.pages[0].roots[0].children[0] as Extract<ImportNode, { kind: 'image' }>).bytes[0] ^= 1; },
+    (value: ImportDocument) => { value.diagnostics[0].message += ' changed'; },
+  ]) {
+    const changed = structuredClone(source);
+    mutate(changed);
+    assert.throws(() => compilePlanToUam(changed, plan, {}, imageBindings), /source digest mismatch/);
+  }
+  for (const mutate of [
+    (value: FairyBuildPlanV2) => { (value as { schemaVersion: number }).schemaVersion = 1; },
+    (value: FairyBuildPlanV2) => { (value as { plannerVersion: string }).plannerVersion = 'future'; },
+    (value: FairyBuildPlanV2) => { (value as { compilerVersion: string }).compilerVersion = 'future'; },
+    (value: FairyBuildPlanV2) => { (value as { sourceSchemaVersion: number }).sourceSchemaVersion = 100; },
+    (value: FairyBuildPlanV2) => { value.packages[0].key = '$project'; },
+    (value: FairyBuildPlanV2) => { value.packages[0].components[0].key = '$package'; },
+    (value: FairyBuildPlanV2) => { value.packages.push(structuredClone(value.packages[0])); },
+    (value: FairyBuildPlanV2) => { value.packages[0].components.push(structuredClone(value.packages[0].components[0])); },
+    (value: FairyBuildPlanV2) => { value.semanticOverlay.nodes['1:2'] = { target: 'button' }; },
+    (value: FairyBuildPlanV2) => { Object.assign(value, { unexpected: true }); },
+  ]) {
+    const changed = structuredClone(plan);
+    mutate(changed);
+    assert.throws(() => compilePlanToUam(source, changed, {}, imageBindings));
+  }
+  const duplicate = structuredClone(source);
+  duplicate.pages[0].roots[0].children[1].id = '1:2';
+  assert.throws(() => planDocument(duplicate), /duplicate node ID/);
+  const keyCollision = structuredClone(document);
+  keyCollision.pages[0].id = 'root:resource';
+  keyCollision.pages[0].roots[0].id = '$package:root';
+  keyCollision.pages.push({ id: 'second', name: 'Second', roots: [] });
+  assert.throws(() => convertDocument(keyCollision), /key namespace collision/);
 });
 
 test('keeps original resource names and suffixes only collisions', async () => {
@@ -288,6 +418,8 @@ test('deduplicates identical image bytes within a package', () => {
 
   const converted = convertDocument(duplicate);
   const images = converted.project.packages[0].resources.filter((resource) => resource.kind === 'image');
+  assert.deepEqual(convertDocument(duplicate), converted);
+  assert.deepEqual(convertDocument(duplicate, converted.ids).ids, converted.ids);
   assert.equal(images.length, 1);
   assert.equal(converted.ids['1:2:resource'], converted.ids['1:4:resource']);
   const component = converted.project.packages[0].resources.find((resource) => resource.kind === 'component');
@@ -356,6 +488,7 @@ test('preserves supported layout, constraints, rich text, shadows, and instance 
     }],
   };
   const converted = convertDocument(semantic);
+  assert.deepEqual(convertDocument(semantic), converted);
   const resources = converted.project.packages[0].resources;
   const root = resources.find((resource) => resource.id === converted.ids['root:resource']);
   assert.ok(root?.kind === 'component');
@@ -432,6 +565,8 @@ test('applies nested overrides by cloning only the referenced component path', (
   };
 
   const converted = convertDocument(nested);
+  assert.deepEqual(convertDocument(nested), converted);
+  assert.deepEqual(convertDocument(nested, converted.ids).project, converted.project);
   const resources = converted.project.packages[0].resources;
   const root = resources.find((resource) => resource.id === converted.ids['root:resource']);
   assert.ok(root?.kind === 'component');
@@ -474,6 +609,7 @@ test('keeps variant controller page names safe for FairyGUI serialization', asyn
     }] }],
   };
   const converted = convertDocument(variants);
+  assert.deepEqual(convertDocument(variants), converted);
   const set = converted.project.packages[0].resources.find(
     (resource) => resource.id === converted.ids['set:resource'],
   );

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import type { RegisteredProjectData } from "@/lib/api"
 import type { ImportDraftOutlineNode, ImportDraftV1, ImportVisualEvidenceV1 } from "../design-import/draft-store"
-import type { FairyBuildPlanV1 } from "../design-import/plan"
+import type { FairyBuildPlanV2 } from "../design-import/plan"
 import type { MakerSemanticOverlayV1, SemanticTarget } from "../design-import/semantic-overlay"
 import { compareVisualBlobs } from "@/lib/visual-evidence"
 
@@ -15,7 +15,7 @@ export type VisualCaptureInfo = { packageId: string; componentId: string; packag
 
 type DraftDetail = {
   draft: ImportDraftV1
-  buildPlan: FairyBuildPlanV1 | null
+  buildPlan: FairyBuildPlanV2 | null
   outline: { name: string; pages: Array<{ id: string; name: string; roots: ImportDraftOutlineNode[] }> } | null
   semanticOverlay: MakerSemanticOverlayV1 | null
   preview: RegisteredProjectData | null
@@ -144,7 +144,13 @@ export function ImportDraftPage({ draftId, renderPreview }: { draftId: string; r
       return requestJson(`/api/import-drafts/${encodeURIComponent(draftId)}/${input.kind}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expectedRevision: input.revision, ...(input.kind === "materialize" ? { targetPath } : {}) }),
+        body: JSON.stringify({
+          expectedRevision: input.revision,
+          ...(input.kind === "materialize" ? { targetPath } : {}),
+          ...(input.kind === "plan" && detail.data?.draft.status === "planned" && detail.data.buildPlan ? {
+            rootIds: detail.data.buildPlan.packages.flatMap((pkg) => pkg.components.filter((root) => root.exported).map((root) => root.sourceNodeId)),
+          } : {}),
+        }),
       })
     },
     onSuccess: async (_result, input) => {
@@ -175,7 +181,7 @@ export function ImportDraftPage({ draftId, renderPreview }: { draftId: string; r
         <CardContent className="flex flex-wrap items-end gap-3">
           <label className="grid w-64 gap-1.5 text-sm"><span className="text-muted-foreground">Profile</span><select value={profile} onChange={(event) => setProfile(event.target.value)} disabled={busy || draft.status !== "parsed"} className="h-9 rounded-md border bg-background px-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"><option value="legacy-hybrid">Hybrid · legacy-hybrid</option></select></label>
           {draft.status === "created" ? <Button disabled={busy} onClick={() => action.mutate({ kind: "parse", revision: draft.revision })}>解析 Source</Button> : null}
-          {draft.status === "parsed" ? <Button disabled={busy || profile !== "legacy-hybrid"} onClick={() => action.mutate({ kind: "plan", revision: draft.revision })}>生成 Build Plan</Button> : null}
+          {draft.status === "parsed" || draft.status === "planned" ? <Button disabled={busy || profile !== "legacy-hybrid"} onClick={() => action.mutate({ kind: "plan", revision: draft.revision })}>{draft.status === "planned" ? "重新生成 Build Plan" : "生成 Build Plan"}</Button> : null}
           {draft.status === "planned" ? <Button disabled={busy} onClick={() => action.mutate({ kind: "compile", revision: draft.revision })}>编译 Viewer Preview</Button> : null}
           {draft.status === "uploading" ? <p className="text-sm text-amber-500">上传尚未完成。浏览器不会保留文件授权，请删除后重新上传。</p> : null}
           {busy ? <span className="inline-flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />正在处理…</span> : null}
@@ -358,7 +364,7 @@ function DiagnosticsCard({ diagnostics }: { diagnostics: ImportDraftV1["diagnost
   return <Card><CardHeader><CardTitle>Diagnostics</CardTitle><CardDescription>{diagnostics.length ? `${diagnostics.length} 条解析与转换诊断` : "没有诊断。"}</CardDescription></CardHeader><CardContent className="max-h-96 space-y-2 overflow-auto">{diagnostics.length ? diagnostics.map((diagnostic, index) => <div key={`${diagnostic.code}:${diagnostic.nodeId}:${index}`} className="flex gap-3 rounded-md border p-3 text-sm"><AlertTriangle className={`mt-0.5 size-4 shrink-0 ${diagnostic.severity === "error" ? "text-destructive" : "text-amber-500"}`} /><div className="min-w-0"><p className="font-medium">{diagnostic.code}</p><p className="mt-1 text-muted-foreground">{diagnostic.message}</p><p className="mt-1 truncate text-xs text-muted-foreground">{[diagnostic.pageName, diagnostic.rootName, diagnostic.nodeName].filter(Boolean).join(" / ") || diagnostic.nodeId}</p></div></div>) : <p className="py-8 text-center text-sm text-muted-foreground">暂无 Diagnostics</p>}</CardContent></Card>
 }
 
-function BuildSummaryCard({ draft, buildPlan }: { draft: ImportDraftV1; buildPlan: FairyBuildPlanV1 | null }) {
+function BuildSummaryCard({ draft, buildPlan }: { draft: ImportDraftV1; buildPlan: FairyBuildPlanV2 | null }) {
   const report = draft.generated?.report
   const semanticNodes = Object.values(buildPlan?.semanticOverlay?.nodes ?? {}).filter(({ target }) => target !== "auto").length
   const metrics = buildPlan ? [

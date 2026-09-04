@@ -1,7 +1,7 @@
+import { createHash } from 'node:crypto';
 import {
   AlignType,
   AutoSizeType,
-  generateId,
   GraphType,
   GroupLayoutType,
   ListLayoutType,
@@ -30,11 +30,11 @@ import type {
 } from './model';
 import {
   planDocument,
+  validateBuildPlan,
   type ConversionImageBinding,
-  type FairyBuildPlanV1,
+  type FairyBuildPlanV2,
 } from './plan';
 import {
-  createSemanticOverlay,
   extensionTypeForTarget,
   stripSemanticName,
   type SemanticNodeDirective,
@@ -169,7 +169,7 @@ export function createConversionReport(
   const diagnostics = Object.fromEntries([...document.diagnostics.reduce((counts, item) => {
     counts.set(item.code, (counts.get(item.code) ?? 0) + 1);
     return counts;
-  }, new Map<string, number>())].sort(([left], [right]) => left.localeCompare(right)));
+  }, new Map<string, number>())].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
   const currentKeys = Object.keys(ids);
   const previousKeys = Object.keys(previousIds);
   const compareText = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
@@ -256,7 +256,7 @@ export function convertDocument(
   previousIds: Record<string, string> = {},
   imageBindings: Record<string, ConversionImageBinding> = {},
 ): ConversionResult {
-  return compilePlanToUam(document, planDocument(document), previousIds, imageBindings);
+  return compilePlanToUam(document, planDocument(document, { imageBindings }), previousIds, imageBindings);
 }
 
 function firstText(node: ImportNode): string | null {
@@ -271,68 +271,78 @@ function firstText(node: ImportNode): string | null {
 
 export function compilePlanToUam(
   sourceDocument: ImportDocument,
-  plan: FairyBuildPlanV1,
+  plan: FairyBuildPlanV2,
   previousIds: Record<string, string> = {},
   imageBindings: Record<string, ConversionImageBinding> = {},
 ): ConversionResult {
-  if (plan.schemaVersion !== 1 || plan.profile !== 'legacy-hybrid' || plan.packages.length === 0) {
-    throw new Error('Invalid FairyBuildPlan v1');
-  }
+  plan = validateBuildPlan(sourceDocument, plan, imageBindings);
   const sourcePages = new Map(sourceDocument.pages.map((page) => [page.id, page]));
-  const semanticOverlay = plan.semanticOverlay ?? createSemanticOverlay(sourceDocument);
+  const semanticOverlay = plan.semanticOverlay;
   const directiveFor = (node: ImportNode): SemanticNodeDirective | undefined => semanticOverlay.nodes[node.id];
   const packageKeys = new Map(plan.packages.map((pkg) => [pkg.sourcePageId, pkg.key]));
   const rootPlans = new Map(plan.packages.flatMap((pkg) => pkg.components.map((component) => [
     component.sourceNodeId,
     component,
   ])));
-  if (sourcePages.size !== sourceDocument.pages.length
-    || packageKeys.size !== plan.packages.length
-    || rootPlans.size !== plan.packages.reduce((count, pkg) => count + pkg.components.length, 0)
-    || new Set(plan.packages.map((pkg) => pkg.key)).size !== plan.packages.length
-    || new Set([...rootPlans.values()].map((root) => root.key)).size !== rootPlans.size) {
-    throw new Error('FairyBuildPlan v1 contains duplicate source IDs or keys');
-  }
   const document: ImportDocument = {
     ...sourceDocument,
     name: plan.sourceName,
     diagnostics: plan.diagnostics,
     pages: plan.packages.map((pkg) => {
       const page = sourcePages.get(pkg.sourcePageId);
-      if (!page) throw new Error(`FairyBuildPlan v1 references missing page ${pkg.sourcePageId}`);
+      if (!page) throw new Error(`FairyBuildPlan references missing page ${pkg.sourcePageId}`);
       const roots = new Map(page.roots.map((root) => [root.id, root]));
       return {
         ...page,
         name: pkg.name,
         roots: pkg.components.map((component) => {
           const root = roots.get(component.sourceNodeId);
-          if (!root) throw new Error(`FairyBuildPlan v1 references missing root ${component.sourceNodeId}`);
+          if (!root) throw new Error(`FairyBuildPlan references missing root ${component.sourceNodeId}`);
           return { ...root, name: component.name };
         }),
       };
     }),
   };
-  const ids: Record<string, string> = {};
+  const ids: Record<string, string> = Object.create(null);
   const usedIds = new Set<string>();
+  // Reserve even IDs not visited yet (and removed keys), so a new key cannot steal a State v2 ID.
+  const reservedIds = new Set(Object.values(previousIds).filter((id) => typeof id === 'string' && FAIRY_ID.test(id)));
+  const keyOwners = new Map<string, string>();
   const diagnostics = [...document.diagnostics];
 
-  const idFor = (key: string): string => {
+  const idFor = (
+    role: 'project' | 'package' | 'resource' | 'node' | 'layout' | 'shadow' | 'variant' | 'overridden-resource' | 'override-resource',
+    ...parts: string[]
+  ): string => {
+    // Keep State v2's public conversion-map keys, but hash typed tuples, not ambiguous concatenations.
+    const key = role === 'project' ? '$project'
+      : role === 'package' ? packageKeys.get(parts[0])!
+        : role === 'variant' ? `${parts[0]}:variant:${parts[1]}:page`
+          : `${parts[0]}:${role}${parts.length > 1 ? `:${parts.slice(1).join(':')}` : ''}`;
+    const owner = JSON.stringify([role, ...parts]);
+    if (keyOwners.has(key) && keyOwners.get(key) !== owner) throw new Error(`Conversion key namespace collision: ${key}`);
+    keyOwners.set(key, owner);
     if (FAIRY_ID.test(ids[key] ?? '')) return ids[key];
-    const previous = previousIds[key];
-    if (FAIRY_ID.test(previous ?? '') && !usedIds.has(previous)) {
+    const previous = Object.hasOwn(previousIds, key) ? previousIds[key] : undefined;
+    if (typeof previous === 'string' && FAIRY_ID.test(previous) && !usedIds.has(previous)) {
       ids[key] = previous;
       usedIds.add(previous);
       return previous;
     }
-    let id = generateId();
-    while (usedIds.has(id)) id = generateId();
+    let id: string;
+    let attempt = 0;
+    do {
+      const hash = createHash('sha256')
+        .update(JSON.stringify(['maker-id-v1', plan.sourceDocumentId, role, parts, attempt++])).digest('hex');
+      id = (BigInt(`0x${hash}`) % (36n ** 8n)).toString(36).padStart(8, '0');
+    } while (usedIds.has(id) || reservedIds.has(id));
     usedIds.add(id);
     ids[key] = id;
     return id;
   };
   const packageIds = new Map(document.pages.map((page) => [
     page.id,
-    idFor(packageKeys.get(page.id)!),
+    idFor('package', page.id),
   ]));
   const componentPackages = new Map<string, string>();
   const pendingOverrides: Array<{
@@ -375,12 +385,12 @@ export function compilePlanToUam(
     const resourceRef = (componentId: string) => {
       const targetPackage = componentPackages.get(componentId);
       return {
-        resourceId: idFor(`${componentId}:resource`),
+        resourceId: idFor('resource', componentId),
         ...(targetPackage && targetPackage !== packageId ? { packageId: targetPackage } : {}),
       };
     };
     const nodeBase = (node: ImportNode) => ({
-      id: idFor(`${node.id}:node`),
+      id: idFor('node', node.id),
       name: stripSemanticName(node.name),
       position: { x: node.x, y: node.y },
       size: { width: node.width, height: node.height },
@@ -510,7 +520,7 @@ export function compilePlanToUam(
       }
       if (node.kind === 'instance') {
         if (node.overrides.length > 0) {
-          const resourceId = idFor(`${node.id}:overridden-resource`);
+          const resourceId = idFor('overridden-resource', node.id);
           const targetPackageId = componentPackages.get(node.componentId) ?? packageId;
           pendingOverrides.push({ instance: node, packageId: targetPackageId, resourceId });
           return {
@@ -625,6 +635,7 @@ export function compilePlanToUam(
           image.scale9Grid = [...grid];
         }
         const resourceKey = `${node.id}:resource`;
+        const resourceId = idFor('resource', node.id);
         const dimensions = binding?.pixelSize ?? { width: node.width, height: node.height };
         const contentKey = `${imageContentKey(node.format, node.bytes)}${binding
           ? `:${dimensions.width}x${dimensions.height}:${image.scale9Grid?.join(',') ?? ''}`
@@ -645,7 +656,6 @@ export function compilePlanToUam(
             resource: { resourceId: existing.id },
           };
         }
-        const resourceId = idFor(resourceKey);
         const name = resourceName(packageId, stripSemanticName(node.name), 'image', node.format);
         const fileName = `${name}.${node.format}`;
         const resource: Extract<UamResource, { kind: 'image' }> = {
@@ -690,7 +700,7 @@ export function compilePlanToUam(
       const target = directiveFor(node)?.target;
       if (target === 'ignore') return [];
       if (node.kind === 'frame' && canFlattenGroup(node) && (!target || target === 'auto')) {
-        const id = idFor(`${node.id}:node`);
+        const id = idFor('node', node.id);
         const children = node.children.flatMap((child) =>
           convertDisplayNode(child, offsetX + node.x, offsetY + node.y, id));
         children.push(groupNode(
@@ -715,7 +725,7 @@ export function compilePlanToUam(
       return [
         ...node.shadows.map((shadow, index) => ({
           ...converted,
-          id: idFor(`${node.id}:shadow:${index}`),
+          id: idFor('shadow', node.id, String(index)),
           name: `${node.name} shadow`,
           position: {
             x: converted.position.x + shadow.offsetX,
@@ -730,8 +740,8 @@ export function compilePlanToUam(
       ];
     };
 
-    const convertFrame = (frame: ImportFrame, exported: boolean, resourcePath?: string, key?: string): string => {
-      const resourceId = idFor(key ?? `${frame.id}:resource`);
+    const convertFrame = (frame: ImportFrame, exported: boolean, resourcePath?: string): string => {
+      const resourceId = idFor('resource', frame.id);
       const existing = componentResources.get(resourceId);
       if (existing) {
         if (exported) existing.exported = true;
@@ -743,10 +753,10 @@ export function compilePlanToUam(
         const variants = frame.children.filter((child): child is ImportFrame => child.kind === 'frame');
         const variantPath = `/_variants/${safeName(stripSemanticName(frame.name), 'VariantSet')}/`;
         const controllerPages = variants.map((variant) => ({
-          id: idFor(`${frame.id}:variant:${variant.id}:page`),
+          id: idFor('variant', frame.id, variant.id),
           remark: '',
           name: Object.entries(variant.variantProperties)
-            .sort(([left], [right]) => left.localeCompare(right))
+            .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
             .map(([key, value]) => `${key}=${value}`)
             .join(' · ')
             .replaceAll(',', '，') || stripSemanticName(variant.name).replaceAll(',', '，'),
@@ -799,7 +809,7 @@ export function compilePlanToUam(
         return resourceId;
       }
 
-      const layoutGroupId = frame.layout && directive?.target !== 'list' ? idFor(`${frame.id}:layout`) : '';
+      const layoutGroupId = frame.layout && directive?.target !== 'list' ? idFor('layout', frame.id) : '';
       const displayList = directive?.target === 'list'
         ? [{ ...convertNode(frame), position: { x: 0, y: 0 } }]
         : frame.children.flatMap((child) => convertDisplayNode(child, 0, 0, child.layoutChild ? layoutGroupId : ''));
@@ -818,7 +828,7 @@ export function compilePlanToUam(
         properties.bgColorEnabled = true;
       }
       const mask = frame.children.find((child) => child.mask);
-      if (mask) properties.mask = idFor(`${mask.id}:node`);
+      if (mask) properties.mask = idFor('node', mask.id);
       const resource: Extract<UamResource, { kind: 'component' }> = {
         kind: 'component',
         id: resourceId,
@@ -844,7 +854,7 @@ export function compilePlanToUam(
 
     page.roots.forEach((root) => {
       const rootPlan = rootPlans.get(root.id)!;
-      convertFrame(root, rootPlan.exported, undefined, rootPlan.key);
+      convertFrame(root, rootPlan.exported);
     });
     const baseName = safeName(page.name, pageIndex === 0 ? 'Main' : `Page${pageIndex + 1}`);
     let name = baseName;
@@ -987,7 +997,7 @@ export function compilePlanToUam(
           const childSource = componentIndex.get(componentNode.resource.resourceId);
           if (!childSource) break;
           const childResource = structuredClone(childSource.resource);
-          childResource.id = idFor(`${pending.instance.id}:override-resource:${edgeKey}`);
+          childResource.id = idFor('override-resource', pending.instance.id, current.resource.id, componentNode.id);
           childResource.name = resourceName(
             childSource.pkg.id,
             `${pending.instance.name} ${childSource.resource.name}`,
@@ -1014,7 +1024,7 @@ export function compilePlanToUam(
   }
 
   const project = normalizeUamProject({
-    projectId: idFor('$project'),
+    projectId: idFor('project'),
     projectType: 0,
     version: '3.0',
     branches: [],
@@ -1033,7 +1043,7 @@ export function compilePlanToUam(
   const convertedDocument = { ...document, diagnostics };
   return {
     project,
-    ids,
+    ids: Object.fromEntries(Object.entries(ids).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)),
     diagnostics,
     report: createConversionReport(convertedDocument, previousIds, ids),
   };

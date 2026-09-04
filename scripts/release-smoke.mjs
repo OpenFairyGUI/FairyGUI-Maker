@@ -167,6 +167,17 @@ try {
   const importResult = JSON.parse(imported.stdout)
   if (importResult.source?.kind !== "fig" || importResult.report?.nodes < 1) throw new Error("Installed CLI did not return an import report")
   await Promise.all([access(importResult.fairyPath), access(path.join(importedDirectory, "maker-import-state.json"))])
+  const freshDirectory = path.join(consumer, "imported-fig-fresh")
+  const fresh = JSON.parse((await run(bin, ["import", path.join(root, "test", "fixtures", "design-import", "basic-shapes.fig"), "--out", freshDirectory], { cwd: consumer })).stdout)
+  if (fresh.projectId !== importResult.projectId || JSON.stringify(fresh.ids) !== JSON.stringify(importResult.ids)) {
+    throw new Error("Installed CLI fresh import IDs are not deterministic")
+  }
+  for (const file of await readdir(importedDirectory, { recursive: true, withFileTypes: true })) {
+    if (!file.isFile()) continue
+    const originalPath = path.join(file.parentPath, file.name)
+    const freshPath = path.join(freshDirectory, path.relative(importedDirectory, originalPath))
+    if (!(await readFile(originalPath)).equals(await readFile(freshPath))) throw new Error(`Installed CLI fresh import bytes differ: ${file.name}`)
+  }
   const reimport = JSON.parse((await run(bin, ["reimport", importedDirectory, "--dry-run"], { cwd: consumer })).stdout)
   if (reimport.added?.length || reimport.changed?.length || reimport.removed?.length || reimport.conflict?.length || !reimport.preserved?.length) {
     throw new Error("Installed CLI returned an unstable no-change reimport plan")
@@ -236,7 +247,7 @@ try {
   }
   await verifyArtifactPersistence(installedRoot, origin, headers)
   if ([token, approvalToken].some((secret) => stdout.includes(secret) || stderr.includes(secret))) throw new Error("Installed Host exposed a configured token in process output")
-  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), version: version.stdout.trim(), host: true, mcp: true, saveGrants: true, runtimeIsolation: true, artifactPersistence: true }) + "\n")
+  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), version: version.stdout.trim(), host: true, mcp: true, deterministicImport: true, saveGrants: true, runtimeIsolation: true, artifactPersistence: true }) + "\n")
 } finally {
   if (host && host.exitCode === null) {
     const exited = new Promise((resolve) => host.once("exit", resolve))

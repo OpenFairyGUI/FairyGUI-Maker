@@ -304,6 +304,27 @@ Player 连接只绑定 `artifactId + digest`，详情刷新中的来源名称/�
 
 验证：`test/artifacts.test.ts` 覆盖重复来源、完成重试/重启、旧格式只读恢复、完整摘要冲突、提交失败、损坏目标保护、轻量列表和分页、同尺寸/不同尺寸篡改、硬链接/junction、读中修改及独立字节快照。`scripts/browser-smoke.ts` 验证真实上传去重后名称与导入次数的缓存刷新/重载、Dashboard 摘要、来源刷新不重置 Player，以及原生 Player 与其余批次回归。安装包烟测还覆盖实际消费者环境的导入记录、摘要与运行中篡改拒绝。
 
+### 2.13 确定性 Planner/Compiler（批次 18）
+
+Host/CLI 的 `planDocument()` 生成 `FairyBuildPlanV2`，`compilePlanToUam()` 在产生 UAM、写任何生成文件前执行严格 Zod 与源引用校验。计划包含 `sourceSchemaVersion: 1`、`plannerVersion/compilerVersion: deterministic-v1`、`sourceDocumentId` 和 `sourceDigest`；不接受旧版本、未知字段、重复 Page/Root、跨 Page 错放的 Root 或任意自定义保留 Key。Package/Component 名称和 exported、经过校验的 Semantic Overlay 仍可编辑。
+
+`sourceDigest` 为完整 ImportDocument（含原始诊断）和 `imageBindings` 的规范 JSON SHA-256。对象键按代码点排序，数组顺序保留；图片先按实际字节计算 SHA-256 和长度，不展开成 JSON 数字数组。Binding 的像素比例、trim、尺寸、scale9Grid 也被绑定；源结构、同尺寸图片内容或 Binding 变化均需重新 Plan。摘要标识编译输入，不是原始 FIG/PSD 文件摘要，也不是来源签名；更改 Overlay 是编辑计划，不更改源摘要。
+
+所有新 Project、Package、Resource、Display Node、Shadow、Layout、Controller Page 和 Override Clone ID 使用同一分配器：`SHA-256([maker-id-v1, sourceDocumentId, role, logicalParts, attempt])` 映射为 8 位小写 base36 ID。碰撞时确定性递增 attempt，预留全部有效旧 ID（包括尚未访问和已删除的键）；当前键有可复用的 State v2 ID 时优先复用。图片内容去重的多键映射继续保留。公开 `conversionIds` 沿用旧键格式，内部按类型元组区分命名空间；遇到不同角色/来源拼接成相同旧键时明确拒绝，不静默复用。
+
+当前 `ImportDocument` 没有独立文件身份，`sourceDocumentId` 沿用 State v2 的 document name。保持文档标识与逻辑键时，坐标/文本/像素变化不会使新 ID 全量漂移；显示用的 Plan 名称不参与 ID。不同文件若同名且逻辑键相同，会得到相同 ID，因此不承诺跨文件全局唯一；未来需要该能力时应由源适配器提供独立 document ID。结果依赖固定 Planner/Compiler/Core 版本和数组顺序，不排序会影响层叠或 Controller 页次序的源数组。
+
+Plan 的 `diagnostics` 只是展示快照。编译时重新获取选中根与依赖根的源诊断、文档级诊断，重新计算 Planner 诊断，再追加 Compiler 诊断；删改 Plan 中的记录不能消除真实证据。Instance 或替换引用缺失/被忽略时，Planner 记录 `PLAN_COMPONENT_DEPENDENCY_MISSING`，编译明确失败；计划漏掉依赖根同样失败。输入 Document、Overlay、Plan 和旧 ID Map 不会被编译修改。
+
+升级与入口：
+
+- CLI、Draft Store 和重导入统一传入真实 imageBindings，不存在绕过摘要的旧编译入口。
+- persisted v1 Draft 元数据仍能恢复；旧 BuildPlan 不自动加盖新摘要，必须调用 Plan，或在 Workbench planned 状态点击“重新生成 Build Plan”。界面携带原计划 exported roots，保留所选根范围，沿用原 expectedRevision/CAS；校验失败不改变 Draft revision，也不产生 generated 目录。
+- 新 State v2 记录独立 Planner/Compiler 版本，重导入拒绝不匹配版本；兼容没有这两个字段的旧 State v2，并按原映射复用 ID。生成算法变化需更新版本，不以 npm package version 代替算法版本。
+- 本批复用既有 Hybrid/Semantic Overlay/UAM 编译链，不新增 Planner 服务、缓存、依赖或另一套 UI DSL；完整 Component Library Mapping、交互编排及新增栅格化能力不在本批扩展。
+
+验证：`test/design-import/convert.test.ts` 覆盖 Fresh Build/生成字节、旧 ID 与碰撞、源/图片/Binding 变更、不可删改诊断、缺失依赖、保留 Key、嵌套 Override、Controller 和去重；`command.test.ts` 在切换 TZ/LANG 环境的独立 Node 进程中比较真实 FIG/PSD 全部生成文件（Windows 实测时区改变，但默认 locale 仍为系统的 zh-CN，不将此作为跨系统 locale 的实测证明）；`draft-store.test.ts` 验证重启后的旧 Plan 拒绝/重建、篡改失败无写入和跨 Draft 一致性。浏览器烟测覆盖 planned 页面重载与 revision-aware 重建、后续 Viewer/视觉 Golden；安装包烟测比较真实 CLI 两次全新导入的文件字节。
+
 ## 3. 核心领域契约
 
 接口使用稳定 ID，不使用显示名称、任意文件路径或屏幕坐标作为主键。

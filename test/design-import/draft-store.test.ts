@@ -39,7 +39,7 @@ test('import drafts isolate source, compile in Maker data, materialize atomicall
     const planned = await store.plan(draft.draftId, draft.revision);
     draft = planned.draft;
     assert.equal(draft.status, 'planned');
-    assert.equal(planned.buildPlan.schemaVersion, 1);
+    assert.equal(planned.buildPlan.schemaVersion, 2);
     assert.equal(await exists(outputPath), false);
 
     const resumed = new ImportDraftStore(dataDir);
@@ -95,7 +95,7 @@ test('import drafts isolate source, compile in Maker data, materialize atomicall
     await reloaded.init();
     assert.equal(reloaded.get(draft.draftId)?.status, 'materialized');
     assert.equal(reloaded.get(draft.draftId)?.visualEvidence?.componentName, 'Rectangle');
-    assert.equal((await reloaded.getDetail(draft.draftId))?.buildPlan?.schemaVersion, 1);
+    assert.equal((await reloaded.getDetail(draft.draftId))?.buildPlan?.schemaVersion, 2);
     await reloaded.delete(draft.draftId, draft.revision);
     assert.equal(reloaded.get(draft.draftId), null);
     assert.equal(await exists(path.join(dataDir, 'import-drafts', draft.draftId)), false);
@@ -122,6 +122,59 @@ test('expired import drafts are removed when the store restarts', async () => {
     assert.equal(await exists(path.dirname(metadataPath)), false);
   } finally {
     await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test('persisted plans reject stale inputs, replan legacy drafts, and compile reproducibly across drafts', async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'maker-deterministic-draft-'));
+  try {
+    const initial = new ImportDraftStore(dataDir);
+    await initial.init();
+    let draft = await initial.create(fixture);
+    draft = await initial.parse(draft.draftId, draft.revision);
+    let planned = await initial.plan(draft.draftId, draft.revision);
+    draft = planned.draft;
+    const root = path.join(dataDir, 'import-drafts', draft.draftId);
+    const planPath = path.join(root, 'build-plan.json');
+    const snapshotPath = path.join(root, 'import-document.json');
+    const originalSnapshot = await readFile(snapshotPath, 'utf8');
+    const legacy = { ...planned.buildPlan, schemaVersion: 1 } as Record<string, unknown>;
+    for (const field of ['sourceDigest', 'sourceDocumentId', 'sourceSchemaVersion', 'compilerVersion', 'plannerVersion']) delete legacy[field];
+    await writeFile(planPath, JSON.stringify(legacy));
+    draft.buildPlan!.schemaVersion = 1;
+    await writeFile(path.join(root, 'draft.json'), JSON.stringify(draft));
+
+    const store = new ImportDraftStore(dataDir);
+    await store.init();
+    assert.equal(store.get(draft.draftId)?.status, 'planned');
+    await assert.rejects(store.compile(draft.draftId, draft.revision), /run Plan again/);
+    assert.equal(await exists(path.join(root, 'generated')), false);
+    assert.equal(store.get(draft.draftId)?.revision, draft.revision);
+    planned = await store.plan(draft.draftId, draft.revision);
+    draft = planned.draft;
+    assert.equal(planned.buildPlan.schemaVersion, 2);
+
+    const staleSource = JSON.parse(originalSnapshot);
+    staleSource.document.pages[0].roots[0].width += 1;
+    await writeFile(snapshotPath, JSON.stringify(staleSource));
+    await assert.rejects(store.compile(draft.draftId, draft.revision), /source digest mismatch/);
+    assert.equal(store.get(draft.draftId)?.revision, draft.revision);
+    assert.equal(await exists(path.join(root, 'generated')), false);
+    await writeFile(snapshotPath, originalSnapshot);
+    await writeFile(planPath, JSON.stringify({ ...planned.buildPlan, diagnostics: [] }));
+    draft = await store.compile(draft.draftId, draft.revision);
+    assert.deepEqual(draft.diagnostics, planned.buildPlan.diagnostics);
+
+    let second = await store.create(fixture);
+    second = await store.parse(second.draftId, second.revision);
+    second = (await store.plan(second.draftId, second.revision)).draft;
+    second = await store.compile(second.draftId, second.revision);
+    assert.notEqual(second.draftId, draft.draftId);
+    assert.deepEqual(second.generated, draft.generated);
+    assert.deepEqual(await readFile(path.join(dataDir, 'import-drafts', second.draftId, 'generated', 'uam.json')),
+      await readFile(path.join(root, 'generated', 'uam.json')));
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
 

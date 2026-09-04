@@ -123,7 +123,7 @@ export function assertSemanticTarget(node: ImportNode, input: SemanticNodeDirect
 }
 
 export function stripSemanticName(value: string): string {
-  const index = value.toLocaleLowerCase().indexOf('@fgui');
+  const index = value.toLowerCase().indexOf('@fgui');
   return (index === -1 ? value : value.slice(0, index)).trim() || value.trim();
 }
 
@@ -144,7 +144,7 @@ function directiveFromName(node: ImportNode): SemanticNodeDirective | null {
     let page = '';
     for (const token of annotation.split(/\s+/).filter(Boolean)) {
       const [rawKey, rawValue] = token.split('=', 2);
-      const key = rawKey.toLocaleLowerCase();
+      const key = rawKey.toLowerCase();
       const value = rawValue?.trim() ?? '';
       if (key === 'role' && value) {
         const role = normalizeRole(value);
@@ -180,7 +180,7 @@ function directiveFromName(node: ImportNode): SemanticNodeDirective | null {
 function deterministicNameTarget(node: ImportNode): SemanticTarget | null {
   const words = stripSemanticName(node.name)
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .toLocaleLowerCase()
+    .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter(Boolean);
   const tail = words.at(-1) ?? '';
@@ -197,7 +197,7 @@ function deterministicNameTarget(node: ImportNode): SemanticTarget | null {
 }
 
 function normalizeRole(value: string): SemanticTarget | null {
-  const normalized = value.trim().toLocaleLowerCase().replaceAll('_', '-');
+  const normalized = value.trim().toLowerCase().replaceAll('_', '-');
   return ({
     button: 'button',
     label: 'label',

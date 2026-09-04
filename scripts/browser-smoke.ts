@@ -140,6 +140,17 @@ try {
   if (!(await mappingResponse).ok()) throw new Error("Workbench semantic mapping failed")
   await page.getByRole("button", { name: "生成 Build Plan" }).click()
   await page.getByText("PLANNED", { exact: true }).waitFor()
+  const firstPlan = await fetch(`${host.origin}/api/import-drafts/${new URL(page.url()).pathname.split("/").pop()}`, { headers }).then((response) => response.json()) as any
+  await page.reload({ waitUntil: "domcontentloaded" })
+  const replannedResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/plan"))
+  await page.getByRole("button", { name: "重新生成 Build Plan" }).click()
+  const replannedResult = await replannedResponse
+  if (!replannedResult.ok()) throw new Error("Workbench replan failed")
+  const replanned = await replannedResult.json()
+  const requestedRootIds = firstPlan.buildPlan.packages.flatMap((pkg: any) => pkg.components.filter((root: any) => root.exported).map((root: any) => root.sourceNodeId))
+  if (JSON.stringify(replannedResult.request().postDataJSON().rootIds) !== JSON.stringify(requestedRootIds)) throw new Error("Workbench replan lost the selected root scope")
+  if (replanned.draft.revision !== firstPlan.draft.revision + 1 || replanned.buildPlan.schemaVersion !== 2
+    || JSON.stringify(replanned.buildPlan) !== JSON.stringify(firstPlan.buildPlan)) throw new Error("Workbench replan is not deterministic or revision-checked")
   await page.getByRole("button", { name: "编译 Viewer Preview" }).click()
   await page.getByText("Viewer Preview", { exact: true }).waitFor()
   const draftId = new URL(page.url()).pathname.split("/").pop()!
@@ -263,7 +274,7 @@ try {
     method: "DELETE",
     headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
   })
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, artifactPersistence: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, projectRevision, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, deterministicPlan: true, artifactUpload: true, artifactPersistence: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, projectRevision, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
 } catch (error) {
   process.stderr.write(browserDiagnostics.slice(-30).join("\n") + "\n")
   for (const page of browser?.contexts().flatMap((context) => context.pages()) ?? []) {

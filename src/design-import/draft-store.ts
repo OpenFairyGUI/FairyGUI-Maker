@@ -18,7 +18,7 @@ import {
   writeMakerImportStateV2,
   type DesignImportResult,
 } from './node';
-import { planDocument, type ConversionImageBinding, type FairyBuildPlanV1 } from './plan';
+import { planDocument, type ConversionImageBinding, type FairyBuildPlanV2 } from './plan';
 import {
   assertSemanticTarget,
   createSemanticOverlay,
@@ -94,7 +94,7 @@ export interface ImportDraftV1 {
   source: MakerImportSourceV1 | null;
   diagnostics: Diagnostic[];
   buildPlan: {
-    schemaVersion: 1;
+    schemaVersion: 1 | 2;
     packages: number;
     components: number;
   } | null;
@@ -215,7 +215,7 @@ const draftSchema = z.object({
   source: sourceSchema.nullable(),
   diagnostics: z.array(diagnosticSchema),
   buildPlan: z.object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.union([z.literal(1), z.literal(2)]),
     packages: z.number().int().nonnegative(),
     components: z.number().int().nonnegative(),
   }).strict().nullable(),
@@ -321,14 +321,14 @@ export class ImportDraftStore {
 
   async getDetail(draftId: string): Promise<{
     draft: ImportDraftV1;
-    buildPlan: FairyBuildPlanV1 | null;
+    buildPlan: FairyBuildPlanV2 | null;
     outline: ImportDraftOutline | null;
     semanticOverlay: MakerSemanticOverlayV1 | null;
   } | null> {
     const draft = this.drafts.get(draftId);
     if (!draft) return null;
     const buildPlan = draft.buildPlan
-      ? await readJson<FairyBuildPlanV1>(path.join(this.resolveDraftRoot(draftId), 'build-plan.json'))
+      ? await readJson<FairyBuildPlanV2>(path.join(this.resolveDraftRoot(draftId), 'build-plan.json'))
       : null;
     const snapshot = draft.source ? await this.readParsedSnapshot(draftId) : null;
     const outline = snapshot ? outlineDocument(snapshot.document) : null;
@@ -529,12 +529,12 @@ export class ImportDraftStore {
     });
   }
 
-  async plan(draftId: string, expectedRevision: number, rootIds?: string[]): Promise<{ draft: ImportDraftV1; buildPlan: FairyBuildPlanV1 }> {
+  async plan(draftId: string, expectedRevision: number, rootIds?: string[]): Promise<{ draft: ImportDraftV1; buildPlan: FairyBuildPlanV2 }> {
     return this.mutate(async () => {
       const draft = this.requireDraft(draftId, expectedRevision, ['parsed', 'planned']);
       const snapshot = await this.readParsedSnapshot(draftId);
       const semanticOverlay = await this.readSemanticOverlay(draftId, snapshot.document);
-      const buildPlan = planDocument(snapshot.document, { rootIds, semanticOverlay });
+      const buildPlan = planDocument(snapshot.document, { rootIds, semanticOverlay, imageBindings: snapshot.imageBindings });
       await writeJson(path.join(this.resolveDraftRoot(draftId), 'build-plan.json'), buildPlan);
       const updated = await this.update(draft, 'planned', {
         diagnostics: buildPlan.diagnostics,
@@ -557,7 +557,7 @@ export class ImportDraftStore {
       const draft = this.requireDraft(draftId, expectedRevision, ['planned']);
       const draftRoot = this.resolveDraftRoot(draftId);
       const snapshot = await this.readParsedSnapshot(draftId);
-      const buildPlan = await readJson<FairyBuildPlanV1>(path.join(draftRoot, 'build-plan.json'));
+      const buildPlan = await readJson<FairyBuildPlanV2>(path.join(draftRoot, 'build-plan.json'));
       const converted = compilePlanToUam(snapshot.document, buildPlan, {}, snapshot.imageBindings);
       const ids = sourceNodeIds(snapshot.document, converted.ids);
       const generatedRoot = path.join(draftRoot, 'generated');
@@ -578,7 +578,7 @@ export class ImportDraftStore {
             if (error.code === 'ENOENT') return null;
             throw error;
           });
-        const semanticOverlay = buildPlan.semanticOverlay ?? createSemanticOverlay(snapshot.document);
+        const semanticOverlay = buildPlan.semanticOverlay;
         await writeMakerImportStateV2({
           projectRoot,
           fairyFile,

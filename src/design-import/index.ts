@@ -9,8 +9,13 @@ export {
 } from './convert';
 export {
   FAIRY_BUILD_PLAN_VERSION,
+  FAIRY_COMPILER_VERSION,
+  FAIRY_PLANNER_VERSION,
+  IMPORT_DOCUMENT_SCHEMA_VERSION,
+  fairyBuildPlanSchema,
   planDocument,
-  type FairyBuildPlanV1,
+  validateBuildPlan,
+  type FairyBuildPlanV2,
 } from './plan';
 export {
   SEMANTIC_OVERLAY_VERSION,

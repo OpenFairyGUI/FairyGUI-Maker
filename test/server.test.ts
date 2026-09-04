@@ -756,7 +756,7 @@ test("Maker Host persists revision-checked import drafts and materializes only o
     draft = mappedResult.draft
     assert.equal(mappedResult.semanticOverlay.nodes[mappedRootId].target, "button")
     const planned = await advance("plan")
-    assert.equal(planned.buildPlan.schemaVersion, 1)
+  assert.equal(planned.buildPlan.schemaVersion, 2)
     await advance("compile")
     assert.equal(await readFile(path.join(dataDir, "import-drafts", draft.draftId, "generated", "project", draft.generated.fairyFile)).then(() => true), true)
     await assert.rejects(readFile(path.join(targetPath, draft.generated.fairyFile)), { code: "ENOENT" })
@@ -788,7 +788,7 @@ test("Maker Host persists revision-checked import drafts and materializes only o
     host = await startMakerHost({ port: 0, token, dataDir })
     const detail = await fetch(`${host.origin}/api/import-drafts/${draft.draftId}`, { headers }).then((response) => response.json())
     assert.equal(detail.draft.revision, draft.revision)
-    assert.equal(detail.buildPlan.schemaVersion, 1)
+  assert.equal(detail.buildPlan.schemaVersion, 2)
     assert.equal(detail.semanticOverlay.nodes[mappedRootId].target, "button")
     assert.equal(detail.preview.viewerUrl, `${host.origin}/projects/${detail.preview.projectId}/viewer`)
     const removed = await fetch(`${host.origin}/api/import-drafts/${draft.draftId}?expectedRevision=${draft.revision}`, {
