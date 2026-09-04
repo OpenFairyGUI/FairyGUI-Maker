@@ -30,6 +30,8 @@ test("opaque runtime entries expose only installed static code, never Host capab
       const html = await page.text()
       for (const [, asset] of html.matchAll(/(?:src|href)="(\/(?:assets|viewer-runtime)\/[^"?#]+)"/g)) {
         const response = await fetch(`${host.origin}${asset}`, { headers: { Origin: "null" } })
+        // Drain large bundles: unread bodies can leave Host shutdown waiting on socket backpressure.
+        assert.ok((await response.arrayBuffer()).byteLength > 0, asset)
         assert.equal(response.status, 200, asset)
         assert.equal(response.headers.get("access-control-allow-origin"), "*")
         assert.equal(response.headers.get("access-control-allow-credentials"), null)
