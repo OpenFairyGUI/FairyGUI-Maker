@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { EventEmitter } from "node:events"
 import { readFile, rm } from "node:fs/promises"
 import path from "node:path"
 import test from "node:test"
@@ -41,5 +42,25 @@ test("failure reports survive caller cleanup and redact tokens and local fixture
     assert.doesNotMatch(text, /host-owner-test-token|private|other-secret/)
     assert.doesNotMatch(redactEvidence(JSON.stringify({ path: "C:\\private\\fixture" }), ["C:\\private\\fixture"]), /private/)
     assert.match(redactEvidence("/test?token=hidden#nonce=also-hidden", []), /token=\[redacted\]#nonce=\[redacted\]/)
+  } finally { await rm(evidence.directory, { recursive: true, force: true }) }
+})
+
+test("buffered browser messages retain their original fault phase", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1000 })
+  const evidence = await createBrowserEvidence([])
+  try {
+    const context = Object.assign(new EventEmitter(), { async exposeBinding() {}, async addInitScript() {} })
+    await evidence.attach(context as unknown as Parameters<typeof evidence.attach>[0])
+    const page = new EventEmitter()
+    context.emit("page", page)
+    evidence.phase("delivery-viewer")
+    t.mock.timers.tick(100)
+    evidence.phase("viewer-golden")
+    const message = { type: () => "error", location: () => ({ url: "http://localhost/api/render-sessions/id/results" }), text: () => "net::ERR_FAILED" }
+    page.emit("console", { ...message, timestamp: () => 1050 })
+    assert.equal(evidence.diagnostics[0].phase, "delivery-viewer")
+    evidence.verify()
+    page.emit("console", { ...message, timestamp: () => 1150 })
+    assert.throws(() => evidence.verify(), /Unexpected browser diagnostics/)
   } finally { await rm(evidence.directory, { recursive: true, force: true }) }
 })

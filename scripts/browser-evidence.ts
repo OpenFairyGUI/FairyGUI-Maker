@@ -55,29 +55,31 @@ export async function createBrowserEvidence(secrets: string[]) {
   const directory = await mkdtemp(path.join(root, "run-"))
   const diagnostics: BrowserDiagnostic[] = []
   const checks: Record<string, { status: "passed" | "failed"; result?: unknown }> = {}
-  let phase = "setup"
+  const phases = [{ name: "setup", at: 0 }]
+  const phase = (name: string) => { phases.push({ name, at: Date.now() }) }
   let overflow = false
   const clean = (value: string) => redactEvidence(value, secrets).slice(0, 4_000)
-  const record = (d: Omit<BrowserDiagnostic, "phase">) => {
+  const record = (d: Omit<BrowserDiagnostic, "phase">, at = Date.now()) => {
     if (diagnostics.length >= 2_000) { overflow = true; return }
     // No query strings, cookies, authorization, request bodies, DOM dumps or storage exports.
-    diagnostics.push({ ...d, phase, message: clean(d.message), url: clean(d.url.split(/[?#]/)[0]) })
+    diagnostics.push({ ...d, phase: phases.findLast((phase) => phase.at <= at)!.name, message: clean(d.message), url: clean(d.url.split(/[?#]/)[0]) })
   }
   return {
     directory,
     diagnostics,
-    phase(name: string) { phase = name },
+    phase,
     async attach(context: BrowserContext) {
-      await context.exposeBinding("__makerEvidenceCsp", ({ frame }, value: { directive: string; blocked: string }) => {
-        record({ kind: "csp", url: frame.url(), message: `${value.directive}: ${value.blocked}` })
+      await context.exposeBinding("__makerEvidenceCsp", ({ frame }, value: { directive: string; blocked: string; at: number }) => {
+        record({ kind: "csp", url: frame.url(), message: `${value.directive}: ${value.blocked}` }, value.at)
       })
       await context.addInitScript(`window.__makerEvidenceCspPending = []; document.addEventListener("securitypolicyviolation", event => {
-        window.__makerEvidenceCspPending.push(window.__makerEvidenceCsp({ directive: event.effectiveDirective, blocked: event.blockedURI }));
+        window.__makerEvidenceCspPending.push(window.__makerEvidenceCsp({ directive: event.effectiveDirective, blocked: event.blockedURI, at: performance.timeOrigin + event.timeStamp }));
       });`)
       context.on("page", (page) => {
         page.on("pageerror", (error) => record({ kind: "pageerror", url: page.url(), message: error.message }))
         page.on("console", (message) => {
-          if (["error", "warning"].includes(message.type())) record({ kind: `console.${message.type()}`, url: message.location().url || page.url(), message: message.text() })
+          // Chromium may replay buffered messages after a route/debugger change.
+          if (["error", "warning"].includes(message.type())) record({ kind: `console.${message.type()}`, url: message.location().url || page.url(), message: message.text() }, message.timestamp())
         })
       })
       context.on("requestfailed", (request) => record({ kind: "requestfailed", method: request.method(), url: request.url(), message: request.failure()?.errorText ?? "unknown failure" }))
@@ -86,7 +88,7 @@ export async function createBrowserEvidence(secrets: string[]) {
       })
     },
     async step<T>(name: string, run: () => Promise<T>): Promise<T> {
-      phase = name
+      phase(name)
       try {
         const result = await run()
         checks[name] = { status: "passed", result }
