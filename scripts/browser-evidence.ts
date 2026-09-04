@@ -7,7 +7,7 @@ import { z } from "zod"
 import { comparePixelData } from "../src/web/lib/visual-evidence"
 import type { RenderCommandResult } from "../src/viewer-protocol"
 
-export type BrowserDiagnostic = { phase: string; kind: string; message: string; url: string; status?: number; method?: string }
+export type BrowserDiagnostic = { phase: string; kind: string; message: string; url: string; status?: number; method?: string; resourceType?: string; navigation?: boolean; frameUrl?: string }
 
 // Exceptions describe the deliberate fault, not an entire page/phase. Everything is still saved.
 export function expectedDiagnostic(d: BrowserDiagnostic): string | undefined {
@@ -82,7 +82,8 @@ export async function createBrowserEvidence(secrets: string[]) {
           if (["error", "warning"].includes(message.type())) record({ kind: `console.${message.type()}`, url: message.location().url || page.url(), message: message.text() }, message.timestamp())
         })
       })
-      context.on("requestfailed", (request) => record({ kind: "requestfailed", method: request.method(), url: request.url(), message: request.failure()?.errorText ?? "unknown failure" }))
+      context.on("requestfailed", (request) => record({ kind: "requestfailed", method: request.method(), url: request.url(), message: request.failure()?.errorText ?? "unknown failure",
+        resourceType: request.resourceType(), navigation: request.isNavigationRequest(), frameUrl: clean(request.frame().url().split(/[?#]/)[0]) }))
       context.on("response", (response) => {
         if (response.status() >= 400) record({ kind: "http", url: response.url(), status: response.status(), message: `${response.request().method()} ${response.status()}` })
       })
