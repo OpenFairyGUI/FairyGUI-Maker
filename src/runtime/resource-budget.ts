@@ -189,9 +189,12 @@ export async function readBoundedStream(
     let offset = 0
     for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length }
     return result
+  } catch (error) {
+    void reader.cancel(error).catch(() => {})
+    throw error
   } finally {
     signal.removeEventListener("abort", abort)
-    void reader.cancel().catch(() => {})
+    // EOF needs only unlock; cancelling a completed fetch can race Chromium's network completion.
     reader.releaseLock()
   }
 }
