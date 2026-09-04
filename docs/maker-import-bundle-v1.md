@@ -66,5 +66,6 @@ assets/
 - Reader 拒绝额外文件、缺失文件、路径穿越、重复内容资源、重复/错序 binding 和节点错绑。
 - ImportDocument 自带的 diagnostics 保存在 `fixture.json`，不在 manifest 中复制。
 
-Agent 语义 Overlay 后续以 `sourceNodeId` 关联 Bundle，但不属于 v1。重新生成默认创建新的 Maker
-Draft/Revision，不在 Bundle 层实现人工编辑的三方合并。
+语义 Overlay 已落地为独立的 `MakerSemanticOverlayV1`：`nodes` 以 ImportDocument 节点 ID
+关联源节点，由 Draft 保存并进入 BuildPlan；它不属于 Bundle v1 manifest，也不改写源文档。
+重导入的 ID 复用与冲突检查由 State v2 负责，不在 Bundle 层实现人工编辑的三方合并。

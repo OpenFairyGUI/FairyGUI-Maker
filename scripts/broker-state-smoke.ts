@@ -79,6 +79,15 @@ export async function brokerStateSmoke(page: Page, mode: "viewer" | "player", id
   }
   if (mode === "player") {
     assert.equal(controller, true, "Player fixture must expose Controller and Transition controls")
+    const editing = await state()
+    const title = editing.observation.objectTree.children.find((child: { id: string }) => child.id.endsWith("/TITLE001"))
+    assert.ok(title, "Player fixture must expose an editable title")
+    const updated = await call("update_render_session", { renderSessionId: id, requestId: randomUUID(), expectedStateVersion: editing.semanticStateVersion,
+      operations: [{ op: "set-property", targetId: title.id, property: "text", value: "Agent updated Player" }] })
+    assert.equal(updated.value.semanticStateVersion, editing.semanticStateVersion + 1)
+    assert.equal(updated.value.viewStateVersion, editing.viewStateVersion)
+    const observed = await call("get_render_observation", { renderSessionId: id, requestId: randomUUID(), afterStateVersion: updated.value.semanticStateVersion })
+    assert.equal(observed.value.value.observation.objectTree.children.find((child: { id: string }) => child.id === title.id)?.text, "Agent updated Player")
     const before = await state()
     await call("render_artifact_component", { artifactId: before.artifactId, requestId: randomUUID(), packageId: "SMOKE001", componentId: "OTHER001", capture: false })
     await page.getByRole("treeitem", { selected: true }).filter({ hasText: "OTHER001" }).waitFor()
@@ -87,5 +96,5 @@ export async function brokerStateSmoke(page: Page, mode: "viewer" | "player", id
     const restored = await uiCommand(() => page.getByRole("treeitem").filter({ hasText: "MAIN0001" }).click())
     assert.equal(restored.semanticStateVersion, before.semanticStateVersion + 2, "Broker state feedback must not cause another render")
   }
-  return { sharedView: true, conflictUI: true, viewport: true, captureVersions: true, controller, componentSync: mode === "player" }
+  return { sharedView: true, conflictUI: true, viewport: true, captureVersions: true, controller, componentSync: mode === "player", textUpdate: mode === "player" }
 }

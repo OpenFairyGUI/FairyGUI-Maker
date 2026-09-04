@@ -4,22 +4,15 @@ import { collectUamResourceReferences } from "../../asset-analysis"
 import { snapshotFileSystem, type ProjectScanOptions } from "../../project-snapshot"
 import {
   VIEWER_PROTOCOL_VERSION,
-  type ViewerBrokerCommand,
-  type ViewerCommand,
-  type ViewerConnectMessage,
   type ViewerDiagnostic,
-  type ViewerInteractionEvent,
-  type ViewerObservation,
-  type ViewerOperation,
   type ViewerProjectCatalog,
   type ViewerRendered,
-  type ViewerRuntimeMessage,
   type RenderSessionState,
-  type ViewerViewState,
   type ViewerScene,
 } from "../../viewer-protocol"
 import { getProject, refreshProject, registerViewerRenderer } from "./api"
 import { startRendererDelivery } from "./renderer-delivery"
+import { connectRendererChannel, executeRendererCommand, type RendererFrameSession } from "./renderer-frame"
 import { createRenderSessionClient, type RenderSessionClient } from "./render-session"
 import { prepareRuntimeFrame } from "../../runtime-channel"
 import {
@@ -230,111 +223,17 @@ function restoreImagePackageRefs(document: Document, project: UamProject) {
   }
 }
 
-type ViewerFrameSession = {
-  render(packageId: string, componentId: string, expectedRuntimeEventSeq?: number): Promise<ViewerRendered & { runtimeEventSeq: number }>
-  capture(): Promise<{ blob: Blob; runtimeEventSeq: number; observation?: ViewerObservation }>
-  observe(): Promise<ViewerObservation & { runtimeEventSeq: number }>
-  setView(view: Partial<ViewerViewState>): Promise<Record<string, unknown>>
-  applyOperations(operations: ViewerOperation[], expectedRuntimeEventSeq?: number): Promise<Record<string, unknown>>
-  setInteractionHandler(handler: ((event: ViewerInteractionEvent) => void) | null): void
-  destroy(): void
-}
-
-async function connectViewerFrame(
-  frame: HTMLIFrameElement,
-  bundle: ViewerProjectBundle,
-  signal: AbortSignal,
-): Promise<ViewerFrameSession> {
+async function connectViewerFrame(frame: HTMLIFrameElement, bundle: ViewerProjectBundle, signal: AbortSignal): Promise<RendererFrameSession> {
   if (!frame.contentWindow) throw new Error("Viewer iframe 尚未就绪。")
   const connection = await prepareRuntimeFrame(frame, signal)
-  const channel = new MessageChannel()
-  const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timeout: number }>()
-  let interactionHandler: ((event: ViewerInteractionEvent) => void) | null = null
-  let resolveReady!: () => void
-  let rejectReady!: (error: Error) => void
-  const ready = new Promise<void>((resolve, reject) => {
-    resolveReady = resolve
-    rejectReady = reject
-  })
-  const readyTimeout = window.setTimeout(() => rejectReady(new Error("LayaAir Viewer runtime 启动超时。")), 20_000)
-
-  channel.port1.onmessage = (event: MessageEvent<ViewerRuntimeMessage>) => {
-    const message = event.data
-    if (message.kind === "ready") {
-      window.clearTimeout(readyTimeout)
-      if (message.sourceRevision === bundle.sourceRevision) resolveReady()
-      else rejectReady(new Error("Viewer runtime 连接到了错误的工程版本。"))
-      return
-    }
-    if (message.kind === "fatal") {
-      window.clearTimeout(readyTimeout)
-      rejectReady(new Error(message.error))
-      return
-    }
-    if (message.kind === "interaction") {
-      interactionHandler?.(message.value)
-      return
-    }
-    if (message.kind !== "response") return
-    const request = pending.get(message.requestId)
-    if (!request) return
-    window.clearTimeout(request.timeout)
-    pending.delete(message.requestId)
-    if (message.ok) request.resolve({ ...message.value as object, runtimeEventSeq: message.runtimeEventSeq })
-    else request.reject(new Error(message.error))
-  }
-  channel.port1.start()
-
-  const connectMessage: ViewerConnectMessage = {
-    type: "fairygui.viewer.connect",
-    protocolVersion: VIEWER_PROTOCOL_VERSION,
-    sourceRevision: bundle.sourceRevision,
-    ...connection,
-  }
-  const abortReady = () => rejectReady(signal.reason)
-  signal.addEventListener("abort", abortReady, { once: true })
-  try {
-    signal.throwIfAborted()
-    frame.contentWindow.postMessage(connectMessage, "*", [channel.port2])
-    await ready
-  } catch (error) { channel.port1.close(); channel.port2.close(); throw error }
-  finally { window.clearTimeout(readyTimeout); signal.removeEventListener("abort", abortReady) }
-
-  const send = <T>(command: ViewerCommandInput, transfer: Transferable[] = []): Promise<T> => {
-    const requestId = crypto.randomUUID()
-    return new Promise<T>((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        pending.delete(requestId)
-        reject(new Error(`Viewer runtime command timed out: ${command.kind}`))
-      }, 20_000)
-      pending.set(requestId, { resolve: resolve as (value: unknown) => void, reject, timeout })
-      channel.port1.postMessage({ ...command, requestId } as ViewerCommand, transfer)
-    })
-  }
-
+  const runtime = await connectRendererChannel(frame.contentWindow, "Viewer", { ...connection, sourceRevision: bundle.sourceRevision }, signal)
   return {
+    ...runtime,
     render(packageId, componentId, expectedRuntimeEventSeq) {
+      const component = bundle.catalog.packages.find((pkg) => pkg.packageId === packageId)?.components.find((item) => item.id === componentId)
+      if (!component) throw new Error(`Viewer resource not found: ${packageId}/${componentId}`)
       const scene = compileViewerScene(bundle, packageId, componentId)
-      return send<ViewerRendered & { runtimeEventSeq: number }>({ kind: "render", scene, expectedRuntimeEventSeq }, scene.assets.map(({ data }) => data))
-    },
-    async capture() {
-      const value = await send<{ data: ArrayBuffer; type: string; runtimeEventSeq: number; observation?: ViewerObservation }>({ kind: "capture" })
-      return { blob: new Blob([value.data], { type: value.type }), runtimeEventSeq: value.runtimeEventSeq, observation: value.observation }
-    },
-    observe: () => send<ViewerObservation & { runtimeEventSeq: number }>({ kind: "observe" }),
-    setView: (view) => send<Record<string, unknown>>({ kind: "set-view", view }),
-    applyOperations: (operations, expectedRuntimeEventSeq) => send<Record<string, unknown>>({ kind: "apply-operations", operations, expectedRuntimeEventSeq }),
-    setInteractionHandler(handler) {
-      interactionHandler = handler
-    },
-    destroy() {
-      window.clearTimeout(readyTimeout)
-      for (const request of pending.values()) {
-        window.clearTimeout(request.timeout)
-        request.reject(new Error("Viewer runtime session closed."))
-      }
-      pending.clear()
-      channel.port1.close()
+      return runtime.send<ViewerRendered & { runtimeEventSeq: number }>({ kind: "render", scene, expectedRuntimeEventSeq }, scene.assets.map(({ data }) => data))
     },
   }
 }
@@ -342,7 +241,6 @@ async function connectViewerFrame(
 export async function startViewerRenderer(projectId: string, bundle: ViewerProjectBundle, iframe: HTMLIFrameElement, onState: (state: RenderSessionState) => void, onError: (error: Error) => void, signal: AbortSignal) {
   const frame = await connectViewerFrame(iframe, bundle, signal)
   if (signal.aborted) { frame.destroy(); signal.throwIfAborted() }
-  signal.addEventListener("abort", () => frame.destroy(), { once: true })
   let client: RenderSessionClient | undefined
   const delivery = await startRendererDelivery(
     (signal) => registerViewerRenderer({
@@ -352,7 +250,7 @@ export async function startViewerRenderer(projectId: string, bundle: ViewerProje
       catalog: bundle.catalog,
     }, signal),
     frame,
-    (command) => executeBrokerCommand(bundle, frame, command),
+    (command) => executeRendererCommand("Viewer", frame, command),
     onError,
     signal,
     (state) => client?.accept(state),
@@ -361,47 +259,6 @@ export async function startViewerRenderer(projectId: string, bundle: ViewerProje
   return { client, renderSessionId: delivery.renderSessionId, stop: () => { delivery.stop(); frame.destroy() } }
 }
 
-async function executeBrokerCommand(bundle: ViewerProjectBundle, frame: ViewerFrameSession, command: ViewerBrokerCommand) {
-  if (command.kind === "capture") return captureFrame(frame)
-  if (command.kind === "observe") { const observation = await frame.observe(); return { observation, runtimeEventSeq: observation.runtimeEventSeq } }
-  if (command.kind === "view") return frame.setView(command.payload)
-  if (command.kind === "update") {
-    const operations = command.payload.operations
-    if (!Array.isArray(operations)) throw new Error("Viewer update command is missing operations.")
-    return await frame.applyOperations(operations as ViewerOperation[], command.executionState?.runtimeEventSeq)
-  }
-
-  const packageId = String(command.payload.packageId ?? "")
-  const componentId = String(command.payload.componentId ?? "")
-  const pkg = bundle.catalog.packages.find((candidate) => candidate.packageId === packageId)
-  const component = pkg?.components.find((candidate) => candidate.id === componentId)
-  if (!pkg || !component) throw new Error(`Viewer resource not found: ${packageId}/${componentId}`)
-  const rendered = await frame.render(packageId, componentId, command.executionState?.runtimeEventSeq)
-  return {
-    rendered,
-    observation: { objectTree: rendered.objectTree, controllers: rendered.controllers, availableTransitions: rendered.availableTransitions },
-    runtimeEventSeq: rendered.runtimeEventSeq,
-    ...(command.payload.capture === true ? await captureFrame(frame) : {}),
-  }
-}
-
-async function captureFrame(frame: ViewerFrameSession) {
-  const { blob, ...snapshot } = await frame.capture()
-  return { ...snapshot, screenshotBase64: await blobToBase64(blob) }
-}
-
-function blobToBase64(blob: Blob) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onerror = () => reject(reader.error ?? new Error("Viewer screenshot encoding failed."))
-    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] ?? "")
-    reader.readAsDataURL(blob)
-  })
-}
-
 function resourceKey(packageId: string, resourceId: string) {
   return `${packageId}/${resourceId}`
 }
-
-type WithoutRequestId<T> = T extends unknown ? Omit<T, "requestId"> : never
-type ViewerCommandInput = WithoutRequestId<ViewerCommand>

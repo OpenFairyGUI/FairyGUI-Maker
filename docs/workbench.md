@@ -80,7 +80,7 @@ Agent 不直接操作 iframe 或 Canvas。它只向 Host 提交语义命令，�
 
 当前共享协议为 v6，分成两层：Host 与 Workbench 页面通过 `/api/renderers`、命令长轮询、结果 ACK 和 interaction 上报通信；Renderer 与不透明源 iframe 通过绑定父窗口、来源和一次性 nonce 的 `MessageChannel` 通信。Host 命令统一为 `render / update / view / observe / capture`，Renderer 再分别转换为 Viewer 的 `render` 或 Player 的 `render-artifact`，因此共享控制面不会把两种 renderer 混为一套。Workbench 控件不持有可直接修改 iframe 的 FrameSession。
 
-对应实现边界：`src/web/lib/viewer.ts` 与 `src/runtime/viewer-runtime.ts` 负责工程态；`src/web/lib/player.ts`、`src/runtime/player-runtime.ts` 与 `src/server/artifacts.ts` 负责发布态；`src/server/viewer.ts` 只负责两者共用的 Render Session Broker 和 MCP 工具。
+对应实现边界：`src/web/lib/viewer.ts` 与 `src/runtime/viewer-runtime.ts` 负责工程态；`src/web/lib/player.ts`、`src/runtime/player-runtime.ts` 与 `src/server/artifacts.ts` 负责发布态；`src/web/lib/renderer-frame.ts` 负责父页面共用的 MessagePort 请求与命令转发；`src/server/viewer.ts` 负责两者共用的 Render Session Broker 和 MCP 工具。
 
 Workbench 保留 `/viewer`、`/player`、`/asset-manager` 作为人工选择入口；Agent 不经过统一工具门户，而由 MCP 直接获得 `/projects/:projectId/viewer`、`/artifacts/:artifactId/player`、`/projects/:projectId/assets` 三类稳定目标深链。需要浏览器运行时或目录授权时，工具返回 `browser_required`、来源身份和对应 URL；按 render session 操作时也返回该会话原本的目标深链，页面重连后 Agent 重新获取新会话再继续。
 
@@ -214,7 +214,7 @@ Host 同步校验身份和旧 revision：冲突 `409`，不自动重放；相同
 
 “清理失效授权”是显式操作：仅删除当前 Host 未注册、保存超过 24 小时的本浏览器记录，兼容清理没有 savedAt 的旧 v1 记录；近期保存保留，避免与其他页面正在进行的注册冲突。保存时间是同一 IDB store 的可选字段，无新索引，不做整库迁移。移除 handle 不等于撤销浏览器的系统权限。网络结果不确定的注册保留本地 handle，待确认或显式清理，不先丢失授权。
 
-验证：`test/project-snapshot.test.ts` 覆盖依赖、敏感文件、同大小/mtime 修改、复读冲突、路径、符号链接、扫描预算与读取前大小检查；`test/project-revision.test.ts` 覆盖 CAS 并发、no-op、缓存/会话即时失效、删除、Host 只读及 Source API 隐私。`scripts/project-revision-smoke.ts` 使用真实 OPFS/IndexedDB、Workbench 和 runtime 验证刷新后的新文本、Asset Manager 跨页失效、取消与授权清理；仅注入目录选择器结果，不声称验证了系统弹窗或系统权限撤销。证据落盘事务、iframe 权限隔离仍是后续批次。
+验证：`test/project-snapshot.test.ts` 覆盖依赖、敏感文件、同大小/mtime 修改、复读冲突、路径、符号链接、扫描预算与读取前大小检查；`test/project-revision.test.ts` 覆盖 CAS 并发、no-op、缓存/会话即时失效、删除、Host 只读及 Source API 隐私。`scripts/project-revision-smoke.ts` 使用真实 OPFS/IndexedDB、Workbench 和 runtime 验证刷新后的新文本、Asset Manager 跨页失效、取消与授权清理；仅注入目录选择器结果，不声称验证了系统弹窗或系统权限撤销。证据落盘事务不属于本批；iframe 权限隔离已由批次 16 落地。
 
 ### 2.10 Host Save Grant（批次 15）
 
@@ -366,6 +366,18 @@ CI 和 npm release workflow 在成功或失败后都上传上述目录，保留 
 
 本地验收（Windows）：96 项 Node 测试、TypeScript/构建、关闭基线更新且设置 `CI=true` 的完整 Chromium 烟测通过，Viewer/Player 均为 0 different pixels / 0 MAE；门禁自检确认像素差异及六类诊断会被拒绝并保留失败文件。`npm pack --dry-run --ignore-scripts --json` 确认不包含测试证据；本批未重跑真实 tarball 安装烟测。`pnpm audit --prod` 在 npm registry 返回 `ERR_SOCKET_TIMEOUT`，属于未完成的外部审计，不标记完整 `verify:release` 已通过。GitHub Ubuntu job/上传动作尚需推送后由 CI 实际执行，本地结果不代替跨 OS 验收。
 
+### 2.15 按需整理（批次 20）
+
+只整理前面批次已经形成的共享边界，不按文件行数重构。父页面的 `renderer-frame.ts` 统一 Viewer/Player 的 MessagePort 请求关联、ready/sourceRevision 检查、interaction 转发、命令超时、取消/关闭清理，以及 Broker 命令转换和 PNG Base64 编码。握手失败、同步发送异常、运行中 fatal、取消或重复 destroy 均回收相应等待项；关闭后新请求立即失败，迟到响应不串入新请求。启动时限仍为 20 秒，Viewer/Player 命令时限分别为 20/30 秒。
+
+`runtime-channel.ts` 继续负责父窗口/来源/nonce 握手，`renderer-delivery.ts` 继续负责 HTTP 领取、outbox 与 ACK 重试；没有新增通用 RPC、EventBus 或 ServiceLocator。Viewer 的目录读取、Scene 编译和组件依赖闭包，以及 Player 的 Artifact 目录校验、有界读取、SHA-256 与加载缓存仍各自持有；不合并 iframe runtime，也不全量拆分 `app.tsx`。
+
+删除已被 `pnpm test:browser` 覆盖的 `scripts/player-browser-host.ts`、`scripts/player-mcp-smoke.ts`，不再维护需手工启动 Host/浏览器及设置三项环境变量的第二条验证路径。旧脚本的 Player 文本更新→版本推进→MCP observation 断言迁入 `broker-state-smoke.ts`，使用实时版本而非硬编码 1/2；原有压缩 FUI、目录、截图和会话清理继续由主烟测验证。旧文件可从 Git 历史恢复。
+
+验证入口：`test/renderer-frame.test.ts` 使用原生 MessageChannel 检查两种模式的版本拒绝、启动/命令超时、字节转移、事件水位、异常/取消/关闭和迟到响应；`pnpm test` 与关闭 Golden 更新的 `pnpm test:browser` 覆盖完整回归。文档同步清除旧 v5、未落地 Overlay 和未持久化视觉证据等过时描述；持久 MCP ScreenshotRef、条件等待与 scenario DSL 仍是未实现能力。
+
+本地验收（Windows）：101 项 Node 测试、TypeScript/构建、`CI=true` 且 `UPDATE_VISUAL_GOLDENS=0` 的完整 Chromium 烟测通过；Viewer/Player 的 PNG 摘要与原基线一致，均为 0 different pixels / 0 MAE。`npm pack --dry-run --ignore-scripts --json` 的 39 个发行文件不含测试/证据/手工烟测。未改依赖，未重跑依赖审计或真实 tarball 安装，未将本地结果称为完整发布验收；跨 OS CI 仍需实际执行。
+
 ## 3. 核心领域契约
 
 接口使用稳定 ID，不使用显示名称、任意文件路径或屏幕坐标作为主键。
@@ -431,7 +443,7 @@ type UpdateRenderSessionInput = {
 }
 ```
 
-当前 v5 不暴露 `settle`；命令结果只确认对应 runtime 已执行本次操作。`idle`、条件等待与事件断言留给后续 `run_ui_scenario`，不提前塞入单次更新接口。
+当前 v6 不暴露 `settle`；命令结果只确认对应 runtime 已执行本次操作。`idle`、条件等待与事件断言留给后续 `run_ui_scenario`，不提前塞入单次更新接口。
 
 约束：
 
@@ -531,7 +543,7 @@ type CaptureRenderScreenshotInput = {
 
 第一版只截取实际 Laya 舞台：Viewer 和 Player runtime 都调用 `Laya.stage.drawToCanvas()` 并生成 PNG。Viewer 的闭包资产通过结构化克隆进入 iframe，并以本地 Blob URL 解码；外部 URL 不纳入只读工程依赖，避免污染 Canvas。非 origin-clean Canvas 会拒绝像素读取或 `toBlob()`：[HTMLCanvasElement.toBlob](https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/toBlob)。
 
-页面把 PNG 转为 `screenshotBase64` 随命令 ACK 返回 Host；Host 不把这段 Base64 放进文本结果，而是立即返回 MCP `image/png` content，并在文本中标记 `screenshot: { attached: true, mimeType: "image/png" }`。组件证据应使用该 Canvas 截图；浏览器整页截图只用于审查 Workbench 自身界面。当前不创建 `ScreenshotRef` 或 resource URI，持久截图、viewport/page 截图和 Playwright 无人值守证据图留给后续：[Playwright screenshots](https://playwright.dev/docs/screenshots)。
+页面把 PNG 转为 `screenshotBase64` 随命令 ACK 返回 Host；Host 不把这段 Base64 放进文本结果，而是立即返回 MCP `image/png` content，并在文本中标记 `screenshot: { attached: true, mimeType: "image/png" }`。组件证据应使用该 Canvas 截图；浏览器整页截图只用于审查 Workbench 自身界面。普通 MCP 截图当前不创建持久 `ScreenshotRef` 或 resource URI；Import Draft 已可保存 Reference/Capture/Diff 与报告，Playwright 无人值守证据及失败页面截图已由批次 19 落地。这些文件不代表 render session 跨重启持久化。
 
 后续连续性 UI 测试会复用该通道编排 update、wait、interaction 和 capture；当前尚未实现 `run_ui_scenario`。
 
@@ -621,7 +633,7 @@ Viewer / Player 当前没有新增自定义 MCP resource。Artifact manifest 和
 
 ### 7.1 约束
 
-- 当前 Maker Host 已经使用 Node 原生 HTTP、MCP TypeScript SDK 和 OpenFairyGUI backend。
+- 当前 Maker Host 使用 Hono 的 Node adapter、MCP TypeScript SDK 和 OpenFairyGUI backend。
 - FairyGUI Editor Online 已验证 Vite、TypeScript、LayaAir 3.3.10 和 FairyGUI Web runtime 的浏览器链路。
 - Workbench 是 localhost 优先的单用户工具，不需要 SSR、云数据库或微服务。
 - WebUI 需要可访问的 DOM 管理界面；FairyGUI Canvas 只承担项目资源渲染。
@@ -648,8 +660,8 @@ Viewer / Player 当前没有新增自定义 MCP resource。Artifact manifest 和
 | 样式 | Tailwind CSS 4 + shadcn CSS variables | 与 shadcn 官方 Vite 方案一致，保留可替换的 design tokens |
 | 渲染 runtime | 隔离 iframe + 冻结的 LayaAir 3.3.10/FairyGUI Web | 复用已有验证基础，避免同时适配多个引擎 |
 | 后端测试 | `node:test` | 当前已使用，无需替换 |
-| 前端验证 | TypeScript strict + Vite build + 浏览器 runtime harness | 覆盖 iframe 启动、组件实例化、语义属性更新和 PNG 截图；暂不新增测试框架 |
-| 浏览器验收 | Playwright Chromium 发布烟测 | 在真实 Viewer 与压缩 `.fui` Player 中验证组件、observation 和 MCP PNG |
+| 前端验证 | TypeScript strict + Vite build + 共享边界 Node 测试 | 编译与逻辑验证，不代替真实浏览器验收 |
+| 浏览器验收 | Playwright Chromium 发布烟测 | 真实 Viewer/原生 Player、双模式像素 Golden、故障注入与证据文件，详见批次 19 |
 | 持久化 | Host 内存会话 + IndexedDB directory handle + 本地 artifact 目录和 manifest | Artifact 在每次启动时重校验；文件夹授权只存在于同源浏览器 |
 | Host/浏览器通信 | REST + HTTP 长轮询；iframe 内 `MessageChannel` | 命令按序 ACK，首版不需要 GraphQL、WebSocket 或自定义 RPC 框架 |
 
@@ -674,17 +686,20 @@ Playwright 自带截图基线与比较能力，但官方同时说明结果会受
 | SQLite/PostgreSQL | 会话和短期产物可由内存及文件系统管理 | 需要跨重启任务历史、全文检索或多用户并发 |
 | Cytoscape/D3 | Asset Manager 第一版使用列表即可回答影响关系 | 用户明确需要大型交互图并验证列表不足 |
 
-## 8. 建议目录
+## 8. 当前目录
 
-保持单 package，不提前拆 monorepo：
+保持单 package，不提前拆 monorepo；协议沿用根目录文件，不为整理而搬迁到新的 `contracts/`：
 
 ```text
 src/
 ├─ server/          Maker Host、REST、MCP、artifact 与 render session
-├─ contracts/       REST、MCP 和 runtime bridge 的共享 TypeScript schema
+├─ design-import/   源适配、Bundle、Planner/Compiler、Draft 与重导入
+├─ *-protocol.ts    Viewer/Artifact 等共享契约
+├─ runtime-channel.ts 父窗口/来源/nonce 握手
 ├─ web/             React Maker Workbench shell、Project Source Client、shadcn 组件与产品模块
 └─ runtime/         独立 iframe entry 与 Laya/FairyGUI bridge
-test/               Node Host 测试
+test/               Node 与边界回归测试
+scripts/            CLI、浏览器证据与安装包烟测入口
 ```
 
 只有第二种 runtime profile 真正开始实现时，才把 `runtime/` 进一步拆成 adapter package。
@@ -695,7 +710,7 @@ test/               Node Host 测试
 
 Maker MCP 已增加 `list_viewer_components`、`render_component_preview`、`list_artifact_components`、`open_artifact_player`、`render_artifact_component`、`update_render_session`、`set_render_view`、`get_render_observation` 和 `capture_render_screenshot`。组件使用 package/component resource ID 定位；临时更新只接受白名单 `set-property`、`set-controller-page`、`play-transition` 和 `dispatch-event`，不接受任意 JavaScript、坐标操作或显示名称猜测。`get_render_observation` 返回对象树、控件状态和 Controller page；未打开对应 Viewer / Player 时返回 `browser_required` 和稳定入口 URL。
 
-当前截图直接作为 MCP image content 返回，不做跨重启持久化；Render Session 也只保存在 Host 内存。下一阶段再补 ScreenshotRef digest/resource、条件等待/事件断言和 `run_ui_scenario`。Viewer 的 ComboBox 弹层由 Maker 提供通用工程态交互，未被 UAM 表达的业务脚本和宿主绑定不执行；发布后原生行为由 Player 验证。
+普通会话截图直接作为 MCP image content 返回，Render Session 只保存在 Host 内存；Draft Visual Evidence 与浏览器测试证据已单独持久化。持久 MCP ScreenshotRef digest/resource、条件等待/事件断言和 `run_ui_scenario` 尚未实现。Viewer 的 ComboBox 弹层由 Maker 提供通用工程态交互，未被 UAM 表达的业务脚本和宿主绑定不执行；发布后原生行为由 Player 验证。
 
 ## 10. 下一轮决策
 
