@@ -145,10 +145,12 @@ try {
       console.log("artifact-trace", JSON.stringify({ event: "request", at: Date.now(), frame: request.frame().url().split(/[?#]/)[0] }))
     }
   })
-  for (const event of ["requestfinished", "requestfailed"] as const) context.on(event, (request) => {
+  const traceRequestEnd = (event: string, request: import("playwright").Request) => {
     const started = artifactRequests.get(request)
     if (started) console.log("artifact-trace", JSON.stringify({ event, at: Date.now(), elapsed: Date.now() - started, error: request.failure()?.errorText }))
-  })
+  }
+  context.on("requestfinished", (request) => traceRequestEnd("requestfinished", request))
+  context.on("requestfailed", (request) => traceRequestEnd("requestfailed", request))
   context.on("page", (page) => page.on("console", (message) => { if (message.text().startsWith("artifact-client ")) console.log(message.text()) }))
   await context.addInitScript(`(() => {
     const original = window.fetch;
