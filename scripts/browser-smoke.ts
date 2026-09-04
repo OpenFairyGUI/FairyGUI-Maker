@@ -4,6 +4,7 @@ import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 import { Document, ProjectType } from "@openfairygui/core"
 import { NodeIO } from "@openfairygui/core/node"
+import { createNodeBackendRuntime } from "@openfairygui/backend/node"
 import { chromium } from "playwright"
 
 import { startMakerHost } from "../src/server/index"
@@ -12,6 +13,7 @@ import { runtimeBudgetSmoke } from "./runtime-budget-smoke"
 import { rendererDeliverySmoke } from "./renderer-delivery-smoke"
 import { brokerStateSmoke } from "./broker-state-smoke"
 import { projectRevisionSmoke } from "./project-revision-smoke"
+import { saveGrantSmoke } from "./save-grant-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -84,7 +86,7 @@ try {
   const io = new NodeIO()
   const binaryPath = path.join(publishDir, "Smoke.fui")
   await io.writeBinary(document, binaryPath, { compressed: true })
-  host = await startMakerHost({ port: 0, token, dataDir })
+  host = await startMakerHost({ port: 0, token, dataDir, runtime: createNodeBackendRuntime({ allowedProjectRoots: [publishDir] }) })
 
   const binary = await readFile(binaryPath)
   const headers = { Authorization: `Bearer ${token}` }
@@ -216,13 +218,14 @@ try {
     (name, args) => callTool(host!.origin, sessionId, 70, name, args))
   const runtimeBudgets = await runtimeBudgetSmoke(page.context(), host.origin, artifact, publishDir)
   const projectRevision = await projectRevisionSmoke(context, host.origin)
+  const saveGrants = await saveGrantSmoke(context, host, publishDir)
   if (pageErrors.length) throw new Error(`Browser page errors: ${pageErrors.join("; ")}`)
 
   await fetch(`${host.origin}/mcp`, {
     method: "DELETE",
     headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
   })
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, projectRevision, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, projectRevision, saveGrants, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
 } catch (error) {
   for (const page of browser?.contexts().flatMap((context) => context.pages()) ?? []) {
     process.stderr.write(`${page.url()}\n${await page.locator("body").innerText().catch(() => "Page unavailable")}\n`)

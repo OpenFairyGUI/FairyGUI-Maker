@@ -20,7 +20,7 @@ Maker 让人和 Agent 使用同一组稳定 ID、revision 与 render session 协
 
 | 目标 | 使用入口 | 持久化边界 |
 |---|---|---|
-| 检查、编辑或保存工程 | OpenFairyGUI backend session | 仅在显式调用 save 后写回工程 |
+| 检查、编辑或保存工程 | OpenFairyGUI backend session | save 需要显式 revision 与一次性 Host Save Grant |
 | 预览尚未发布的组件 | Viewer | 只修改 render session 内存，不写工程 |
 | 检查资源健康度 | Asset Manager | 固定 source revision 的只读分析 |
 | 验证发布目录 | Player | Artifact 不可变，操作只影响 render session |
@@ -71,6 +71,14 @@ npx fairygui-maker@0.1.0 --data-dir E:\FairyGUI\maker-data
 相对 `--data-dir` 以启动命令的当前目录为基准；未传入时默认使用当前目录下的 `.fairygui-maker`。环境变量 `FAIRYGUI_MAKER_DATA_DIR` 提供相同能力，CLI 参数优先。
 
 在完整模式下，OpenFairyGUI backend 只能访问启动命令当前目录及其子目录。请先进入用户明确授权的工程父目录再启动 Host；不要从磁盘根目录或包含无关工程的宽泛目录启动。
+
+### 保存确认（Host Save Grant）
+
+Agent 的 `save_session` / `materialize_session` 必须携带 `expectedRevision`。首次调用返回 `save_approval_required`，不写盘；所有者在 Dashboard 的 **Host Save Grant** 卡片核对会话、revision、目标和选项，输入独立的确认密钥并批准后，Agent 才能用相同参数重试一次。
+
+完整 Host 在本地交互终端单独显示随机确认密钥；它不是 `FAIRYGUI_MAKER_TOKEN`，不要交给 Agent。非交互启动时，所有者须另行设置 `FAIRYGUI_MAKER_APPROVAL_TOKEN`（24–256 字符，必须与 MCP token 不同），该值不会输出到日志；没有配置则保存保持阻断。不要把确认密钥放入 MCP 客户端环境、仓库配置或启动 URL。
+
+每个请求从创建起 5 分钟内有效，批准后最多尝试执行一次，失败或响应丢失也会消耗授权。修改 revision/选项、关闭会话、撤销或重启 Host 后需重新确认。普通保存、force-save 和完整物化均受此约束；Viewer/Player 的只读绑定不会因此获得写权限。完整规则见 [Host Save Grant](./docs/workbench.md#210-host-save-grant批次-15)。
 
 ## Agent 与 MCP
 
@@ -178,6 +186,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 
 - Host 只绑定 `127.0.0.1`，并校验 Host、Origin 和访问令牌。
 - 同一 Host 最多保留 32 个 MCP session；客户端应正常发送 MCP `DELETE` 关闭不再使用的 session。
+- Host 强制执行一次性保存授权；仅持有 MCP token 或普通 Workbench Cookie 不能批准保存。授权状态仅存内存，最多保留 128 条记录。
 - Viewer 使用原始工程 UAM；Player 只消费固定 Artifact，两条渲染链路不会互相降级。
 - Viewer 和 Player 都只接受白名单语义操作，不执行任意 JavaScript、表达式或业务 JSON。
 - Workbench 与 Agent 共用 Broker；语义状态和 zoom/background/viewport 分别计版本，截图记录实际捕获的双版本。`stateVersion` 保留为语义版本别名，详见[统一 Broker 状态](./docs/workbench.md#28-统一-broker-状态批次-13)。

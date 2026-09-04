@@ -11,7 +11,7 @@ Operate the existing Maker Host and its MCP tools. Keep project authoring, Viewe
 
 | Goal | Use | Persistent effect |
 |---|---|---|
-| Inspect, edit, or save a `.fairy` project | OpenFairyGUI backend session | Saves only after explicit `save_session` |
+| Inspect, edit, or save a `.fairy` project | OpenFairyGUI backend session | Save requires an explicit revision and a one-time Host Save Grant |
 | Preview the current unpublished project | Viewer | Render-session memory only |
 | Validate imported `.fui` / `_fui.bytes` output | Player | Artifact remains immutable |
 | Publish a project automatically | Unsupported | `publish_artifact` is not implemented |
@@ -37,9 +37,10 @@ Use the registered OpenFairyGUI MCP prompts when the client exposes them. They d
 3. Plan the smallest UAM operation batch supported by the current contract. Do not invent selector or operation grammar at the MCP layer.
 4. Call `openfairygui_backend_apply_transaction` with `sessionId`, the observed `expectedRevision`, and the operation batch.
 5. Fetch the session again and verify both the new revision and the intended model change.
-6. Before `openfairygui_backend_save_session`, ensure the user has authorized persistence or overwriting. An explicit edit-and-save request already supplies that authorization; a read-only or preview request does not.
-7. Save with the latest known revision. Preserve backend partial-save and error envelopes instead of translating them into success.
-8. Close the session with `openfairygui_backend_close_session` when finished, including after failures.
+6. Before `openfairygui_backend_save_session`, ensure the user has requested persistence or overwriting. An explicit edit-and-save request allows requesting a Host grant; a read-only or preview request does not. Chat authorization alone does not bypass the Host gate.
+7. Always send the observed `expectedRevision`, including for force-save or materialization. On `save_approval_required`, report the request ID, target, revision, options and Workbench `approvalPath`; ask the Host owner to confirm there using their separate approval token. Keep the backend session open while awaiting this decision. Do not obtain, read, print or supply that token yourself, approve via REST/browser automation, or bypass the gate using filesystem tools or another backend.
+8. After owner confirmation, retry the identical tool arguments once. Grants expire five minutes after request creation and are consumed before execution, even on failed or uncertain writes. Re-read state after failure; never silently request and approve another grant. Changed revision/options, closure, rejection or revocation require a fresh request and owner decision. Preserve backend partial-save/error envelopes; a consumed grant does not prove success.
+9. Close the session with `openfairygui_backend_close_session` when finished or abandoning the operation, including after failures; do not close a session still awaiting owner approval.
 
 If a revision is stale, fetch the session again and re-plan. Never replay an old mutation blindly. Use `openfairygui_backend_materialize_session` only when the user explicitly requests full-project materialization.
 
@@ -83,6 +84,8 @@ Player operations change only render-session memory. Never treat them as Artifac
 | `browser_required` | Open the returned Viewer or Player URL; do not fabricate a render result |
 | `project_permission_required` | Ask the user to reauthorize from Dashboard |
 | stale backend revision | Re-fetch the session, re-plan, and use the new revision |
+| `save_approval_required` | Ask the owner to confirm in Workbench; keep the session open and do not self-approve |
+| `save_revision_stale` / `save_input_invalid` | Re-fetch the backend revision and supply supported, bounded save arguments; old grants cannot be reused |
 | state-version conflict | Observe the latest state, then decide whether the update is still valid |
 | `state_version_not_reached` | Wait for the requested version; never lower freshness just to get an old image |
 | project/component/artifact not found | Refresh authoritative IDs; never fall back to display-name guessing |

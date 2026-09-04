@@ -216,6 +216,47 @@ Host 同步校验身份和旧 revision：冲突 `409`，不自动重放；相同
 
 验证：`test/project-snapshot.test.ts` 覆盖依赖、敏感文件、同大小/mtime 修改、复读冲突、路径、符号链接、扫描预算与读取前大小检查；`test/project-revision.test.ts` 覆盖 CAS 并发、no-op、缓存/会话即时失效、删除、Host 只读及 Source API 隐私。`scripts/project-revision-smoke.ts` 使用真实 OPFS/IndexedDB、Workbench 和 runtime 验证刷新后的新文本、Asset Manager 跨页失效、取消与授权清理；仅注入目录选择器结果，不声称验证了系统弹窗或系统权限撤销。证据落盘事务、iframe 权限隔离仍是后续批次。
 
+### 2.10 Host Save Grant（批次 15）
+
+完整 Host 的共享 Runtime Proxy 拦截 `saveSession` 与 `materializeSession`，包括 `force: true`、`mode: "materializeCleanSession"` 的完整物化路径。`applyTransaction` 继续仅修改 backend 内存；第一次保存调用产生 Approval Request 并返回 MCP `isError: true` / `backendResult.ok: false` / `error.code: "save_approval_required"`，不会调用 backend 写方法。
+
+1. Agent 提交明确的 `sessionId + expectedRevision` 和保存选项。Host 额外要求 revision 必填，普通保存和 force-save 都不能省略。
+2. 所有者在 `/#save-approvals` 核对请求 ID、会话、revision、目标、force/mode/reason 与 operation SHA-256，再输入独立确认密钥选择批准或拒绝。
+3. 批准生成一次性 `approvalGrantId`；此时仍未执行保存。Agent 使用完全相同的 MCP 参数重试，Host 同步消耗授权后调用原 backend。
+4. backend 保留原 revision 队列校验、目标路径限制、保真校验和事务写盘错误，不因为批准而放宽。排队中的编辑变更了 revision 时，保存仍失败。
+
+```text
+GET /api/save-approvals
+  -> { enabled, approvals: [{ approvalRequestId, approvalGrantId?, sessionId,
+       revision, operation, canonicalProjectPath, targetPath, force, mode, reason,
+       operationDigest, status, createdAt, expiresAt, decidedAt?, consumedAt? }] }
+
+POST /api/save-approvals/:approvalRequestId/decision
+X-Maker-Approval-Token: <owner-only credential>
+{ "decision": "approve" | "reject" | "revoke" }
+```
+
+两条接口仍经过 Host/Origin 与原 bearer/HttpOnly Cookie 认证。决定接口另用恒定时间比较独立的所有者凭证；仅有 MCP token、普通 Cookie、伪造浏览器请求头或已知 grant ID 都不能创建授权。决定对象不存在返回 `404`，终态/过期/旧 revision 返回 `409`，凭证缺失或错误返回 `403`。不新增 MCP 批准工具，不改上游 MCP schema；grant 隐式绑定到规范化的固定操作字段，而不是靠 Agent 提交任意 grant ID。
+
+`FAIRYGUI_MAKER_APPROVAL_TOKEN` 可由所有者在 Host 环境中配置（24–256 字符，不得与访问 token 相同）；未配置时每次启动随机生成，仅在完整模式的交互 stdout 中显示。非交互启动不输出随机密钥，没有预设独立凭证则无法批准，需要由所有者重新配置/交互启动。可信嵌入调用者可使用 `startMakerHost({ approvalToken })`，返回值也包含随机密钥；HTTP/MCP/status/list 不返回该密钥。Workbench 使用 password 输入，不把它放进 URL、Cookie、Storage 或 Query/Mutation 缓存，决定请求发出前清空输入。
+
+| 边界 | 行为 |
+|---|---|
+| 绑定 | session ID、revision、操作类型、canonical project path、targetPath、force、mode、reason；省略 force 与 false 等价，其他选项改变需新请求 |
+| 有效期 | 从请求创建起固定 5 分钟；重试/批准不续期，批准和执行前均检查 |
+| 次数 | 同步先标记 consumed 再调用 backend；并发重试最多一次进入 backend，失败、异常或丢失响应不退回授权 |
+| 失效 | revision 或目标变化、会话关闭/关闭中、同 ID 重开、拒绝、撤销、超时、Host 重启；只能撤销尚未消耗的授权，不能中断已授权的在途保存 |
+| 容量 | Host 最多 128 条记录；相同活跃请求去重，满额先淘汰最早终态记录，全部活跃则返回 save_approval_limit |
+| 输入 | session ID 128 字符、目标路径 4,096 字符、reason 1,000 字符；未知保存选项拒绝，不接受 storage/fileSystem adapter |
+
+状态为 `pending / approved / consumed / rejected / revoked / expired / stale`。Workbench 支持批准、拒绝、撤销、错误提示和轮询；“已消耗”仅表示尝试执行过，应以 backend 结果及磁盘验证判定成功。网络结果不确定时先查询请求与 backend 状态，不自动再次批准。记录有界且只在内存，不是持久审计账本。
+
+`view <path>` 不注册 backend 写工具，也不能批准保存。现有 CLI/Import Draft 向**尚不存在的新目录**物化的工作流保持原边界，不被解释成已有工程的保存授权。当前 MCP 没有 `restore` 或独立的落盘 delete/move 工具；将来开放前必须先接入同一授权策略，不能直接注册。内存中的资源删除/移动会在本次授权保存时落盘，因此界面明确提示覆盖和删除风险。
+
+此边界约束只持有 Maker API 凭证的客户端，不是针对可读 Host 进程环境/终端或可直接写工程的本机进程的 OS 沙箱；同源 runtime iframe/XSS 权限隔离仍由后续批次处理。使用指南同步要求 Agent 等待所有者确认，不读取确认密钥或绕到文件系统自行写盘。
+
+验证：`test/save-grants.test.ts` 验证真实 HTTP/MCP 的拒绝、独立凭证、写盘、force/materialize、并发一次性、旧 revision、后端排队 CAS、目标策略、失败消耗、关闭重开、过期、撤销、容量和只读模式；`scripts/save-grant-smoke.ts` 在 Chromium 里操作真实 Dashboard 的密码输入、批准/拒绝/撤销、刷新及状态回显，并验证确认前磁盘不变、确认后真实写盘。原有 Renderer、预算、FIG 视觉与快照回归继续执行。
+
 ## 3. 核心领域契约
 
 接口使用稳定 ID，不使用显示名称、任意文件路径或屏幕坐标作为主键。
@@ -393,6 +434,8 @@ REST 供 Workbench WebUI 和 Renderer Client 使用。当前接口为：
 
 - `GET /api/status`
 - `GET /api/sessions`
+- `GET /api/save-approvals`
+- `POST /api/save-approvals/:approvalRequestId/decision`（另需所有者凭证）
 - `POST /api/projects`
 - `GET /api/projects`
 - `GET /api/projects/:projectId`

@@ -46,6 +46,7 @@ import {
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { DesignImportPage, ImportDraftPage, type VisualCaptureInfo } from "@/design-import"
+import { SaveApprovalsCard } from "@/save-approvals"
 import { createProject, deleteProject, getArtifact, getArtifacts, getProject, getProjects, getSessions, getStatus, registerProjectAssetAnalysis, type RegisteredProjectData } from "@/lib/api"
 import { importPublishedFolder } from "@/lib/artifacts"
 import { startPlayerRenderer } from "@/lib/player"
@@ -243,6 +244,8 @@ function DashboardPage() {
         <MetricCard label="Projects" value={String(projects.data?.projects.length ?? 0)} detail="Read-only bindings" />
         <MetricCard label="Artifacts" value={String(data?.player?.artifacts ?? artifacts.data?.artifacts.length ?? 0)} detail="Immutable published snapshots" />
       </section>
+
+      <SaveApprovalsCard />
 
       <ProjectBindingsCard
         projects={projects.data?.projects ?? []}

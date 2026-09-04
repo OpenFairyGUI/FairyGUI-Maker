@@ -27,6 +27,7 @@ import { planProjectReimport } from "../design-import/node"
 import { ArtifactStore } from "./artifacts"
 import { registerImportDraftApi } from "./import-drafts"
 import { createHostProjectSnapshot, type HostProjectSnapshot } from "./project-snapshot"
+import { HostSaveGrants } from "./save-grants"
 import { uploadLimits } from "./upload-limits"
 import { UploadError } from "../upload"
 import {
@@ -43,7 +44,7 @@ const { version: PACKAGE_VERSION } = require("../../package.json") as { version:
 const COOKIE_NAME = "fairygui_maker_token"
 const WEB_DIST = fileURLToPath(new URL("../../dist/web", import.meta.url))
 const MAX_MCP_SESSIONS = 32
-const HOST_INSTRUCTIONS = "FairyGUI authoring, Viewer, and Player service. Use backend sessions for revision-checked project edits and save only with user authorization. Use stable IDs returned by list/inspect tools; Viewer and Player operations affect render-session memory only."
+const HOST_INSTRUCTIONS = "FairyGUI authoring, Viewer, and Player service. Use backend sessions for revision-checked project edits. Save and materialize require expectedRevision and a one-time Host Save Grant. On save_approval_required, ask the user to confirm the exact request in Workbench, then retry unchanged arguments; never obtain or supply their separate approval token. Use stable IDs returned by list/inspect tools; Viewer and Player operations affect render-session memory only."
 const VIEW_ONLY_INSTRUCTIONS = "Read-only FairyGUI Viewer and Player service. Use stable IDs returned by list tools. Viewer operations never write project files; backend authoring and save tools are unavailable in this mode."
 const logger = pino({ level: process.env.FAIRYGUI_MAKER_LOG_LEVEL ?? "info" })
 const TRACKED_METHODS = new Set([
@@ -106,6 +107,7 @@ export type RegisteredProject = {
 export type StartMakerHostOptions = {
   port?: number
   token?: string
+  approvalToken?: string
   runtime?: OpenFairyGuiBackendRuntime
   dataDir?: string
   projectPath?: string
@@ -114,6 +116,7 @@ export type StartMakerHostOptions = {
 const hostOptionsSchema = z.object({
   port: z.number().int().min(0).max(65_535),
   token: z.string().min(24, "FAIRYGUI_MAKER_TOKEN must contain at least 24 characters").optional(),
+  approvalToken: z.string().min(24, "FAIRYGUI_MAKER_APPROVAL_TOKEN must contain at least 24 characters").max(256).optional(),
 })
 
 const projectRegistrationSchema = z.object({
@@ -240,19 +243,30 @@ function trackBackendResult(sessions: Map<string, BackendSession>, method: strin
   })
 }
 
-function createTrackedRuntime(runtime: OpenFairyGuiBackendRuntime, sessions: Map<string, BackendSession>) {
+function createTrackedRuntime(runtime: OpenFairyGuiBackendRuntime, sessions: Map<string, BackendSession>, saveGrants: HostSaveGrants) {
   return new Proxy(runtime, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver)
       if (typeof value !== "function") return value
       if (typeof property !== "string" || !TRACKED_METHODS.has(property)) return value.bind(target)
       return (...args: any[]) => {
+        const closingId = property === "closeSession" ? args[0]?.sessionId as string : undefined
+        if (closingId) saveGrants.beginClose(closingId)
         const finish = (result: any) => {
           trackBackendResult(sessions, property, args[0], result)
+          if (result?.ok && (property === "openSession" || property === "openProjectSession")) saveGrants.invalidateSession(result.data.sessionId)
           return result
         }
-        const result = value.apply(target, args)
-        return result && typeof result.then === "function" ? result.then(finish) : finish(result)
+        try {
+          const result = property === "saveSession" || property === "materializeSession"
+            ? saveGrants.execute(property, args[0]) : value.apply(target, args)
+          if (result && typeof result.then === "function") return result.then(finish).finally(() => { if (closingId) saveGrants.endClose(closingId) })
+          if (closingId) saveGrants.endClose(closingId)
+          return finish(result)
+        } catch (error) {
+          if (closingId) saveGrants.endClose(closingId)
+          throw error
+        }
       }
     },
   })
@@ -272,6 +286,9 @@ function registerApi(
     artifactStore: ArtifactStore
     importDraftStore: ImportDraftStore
     importsEnabled: boolean
+    saveGrants: HostSaveGrants
+    approvalToken: string
+    saveApprovalsEnabled: boolean
     ensureDraftPreview(draftId: string): Promise<RegisteredProject>
     removeDraftPreview(draftId: string): void
   },
@@ -305,6 +322,18 @@ function registerApi(
         mcp: [...mcpSessions.values()].map(({ id, createdAt, lastActivityAt, lastError }) => ({ id, createdAt, lastActivityAt, lastError })),
         projects: [...backendSessions.values()].map(publicBackendSession),
       })
+    })
+    .get("/api/save-approvals", (c) => {
+      const { saveGrants, saveApprovalsEnabled } = readState()
+      return c.json({ enabled: saveApprovalsEnabled, approvals: saveApprovalsEnabled ? saveGrants.list() : [] })
+    })
+    .post("/api/save-approvals/:approvalRequestId/decision", zValidator("json", z.object({ decision: z.enum(["approve", "reject", "revoke"]) }).strict()), (c) => {
+      const { saveGrants, approvalToken, saveApprovalsEnabled } = readState()
+      if (!saveApprovalsEnabled) return c.json({ error: "Save approvals are unavailable in read-only mode" }, 403)
+      // Normal bearer/cookie auth is insufficient: an MCP client can bootstrap that cookie itself.
+      if (!tokensMatch(c.req.header("x-maker-approval-token"), approvalToken)) return c.json({ error: "Host owner approval token required; the MCP token cannot approve saves" }, 403)
+      const result = saveGrants.decide(c.req.param("approvalRequestId"), c.req.valid("json").decision)
+      return "error" in result ? c.json({ error: result.error }, result.status) : c.json(result)
     })
     .get("/api/projects", (c) => {
       const { projects } = readState()
@@ -560,9 +589,12 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   const parsed = hostOptionsSchema.parse({
     port: options.port ?? Number(process.env.FAIRYGUI_MAKER_PORT ?? 3847),
     token: options.token ?? process.env.FAIRYGUI_MAKER_TOKEN,
+    approvalToken: options.approvalToken ?? process.env.FAIRYGUI_MAKER_APPROVAL_TOKEN,
   })
   const host = "127.0.0.1"
   const token = parsed.token ?? randomBytes(24).toString("base64url")
+  const approvalToken = parsed.approvalToken ?? randomBytes(24).toString("base64url")
+  if (tokensMatch(approvalToken, token)) throw new Error("FAIRYGUI_MAKER_APPROVAL_TOKEN must differ from FAIRYGUI_MAKER_TOKEN")
   const startedAt = new Date().toISOString()
   const backendSessions = new Map<string, BackendSession>()
   const mcpSessions = new Map<string, McpSession>()
@@ -577,7 +609,9 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   await importDraftStore.init()
   const renderBroker = new ViewerRenderBroker((projectId) => projects.get(projectId), (artifactId) => artifactStore.get(artifactId))
   const allowedProjectRoot = await realpath(options.projectPath ?? process.cwd())
-  const runtime = createTrackedRuntime(options.runtime ?? createNodeBackendRuntime({ allowedProjectRoots: [allowedProjectRoot] }), backendSessions)
+  const backend = options.runtime ?? createNodeBackendRuntime({ allowedProjectRoots: [allowedProjectRoot] })
+  const saveGrants = new HostSaveGrants(backend)
+  const runtime = createTrackedRuntime(backend, backendSessions, saveGrants)
   const viewOnly = projectSource !== null
   const app = new Hono()
   let origin = ""
@@ -627,6 +661,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
 
   app.use("*", async (c, next) => {
     c.header("Cache-Control", "no-store")
+    if (closing) return c.json({ error: "Host is closing" }, 503)
     c.header("Content-Security-Policy", "default-src 'self' blob:; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'self'")
     c.header("Referrer-Policy", "no-referrer")
     c.header("X-Content-Type-Options", "nosniff")
@@ -736,6 +771,9 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     artifactStore,
     importDraftStore,
     importsEnabled: !viewOnly,
+    saveGrants,
+    approvalToken,
+    saveApprovalsEnabled: !viewOnly,
     ensureDraftPreview,
     removeDraftPreview,
   }))
@@ -773,6 +811,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   allowedOrigins = new Set([origin, `http://localhost:${address.port}`])
   const uploadCleanup = setInterval(() => {
     renderBroker.pruneExpiredSessions()
+    saveGrants.prune()
     void Promise.allSettled([artifactStore.pruneExpiredImports(), importDraftStore.pruneExpiredUploads()])
   }, 60_000)
   uploadCleanup.unref()
@@ -804,11 +843,13 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   return {
     origin,
     token,
+    approvalToken,
     project,
     async close() {
       if (closing) return
       closing = true
       clearInterval(uploadCleanup)
+      saveGrants.close()
       await Promise.all([artifactStore.close(), importDraftStore.close()])
       renderBroker.close()
       await Promise.allSettled([...mcpSessions.values()].map((record) => record.server.close()))
@@ -902,7 +943,7 @@ export async function runCli(argv = process.argv.slice(2)) {
     return null
   }
   if (options.help) {
-    process.stdout.write("Usage:\n  fairygui-maker [view <project-path>] [--port <port>] [--data-dir <path>]\n  fairygui-maker import <source.fig|source.psd|bundle-directory> --out <new-directory> [--data-dir <path>]\n  fairygui-maker import <source.fig|source.psd|bundle-directory> --dry-run [--data-dir <path>]\n  fairygui-maker import inspect <source.fig|source.psd|bundle-directory> [--data-dir <path>]\n  fairygui-maker import plan <source.fig|source.psd|bundle-directory> --out <plan.json> [--data-dir <path>]\n  fairygui-maker reimport <project-directory> --dry-run\n\nOptions:\n  --out <path>       New project directory, or plan JSON for `import plan`\n  --dry-run          Compile a draft or plan reimport changes without writing the target project\n  --port <port>      Localhost port (default: 3847)\n  --data-dir <path>  Private artifact, draft, and runtime data directory (default: .fairygui-maker)\n  --version          Print the installed Maker version\n\nEnvironment: FAIRYGUI_MAKER_TOKEN, FAIRYGUI_MAKER_PORT, FAIRYGUI_MAKER_DATA_DIR, FAIRYGUI_MAKER_LOG_LEVEL\n")
+    process.stdout.write("Usage:\n  fairygui-maker [view <project-path>] [--port <port>] [--data-dir <path>]\n  fairygui-maker import <source.fig|source.psd|bundle-directory> --out <new-directory> [--data-dir <path>]\n  fairygui-maker import <source.fig|source.psd|bundle-directory> --dry-run [--data-dir <path>]\n  fairygui-maker import inspect <source.fig|source.psd|bundle-directory> [--data-dir <path>]\n  fairygui-maker import plan <source.fig|source.psd|bundle-directory> --out <plan.json> [--data-dir <path>]\n  fairygui-maker reimport <project-directory> --dry-run\n\nOptions:\n  --out <path>       New project directory, or plan JSON for `import plan`\n  --dry-run          Compile a draft or plan reimport changes without writing the target project\n  --port <port>      Localhost port (default: 3847)\n  --data-dir <path>  Private artifact, draft, and runtime data directory (default: .fairygui-maker)\n  --version          Print the installed Maker version\n\nEnvironment: FAIRYGUI_MAKER_TOKEN, FAIRYGUI_MAKER_APPROVAL_TOKEN, FAIRYGUI_MAKER_PORT, FAIRYGUI_MAKER_DATA_DIR, FAIRYGUI_MAKER_LOG_LEVEL\nSave approval: the owner confirms each revision-bound save in Workbench using a separate approval token, never the MCP token.\n")
     return null
   }
   if ("reimportPath" in options) {
@@ -952,6 +993,15 @@ export async function runCli(argv = process.argv.slice(2)) {
   } else {
     process.stdout.write(`Open Maker Workbench: ${host.origin}/\n`)
     if (host.project) process.stdout.write(`Open Viewer: ${host.project.viewerUrl}\n`)
+  }
+  if (!host.project) {
+    if (!process.env.FAIRYGUI_MAKER_APPROVAL_TOKEN && process.stdout.isTTY) {
+      process.stdout.write(`Host save approval token (owner only; do not give to MCP clients): ${host.approvalToken}\n`)
+    } else {
+      process.stdout.write(process.env.FAIRYGUI_MAKER_APPROVAL_TOKEN
+        ? "Host saves require Workbench confirmation with the separately configured FAIRYGUI_MAKER_APPROVAL_TOKEN.\n"
+        : "Host saves are blocked: restart interactively or set a separate FAIRYGUI_MAKER_APPROVAL_TOKEN for owner confirmation.\n")
+    }
   }
   let stopping = false
   const stop = async () => {

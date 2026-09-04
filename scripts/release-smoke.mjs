@@ -32,7 +32,7 @@ function run(command, args, options = {}) {
   })
 }
 
-async function initializeMcp(origin, token) {
+async function initializeMcp(origin, token, projectPath) {
   const headers = {
     Accept: "application/json, text/event-stream",
     Authorization: `Bearer ${token}`,
@@ -60,6 +60,25 @@ async function initializeMcp(origin, token) {
   })
   const body = await listed.json()
   if (!listed.ok || body.error) throw new Error(JSON.stringify(body))
+  const call = async (name, args) => {
+    const response = await fetch(`${origin}/mcp`, {
+      method: "POST", headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: `openfairygui_backend_${name}`, arguments: args } }),
+    })
+    const payload = await response.json()
+    const result = payload.result?.structuredContent?.backendResult
+    if (!response.ok || !result) throw new Error(JSON.stringify(payload))
+    return result
+  }
+  const opened = await call("open_session", { projectPath })
+  if (!opened.ok) throw new Error(JSON.stringify(opened))
+  const saved = await call("save_session", { sessionId: opened.data.sessionId, expectedRevision: opened.data.revision, force: true })
+  if (saved.ok || saved.error?.code !== "save_approval_required") throw new Error("Installed Host did not require a Save Grant")
+  const approved = await fetch(`${origin}/api/save-approvals/${saved.error.approval.approvalRequestId}/decision`, {
+    method: "POST", headers, body: JSON.stringify({ decision: "approve" }),
+  })
+  if (approved.status !== 403) throw new Error("Installed Host allowed self-approval using only the MCP token")
+  await call("close_session", { sessionId: opened.data.sessionId })
   await fetch(`${origin}/mcp`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}`, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
@@ -107,10 +126,10 @@ try {
   }
   const bin = path.join(consumer, "node_modules", ".bin", process.platform === "win32" ? "fairygui-maker.cmd" : "fairygui-maker")
   const help = await run(bin, ["--help"], { cwd: consumer })
-  if (!help.stdout.includes("fairygui-maker import") || !help.stdout.includes("fairygui-maker reimport") || !help.stdout.includes("view <project-path>") || !help.stdout.includes("--data-dir <path>")) throw new Error("Installed CLI help is incomplete")
+  if (!help.stdout.includes("fairygui-maker import") || !help.stdout.includes("fairygui-maker reimport") || !help.stdout.includes("view <project-path>") || !help.stdout.includes("--data-dir <path>") || !help.stdout.includes("FAIRYGUI_MAKER_APPROVAL_TOKEN")) throw new Error("Installed CLI help is incomplete")
   const version = await run(bin, ["--version"], { cwd: consumer })
   if (version.stdout.trim() !== expectedVersion) throw new Error(`Unexpected installed CLI version: ${version.stdout.trim()}`)
-  const importedDirectory = path.join(tempRoot, "imported-fig")
+  const importedDirectory = path.join(consumer, "imported-fig")
   const imported = await run(bin, ["import", path.join(root, "test", "fixtures", "design-import", "basic-shapes.fig"), "--out", importedDirectory], { cwd: consumer })
   const importResult = JSON.parse(imported.stdout)
   if (importResult.source?.kind !== "fig" || importResult.report?.nodes < 1) throw new Error("Installed CLI did not return an import report")
@@ -137,9 +156,10 @@ try {
   }
 
   const token = "release-smoke-token-with-24-chars"
+  const approvalToken = "release-owner-approval-token-with-24-chars"
   host = spawn(process.execPath, [path.join(installedRoot, "scripts", "fairygui-maker.mjs"), "--port", "0", "--data-dir", path.join(tempRoot, "data")], {
     cwd: consumer,
-    env: { ...process.env, FAIRYGUI_MAKER_TOKEN: token },
+    env: { ...process.env, FAIRYGUI_MAKER_TOKEN: token, FAIRYGUI_MAKER_APPROVAL_TOKEN: approvalToken },
     stdio: ["ignore", "pipe", "pipe"],
   })
   let stdout = ""
@@ -166,12 +186,12 @@ try {
   if (!status.ok) throw new Error(await status.text())
   const home = await fetch(origin, { headers })
   if (!home.ok || !(await home.text()).includes("FairyGUI Workbench")) throw new Error("Installed Host did not serve the Workbench")
-  const toolNames = await initializeMcp(origin, token)
+  const toolNames = await initializeMcp(origin, token, importedDirectory)
   if (!toolNames.includes("list_viewer_components") || !toolNames.some((name) => name.startsWith("openfairygui_backend_"))) {
     throw new Error("Installed Host MCP tool surface is incomplete")
   }
-  if (stdout.includes(token) || stderr.includes(token)) throw new Error("Installed Host exposed its configured token in process output")
-  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), version: version.stdout.trim(), host: true, mcp: true }) + "\n")
+  if ([token, approvalToken].some((secret) => stdout.includes(secret) || stderr.includes(secret))) throw new Error("Installed Host exposed a configured token in process output")
+  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), version: version.stdout.trim(), host: true, mcp: true, saveGrants: true }) + "\n")
 } finally {
   if (host && host.exitCode === null) {
     const exited = new Promise((resolve) => host.once("exit", resolve))
