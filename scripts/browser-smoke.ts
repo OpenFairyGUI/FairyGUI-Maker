@@ -138,6 +138,42 @@ try {
   environment.browserVersion = browser.version()
   await evidence.step("evidence-gate-self-test", () => browserEvidenceSmoke(browser!))
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1, locale: "en-US", timezoneId: "UTC", colorScheme: "light", reducedMotion: "reduce" })
+  const artifactRequests = new Map<object, number>()
+  context.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/files/Smoke.fui")) {
+      artifactRequests.set(request, Date.now())
+      console.log("artifact-trace", JSON.stringify({ event: "request", at: Date.now(), frame: request.frame().url().split(/[?#]/)[0] }))
+    }
+  })
+  for (const event of ["requestfinished", "requestfailed"] as const) context.on(event, (request) => {
+    const started = artifactRequests.get(request)
+    if (started) console.log("artifact-trace", JSON.stringify({ event, at: Date.now(), elapsed: Date.now() - started, error: request.failure()?.errorText }))
+  })
+  context.on("page", (page) => page.on("console", (message) => { if (message.text().startsWith("artifact-client ")) console.log(message.text()) }))
+  await context.addInitScript(`(() => {
+    const original = window.fetch;
+    let nextId = 0;
+    window.fetch = function(input, init) {
+      if (!String(input).includes("/files/Smoke.fui")) return original.call(this, input, init);
+      const id = ++nextId;
+      const log = (event, detail = {}) => console.info("artifact-client " + JSON.stringify({ id, at: Date.now(), event, ...detail }));
+      log("fetch", { stack: new Error().stack });
+      init?.signal?.addEventListener("abort", () => log("abort", { reason: String(init.signal.reason), stack: init.signal.reason?.stack }), { once: true });
+      return original.call(this, input, init).then(response => {
+        log("response", { status: response.status, length: response.headers.get("content-length") });
+        const getReader = response.body?.getReader.bind(response.body);
+        if (getReader) response.body.getReader = (...args) => {
+          const reader = getReader(...args);
+          const read = reader.read.bind(reader);
+          const cancel = reader.cancel.bind(reader);
+          reader.read = () => read().then(value => { log("read", { done: value.done, bytes: value.value?.byteLength }); return value; });
+          reader.cancel = reason => { log("cancel", { reason: String(reason), stack: new Error().stack }); return cancel(reason); };
+          return reader;
+        };
+        return response;
+      });
+    };
+  })()`)
   await evidence.attach(context)
   const iframeCredentials: Array<Promise<boolean>> = []
   context.on("request", (request) => {
