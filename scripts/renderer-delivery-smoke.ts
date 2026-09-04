@@ -105,8 +105,52 @@ export async function rendererDeliverySmoke(
     throw new Error(`${String(error)}\nWorkbench: ${await page.locator("body").innerText()}`)
   })
   await page.getByText("AGENT WAITING", { exact: true }).waitFor()
+  const registration = page.waitForResponse((response) => response.url().endsWith("/api/renderers") && response.request().method() === "POST" && response.status() === 201)
   await page.getByRole("button", { name: "重新连接", exact: true }).click()
+  const reconnectedSessionId = (await (await registration).json()).session.renderSessionId as string
   await page.getByText("AGENT READY", { exact: true }).waitFor()
   assert.equal((await page.request.get(endpoint)).status(), 404)
-  return { resultAttempts: 3, executions: 1, interactionAttempts: 4, interactions: 2, reconnect: true }
+  return { resultAttempts: 3, executions: 1, interactionAttempts: 4, interactions: 2, reconnect: true, reconnectedSessionId }
+}
+
+export async function rendererLifecycleSmoke(page: Page, renderSessionId: string, call: (name: string, args: Record<string, unknown>) => Promise<unknown>) {
+  const replacement = await page.context().newPage()
+  try {
+    const registered = replacement.waitForResponse((r) => r.url().endsWith("/api/renderers") && r.request().method() === "POST" && r.status() === 201)
+    await replacement.goto(page.url(), { waitUntil: "domcontentloaded" })
+    const id = (await (await registered).json()).session.renderSessionId as string
+    assert.notEqual(id, renderSessionId)
+    await replacement.getByText("AGENT READY", { exact: true }).waitFor()
+    await page.getByRole("alert").filter({ hasText: "renderer_replaced" }).waitFor()
+    await page.getByText("AGENT WAITING", { exact: true }).waitFor()
+    const endpoint = new URL(`/api/render-sessions/${id}`, page.url()).href
+    const requestId = randomUUID()
+    let received!: () => void
+    const held = new Promise<void>((resolve) => { received = resolve })
+    let release!: () => void
+    const closed = new Promise<void>((resolve) => { release = resolve })
+    await replacement.route(`${endpoint}/results`, async (route) => {
+      if (route.request().postDataJSON().requestId !== requestId) return route.continue()
+      received()
+      await closed
+      await route.abort().catch(() => {}) // The page may already have closed its connection.
+    })
+    const pending = call("get_render_observation", { renderSessionId: id, requestId, afterStateVersion: 0 })
+    const rejected = assert.rejects(pending, /disconnected|render_command_timeout/)
+    try {
+      await Promise.race([held, sleep(5_000).then(() => assert.fail("Pending renderer command was not executed"))])
+      await replacement.close()
+    } finally { release() }
+    await rejected
+    assert.equal((await page.request.get(endpoint)).status(), 404)
+    // Explicitly reconnect the original tab; neither its old session nor the in-flight request is replayed.
+    const reconnected = page.waitForResponse((r) => r.url().endsWith("/api/renderers") && r.request().method() === "POST" && r.status() === 201)
+    await page.getByRole("button", { name: "重新连接", exact: true }).click()
+    const freshId = (await (await reconnected).json()).session.renderSessionId
+    await page.getByText("AGENT READY", { exact: true }).waitFor()
+    assert.notEqual(freshId, id)
+    assert.notEqual(freshId, renderSessionId)
+    await call("get_render_observation", { renderSessionId: freshId, requestId: randomUUID(), afterStateVersion: 0 })
+    return { replacement: true, oldTabExplicitError: true, pendingCloseRejected: true, freshSessionRecovery: true }
+  } finally { await replacement.close() }
 }

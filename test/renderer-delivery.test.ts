@@ -186,6 +186,33 @@ test("a bfcache restore reloads instead of resuming a stopped renderer", async (
   assert.equal(reloads, 1)
 })
 
+test("replacement rejects pending commands, wakes polls and retains only bounded expiring reasons", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"] })
+  const broker = new ViewerRenderBroker(() => project)
+  try {
+    const first = broker.registerRenderer(registration)!
+    const pending = broker.executeForProject(project.projectId, "capture", {})!
+    const rejected = assert.rejects(pending, /renderer_replaced/)
+    await broker.readCommands(first.renderSessionId, 0, new AbortController().signal)
+    const poll = broker.readCommands(first.renderSessionId, 1, new AbortController().signal)
+    const second = broker.registerRenderer(registration)!
+    await rejected
+    assert.equal(await poll, null)
+    assert.equal(broker.getSession(first.renderSessionId), null)
+    assert.match(broker.getSessionError(first.renderSessionId), /renderer_replaced/)
+    broker.disconnectRenderer(first.renderSessionId)
+    assert.ok(broker.getSession(second.renderSessionId), "old-tab cleanup must not disconnect its replacement")
+    for (let i = 0; i < 256; i++) broker.registerRenderer(registration)
+    assert.equal(broker.getSessionError(first.renderSessionId), "Render session not found")
+    const last = broker.registerRenderer(registration)!
+    broker.disconnectRenderer(last.renderSessionId)
+    assert.match(broker.getSessionError(last.renderSessionId), /disconnected/)
+    t.mock.timers.setTime(Date.now() + 5 * 60_000 + 1)
+    broker.pruneExpiredSessions()
+    assert.equal(broker.getSessionError(last.renderSessionId), "Render session not found")
+  } finally { broker.close() }
+})
+
 test("a prolonged delivery failure stops instead of keeping an outbox alive forever", async (t) => {
   t.mock.timers.enable({ apis: ["Date"] })
   const r = await renderer(t, { post: async () => {

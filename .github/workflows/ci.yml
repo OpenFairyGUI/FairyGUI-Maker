@@ -28,7 +28,7 @@ jobs:
       - run: pnpm test
 
   release-smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -42,3 +42,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps --no-shell chromium
       - run: pnpm verify:release
+      - name: Retain visual and fault evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/browser/
+          if-no-files-found: warn
+          retention-days: 14

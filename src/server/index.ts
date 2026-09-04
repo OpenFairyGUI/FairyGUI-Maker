@@ -452,7 +452,7 @@ function registerApi(
     })
     .get("/api/render-sessions/:renderSessionId", (c) => {
       const session = readState().renderBroker.getSession(c.req.param("renderSessionId"))
-      return session ? c.json({ session }) : c.json({ error: "Render session not found" }, 404)
+      return session ? c.json({ session }) : c.json({ error: readState().renderBroker.getSessionError(c.req.param("renderSessionId")) }, 404)
     })
     .delete("/api/render-sessions/:renderSessionId", (c) => {
       readState().renderBroker.disconnectRenderer(c.req.param("renderSessionId"))
@@ -463,7 +463,7 @@ function registerApi(
       const id = c.req.param("renderSessionId")
       try {
         const pending = broker.executeCommand(id, c.req.valid("json"))
-        return pending ? c.json({ result: await pending, session: broker.getSession(id) }) : c.json({ error: "Render session not found" }, 404)
+        return pending ? c.json({ result: await pending, session: broker.getSession(id) }) : c.json({ error: broker.getSessionError(id) }, 404)
       } catch (error) {
         const message = formatPublicError(error)
         return c.json({ error: message, session: broker.getSession(id) }, /(?:conflict|not_reached):/.test(message) ? 409 : 422)
@@ -478,7 +478,7 @@ function registerApi(
           c.req.valid("query").after,
           c.req.raw.signal,
         )
-        return result ? c.json(result) : c.json({ error: "Render session not found" }, 404)
+        return result ? c.json(result) : c.json({ error: readState().renderBroker.getSessionError(c.req.param("renderSessionId")) }, 404)
       },
     )
     .post(
@@ -489,7 +489,7 @@ function registerApi(
         try {
           return readState().renderBroker.submitResult(c.req.param("renderSessionId"), input)
             ? c.json({ accepted: true, commandSeq: input.commandSeq, requestId: input.requestId, session: readState().renderBroker.getSession(c.req.param("renderSessionId")) })
-            : c.json({ error: "Render session not found" }, 404)
+            : c.json({ error: readState().renderBroker.getSessionError(c.req.param("renderSessionId")) }, 404)
         } catch (error) {
           return c.json({ error: formatPublicError(error) }, 409)
         }
@@ -501,7 +501,7 @@ function registerApi(
       (c) => {
         try {
           const session = readState().renderBroker.recordInteraction(c.req.param("renderSessionId"), c.req.valid("json"))
-          return session ? c.json({ accepted: true, runtimeEventSeq: c.req.valid("json").runtimeEventSeq, session }) : c.json({ error: "Render session not found" }, 404)
+          return session ? c.json({ accepted: true, runtimeEventSeq: c.req.valid("json").runtimeEventSeq, session }) : c.json({ error: readState().renderBroker.getSessionError(c.req.param("renderSessionId")) }, 404)
         } catch (error) {
           return c.json({ error: error instanceof Error ? error.message : String(error) }, 409)
         }

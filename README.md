@@ -231,17 +231,21 @@ pnpm dev:host
 
 `pnpm dev:web` 仅用于可信源码的前端 UI 调试，不代替 Host 的安全响应头和隔离预览验收。
 
-完整发布门禁还会安装真实 npm tarball 并启动其中的 CLI，以及在 Chromium 中验证 Viewer、Player、两张 MCP PNG 和 Import Draft Visual Evidence：
+完整发布门禁还会安装真实 npm tarball 并启动其中的 CLI，以及在 Chromium 中验证 Viewer/Player 像素 Golden、Import Draft Visual Evidence 与交付/隔离故障回归：
 
 ```powershell
 pnpm exec playwright install --no-shell chromium
 pnpm verify:release
 ```
 
-视觉门禁使用 `basic-shapes` 专属 golden 与指标上限。只有确认渲染变化符合预期时才显式更新基线：
+每次浏览器测试在 `test-results/browser/run-*/` 留存 reference/actual/diff、阈值、来源/组件/Broker 版本和诊断报告；CI 成败均上传并保留 14 天。未预期 Console/CSP/网络错误阻断测试。Viewer 的真实 FIG 与 Player 的原生图形分别使用固定尺寸、独立零差异阈值，不覆盖系统字体保真。详见[批次 19：证据闭环](./docs/workbench.md#214-视觉与故障证据闭环批次-19)。
+
+仅当渲染变化符合预期时显式生成新基线；CI 禁止该开关，功能或诊断检查失败不会写回 Golden。更新后审查图片并关闭开关重跑：
 
 ```powershell
 $env:UPDATE_VISUAL_GOLDENS = "1"
+pnpm test:browser
+Remove-Item Env:UPDATE_VISUAL_GOLDENS
 pnpm test:browser
 ```
 

@@ -99,6 +99,8 @@ export async function assertRuntimeIsolated(page: Page, mode: "viewer" | "player
   })()`)
   assert.deepEqual(result, { credentialless: true, parentDOM: true, cookie: true, localStorage: true, sessionStorage: true, indexedDB: true, directoryHandles: true, topNavigation: true, hostRequests: true, hostWrites: true, popup: true })
   assert.equal(new URL(page.url()).searchParams.has("escaped"), false)
+  // CSP events are dispatched after fetch rejection. Drain their evidence callbacks before changing phases.
+  await frame.evaluate("new Promise(resolve => setTimeout(resolve, 0)).then(() => Promise.all(window.__makerEvidenceCspPending ?? []))")
   return result
 }
 

@@ -325,6 +325,47 @@ Plan 的 `diagnostics` 只是展示快照。编译时重新获取选中根与依
 
 验证：`test/design-import/convert.test.ts` 覆盖 Fresh Build/生成字节、旧 ID 与碰撞、源/图片/Binding 变更、不可删改诊断、缺失依赖、保留 Key、嵌套 Override、Controller 和去重；`command.test.ts` 在切换 TZ/LANG 环境的独立 Node 进程中比较真实 FIG/PSD 全部生成文件（Windows 实测时区改变，但默认 locale 仍为系统的 zh-CN，不将此作为跨系统 locale 的实测证明）；`draft-store.test.ts` 验证重启后的旧 Plan 拒绝/重建、篡改失败无写入和跨 Draft 一致性。浏览器烟测覆盖 planned 页面重载与 revision-aware 重建、后续 Viewer/视觉 Golden；安装包烟测比较真实 CLI 两次全新导入的文件字节。
 
+### 2.14 视觉与故障证据闭环（批次 19）
+
+`pnpm test:browser` 在真实 Chromium 中执行现有 Import → Viewer、Artifact → 原生 Player、Broker、交付重试、资源预算、Revision、Save Grant 和 iframe 隔离回归。新增的证据文件只属于测试运行，不增加 Host 服务、生产数据库或另一套像素算法；比较复用 Workbench 的 `comparePixelData()`，PNG 编解码使用浏览器 Canvas。
+
+每次运行在独立 `test-results/browser/run-*/` 中保存证据，不随临时 Host 清理删除，不进入 Git 或 npm 包：
+
+```text
+report.json              环境、分场景结果、失败原因、分类后的浏览器诊断
+viewer/{reference,actual,diff}.png
+viewer/{threshold,report}.json
+player/{reference,actual,diff}.png
+player/{threshold,report}.json
+failure-page-*.png        失败时仍可读取的页面截图
+```
+
+视觉报告绑定模式、来源 ID/revision（Player 为完整 artifact digest）、package/component ID、renderSessionId、semantic/view 双版本、实际 view 和两张 PNG 的 SHA-256。两套 fixture 各自配置尺寸与阈值，任何像素超限或尺寸变化都会失败；不能只以 PNG Header 正确代替视觉验收。浏览器上下文固定 1280×720、DPR=1、en-US、UTC；Player Golden 显式设置 482×446 的 Broker View，Viewer Golden 同样断言 482×446。CI 固定 ubuntu-24.04 与 lockfile 中的 Chromium/Playwright 版本，报告保存实际 OS/Node/浏览器版本。
+
+Viewer 基线沿用真实 `basic-shapes.fig`；Player 基线使用本地构造并通过 Core 发布的 `Smoke.fui`，捕获 `SMOKE001/OTHER001` 的原生矩形与圆形。Player 的 Main 文本、Controller、Transition 与组件切换继续走功能回归，但**图形 Golden 不认证系统字体、文字排版或所有业务 UI 的视觉保真**。跨操作系统/浏览器升级需另行审查实际差异，不能靠扩大公共阈值消除失败。
+
+所有页面和 iframe 统一采集 `pageerror`、`console.error/warning`、`requestfailed`、HTTP 4xx/5xx 和 `securitypolicyviolation`。未预期的诊断以及诊断数量溢出阻断测试；取消的长轮询、关闭会话、特定 CAS/交付故障、权限拒绝与隔离攻击探针按具体场景和特征归类，仍在报告中留存原因。报告不收集请求体、Cookie、Authorization、存储或 DOM dump，文本脱敏 Host/审批 token 和临时工程路径，失败截图遮盖 password 输入。不启用包含请求体/凭证的原始 Playwright trace/HAR；证据仅针对合成测试工程，不是生产用户工程的遥测。
+
+新增真实双标签页测试覆盖 Viewer 和 Player：第二个页面接管后第一个显示 `renderer_replaced`、退出 AGENT READY；结果尚未交付时关闭第二个页面，等待中的 MCP 调用明确失败，原页面显式重新连接得到新会话。Broker 保留最多 256 条、最长 5 分钟的关闭原因，不保存已关闭会话的截图、Observation 或命令；所有会话 HTTP 入口在 404 中返回该原因。旧页面的关闭请求不能关闭新会话。正常 pagehide 能立即通知 Host，浏览器硬关闭未送达通知时仍由既有 30 秒命令超时标为执行状态不确定，不声称可以撤销已执行的 runtime 操作。
+
+审查中的故障条目对应现有自动化入口：
+
+| 故障 | 可复现验证入口 |
+| --- | --- |
+| Result POST / ACK 丢失、Interaction POST 重试与序号 | `renderer-delivery.test.ts`、`renderer-delivery-smoke.ts`，Viewer/Player 都执行 |
+| Renderer 中途关闭、第二标签页接管与重新连接 | `rendererLifecycleSmoke`，以及 Broker 关闭原因容量/TTL 单测 |
+| Host 重启后 Artifact 重校验 | `artifacts.test.ts` |
+| 同尺寸不同字节重试返回 409 | `uploads.test.ts` |
+| Browser Revision 变化与旧 Viewer 失效 | `project-revision-smoke.ts` |
+| 旧 semantic/view version 冲突 | `broker-state.test.ts`、`broker-state-smoke.ts` |
+| 压缩炸弹、巨型图像、深/宽场景、Observation 预算、失败后资源回收 | `runtime-budget.test.ts`、`runtime-budget-smoke.ts` |
+
+CI 和 npm release workflow 在成功或失败后都上传上述目录，保留 14 天。浏览器烟测首先自检证据门禁：故意改变一个像素、触发六类浏览器诊断，确认比较/诊断门禁拒绝并留下图片和报告。该独立目录标记 `purpose: intentional gate self-test`、`expectedFailure: true`，其中的 failed 是预期反例，不代表主烟测失败。测试在浏览器启动前失败时可能只有顶层失败报告；页面已关闭或崩溃时截图不可用，不伪造完整证据。
+
+更新基线仍要求显式 `UPDATE_VISUAL_GOLDENS=1`，CI 禁止更新；先保存原 reference/actual/diff，全部功能和诊断检查通过后才写入新 Golden，随后必须审查图片差异、关闭更新开关并重跑。不能在失败现场自动接受新基线。本批没有引入全格式随机 Fuzz、堆内存压测、Coverage/Lint 平台或通用 UI scenario DSL；既有恶意输入/预算回归不等同于这些完整专项验收。
+
+本地验收（Windows）：96 项 Node 测试、TypeScript/构建、关闭基线更新且设置 `CI=true` 的完整 Chromium 烟测通过，Viewer/Player 均为 0 different pixels / 0 MAE；门禁自检确认像素差异及六类诊断会被拒绝并保留失败文件。`npm pack --dry-run --ignore-scripts --json` 确认不包含测试证据；本批未重跑真实 tarball 安装烟测。`pnpm audit --prod` 在 npm registry 返回 `ERR_SOCKET_TIMEOUT`，属于未完成的外部审计，不标记完整 `verify:release` 已通过。GitHub Ubuntu job/上传动作尚需推送后由 CI 实际执行，本地结果不代替跨 OS 验收。
+
 ## 3. 核心领域契约
 
 接口使用稳定 ID，不使用显示名称、任意文件路径或屏幕坐标作为主键。
@@ -658,4 +699,4 @@ Maker MCP 已增加 `list_viewer_components`、`render_component_preview`、`lis
 
 ## 10. 下一轮决策
 
-核心前后端栈、LayaAir 3.3.10/FairyGUI Web runtime、Dashboard 授权边界、Artifact-first Player 和 render session 数据通道已经完成第一版。Viewer 是 Maker 自有的 UAM Scene compiler 与直接 renderer；Player 是独立的原生 UIPackage runtime。FairyGUI Editor Online 只提供主 Canvas 的行为和视觉参考，不复用其 EditorShell、Resource Preview UI 或模块导出。下一轮决策聚焦自动发布接入、截图持久化和连续 UI 场景测试。
+核心前后端栈、LayaAir 3.3.10/FairyGUI Web runtime、Dashboard 授权边界、Artifact-first Player 和 render session 数据通道已经完成第一版。Viewer 是 Maker 自有的 UAM Scene compiler 与直接 renderer；Player 是独立的原生 UIPackage runtime。FairyGUI Editor Online 只提供主 Canvas 的行为和视觉参考，不复用其 EditorShell、Resource Preview UI 或模块导出。Draft 视觉报告与 CI 双模式证据已持久化；下一轮决策聚焦自动发布接入及真实业务 UI 场景覆盖。

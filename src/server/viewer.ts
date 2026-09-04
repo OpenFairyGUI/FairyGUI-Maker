@@ -168,6 +168,8 @@ type RenderSession = {
 export class ViewerRenderBroker {
   private readonly sessions = new Map<string, RenderSession>()
   private readonly sessionBySource = new Map<string, string>()
+  // Keep only bounded reasons, never closed screenshots, observations or pending commands.
+  private readonly closedReasons = new Map<string, { message: string; at: number }>()
 
   constructor(
     private readonly getProject: (projectId: string) => ViewerProject | undefined,
@@ -186,7 +188,7 @@ export class ViewerRenderBroker {
     const sourceKey = `${mode}:${sourceId}`
     const currentId = this.sessionBySource.get(sourceKey)
     const current = currentId ? this.currentSession(currentId) : undefined
-    if (current) this.removeSession(current, "A newer Viewer renderer replaced this render session.")
+    if (current) this.removeSession(current, `renderer_replaced: A newer ${mode === "viewer" ? "Viewer" : "Player"} renderer replaced this render session.`)
     const session: RenderSession = {
       renderSessionId: `render_${randomUUID()}`,
       mode,
@@ -383,6 +385,13 @@ export class ViewerRenderBroker {
     return session ? this.publicSession(session) : null
   }
 
+  getSessionError(renderSessionId: string) {
+    const reason = this.closedReasons.get(renderSessionId)
+    if (reason && Date.now() - reason.at <= RENDER_SESSION_TTL_MS) return reason.message
+    this.closedReasons.delete(renderSessionId)
+    return "Render session not found"
+  }
+
   getBrowserTarget(renderSessionId: string) {
     const session = this.currentSession(renderSessionId)
     if (!session) return null
@@ -451,6 +460,7 @@ export class ViewerRenderBroker {
 
   pruneExpiredSessions() {
     for (const id of this.sessions.keys()) this.currentSession(id)
+    for (const id of this.closedReasons.keys()) this.getSessionError(id)
   }
 
   close() {
@@ -459,6 +469,7 @@ export class ViewerRenderBroker {
     }
     this.sessions.clear()
     this.sessionBySource.clear()
+    this.closedReasons.clear()
   }
 
   private enqueue(session: RenderSession, kind: ViewerBrokerCommand["kind"], payload: Record<string, unknown>, requestedId: string = randomUUID(), expected: Pick<ViewerBrokerCommand, "expectedStateVersion" | "expectedViewStateVersion"> = {}) {
@@ -541,6 +552,8 @@ export class ViewerRenderBroker {
   }
 
   private removeSession(session: RenderSession, message: string) {
+    this.closedReasons.set(session.renderSessionId, { message, at: Date.now() })
+    if (this.closedReasons.size > MAX_RENDER_REQUESTS_PER_SESSION) this.closedReasons.delete(this.closedReasons.keys().next().value!)
     this.closeSession(session, message)
     this.sessions.delete(session.renderSessionId)
     const sourceKey = `${session.mode}:${session.sourceId}`

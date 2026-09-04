@@ -10,11 +10,13 @@ import { chromium } from "playwright"
 import { startMakerHost } from "../src/server/index"
 import type { ArtifactManifest } from "../src/artifact-protocol"
 import { runtimeBudgetSmoke } from "./runtime-budget-smoke"
-import { rendererDeliverySmoke } from "./renderer-delivery-smoke"
+import { rendererDeliverySmoke, rendererLifecycleSmoke } from "./renderer-delivery-smoke"
 import { brokerStateSmoke } from "./broker-state-smoke"
 import { projectRevisionSmoke } from "./project-revision-smoke"
 import { saveGrantSmoke } from "./save-grant-smoke"
 import { assertRuntimeIsolated, runtimeNavigationSmoke } from "./runtime-isolation-smoke"
+import { createBrowserEvidence, goldenUpdateEnabled, saveVisualGolden } from "./browser-evidence"
+import { browserEvidenceSmoke } from "./browser-evidence-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -22,7 +24,10 @@ const dataDir = await mkdtemp(path.join(tmpdir(), "fairygui-maker-browser-data-"
 const publishDir = await mkdtemp(path.join(tmpdir(), "fairygui-maker-browser-publish-"))
 let host: Awaited<ReturnType<typeof startMakerHost>> | undefined
 let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
-const browserDiagnostics: string[] = []
+const secrets = [token, dataDir, publishDir, process.cwd()]
+const evidence = await createBrowserEvidence(secrets)
+const goldens: Awaited<ReturnType<typeof saveVisualGolden>>[] = []
+const environment: Record<string, unknown> = { browserChannel, node: process.version, platform: process.platform, viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1, locale: "en-US", timezoneId: "UTC" }
 
 type McpCall = { result: { content: Array<{ type: string; text?: string; data?: string }>; isError?: boolean } }
 
@@ -64,6 +69,10 @@ function assertPng(body: McpCall) {
 }
 
 try {
+  const updateGoldens = goldenUpdateEnabled()
+  const packageJson = JSON.parse(await readFile(path.join(process.cwd(), "package.json"), "utf8"))
+  Object.assign(environment, { makerVersion: packageJson.version, playwrightVersion: packageJson.devDependencies.playwright,
+    coreVersion: packageJson.dependencies["@openfairygui/core"], commit: process.env.GITHUB_SHA })
   const importFixture = path.join(process.cwd(), "test", "fixtures", "design-import", "basic-shapes.fig")
   const visualGolden = path.join(process.cwd(), "test", "fixtures", "design-import", "basic-shapes.viewer.png")
   const visualBaseline = JSON.parse(await readFile(path.join(process.cwd(), "test", "fixtures", "design-import", "basic-shapes.visual-baseline.json"), "utf8")) as {
@@ -83,12 +92,15 @@ try {
     .addPage(document.createControllerPage("Second").setId("second")))
   component.addTransition(document.createTransition("show").addItem(document.createTransitionItem("title")
     .setTime(0).setTargetId("TITLE001").setActionType(14).setStartValue(["Played"]).setEndValue(["Played"])))
-  pkg.addResource(document.createComponent("Other").setId("OTHER001").setExported(true).setSize(100, 100))
+  pkg.addResource(document.createComponent("Other").setId("OTHER001").setExported(true).setSize(100, 100)
+    .addChild(document.createGGraph("square").setId("SQUARE01").setXY(10, 15).setSize(65, 30).setGraphType(1).setFillColor("#e879f9"))
+    .addChild(document.createGGraph("circle").setId("CIRCLE01").setXY(45, 55).setSize(35, 35).setGraphType(2).setFillColor("#38bdf8")))
 
   const io = new NodeIO()
   const binaryPath = path.join(publishDir, "Smoke.fui")
   await io.writeBinary(document, binaryPath, { compressed: true })
   host = await startMakerHost({ port: 0, token, dataDir, runtime: createNodeBackendRuntime({ allowedProjectRoots: [publishDir] }) })
+  secrets.push(host.approvalToken)
 
   const binary = await readFile(binaryPath)
   const headers = { Authorization: `Bearer ${token}` }
@@ -104,6 +116,7 @@ try {
   const completed = await fetch(`${host.origin}/api/artifact-imports/${importId}/complete`, { method: "POST", headers })
   if (!completed.ok) throw new Error(await completed.text())
   const { artifact } = await completed.json() as { artifact: ArtifactManifest }
+  environment.runtimeProfile = artifact.runtimeProfile
 
   const initialized = await fetch(`${host.origin}/mcp`, {
     method: "POST",
@@ -120,18 +133,16 @@ try {
   if (!sessionId) throw new Error("MCP session id missing")
 
   browser = await chromium.launch({ headless: true, channel: browserChannel })
-  const context = await browser.newContext()
+  environment.browserVersion = browser.version()
+  await evidence.step("evidence-gate-self-test", () => browserEvidenceSmoke(browser!))
+  const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1, locale: "en-US", timezoneId: "UTC", colorScheme: "light", reducedMotion: "reduce" })
+  await evidence.attach(context)
   const iframeCredentials: Array<Promise<boolean>> = []
   context.on("request", (request) => {
     if (request.frame().parentFrame()) iframeCredentials.push(request.allHeaders().then((headers) => !headers.cookie && !headers.authorization, () => false))
   })
-  context.on("page", (page) => {
-    page.on("console", (message) => { if (message.type() === "error") browserDiagnostics.push(message.text().slice(0, 1000)) })
-    page.on("pageerror", (error) => browserDiagnostics.push(error.message))
-  })
   const page = await context.newPage()
-  const pageErrors: string[] = []
-  page.on("pageerror", (error) => pageErrors.push(error.message))
+  evidence.phase("workbench-import")
   await page.goto(`${host.origin}/design-import?token=${token}`, { waitUntil: "domcontentloaded" })
   await page.locator('input[type="file"][accept=".fig,.psd"]').setInputFiles(importFixture)
   await page.waitForURL(/\/imports\/draft_/)
@@ -170,12 +181,18 @@ try {
     capture: true,
   })
   const viewerPng = assertPng(viewerRender.body)
-  const viewerIsolation = await assertRuntimeIsolated(page, "viewer", `/api/projects/${projectId}/source-index`)
+  await evidence.step("viewer-golden", async () => {
+    goldens.push(await saveVisualGolden(page, evidence.directory, "viewer", viewerPng, viewerRender.value,
+      { mode: "viewer", sourceId: projectId, sourceRevision: viewerCatalog.value.projects[0].sourceRevision, packageId: viewerPackage.packageId, componentId: viewerComponent.id }, visualGolden,
+      path.join(process.cwd(), "test/fixtures/design-import/basic-shapes.visual-baseline.json")))
+    return goldens.at(-1)!.metrics
+  })
+  const viewerIsolation = await evidence.step("isolation-viewer", () => assertRuntimeIsolated(page, "viewer", `/api/projects/${projectId}/source-index`))
   if (!viewerRender.value?.value?.observation?.objectTree?.children?.length) {
     throw new Error("Viewer observation did not include imported FIG children")
   }
-  if (process.env.UPDATE_VISUAL_GOLDENS === "1") await writeFile(visualGolden, viewerPng)
-  await page.getByTestId("visual-reference-input").setInputFiles(visualGolden)
+  evidence.phase("workbench-evidence")
+  await page.getByTestId("visual-reference-input").setInputFiles(updateGoldens ? { name: "reference.png", mimeType: "image/png", buffer: viewerPng } : visualGolden)
   const evidenceResponse = page.waitForResponse((response) => response.request().method() === "POST" && response.url().includes("/visual-evidence?"))
   await page.getByRole("button", { name: "捕获视觉证据" }).click()
   const savedEvidence = await evidenceResponse
@@ -191,10 +208,13 @@ try {
   await page.getByAltText("Viewer Capture").waitFor()
   await page.getByRole("button", { name: "Pixel Diff" }).click()
   await page.getByAltText("Pixel Diff").waitFor()
-  const viewerState = await brokerStateSmoke(page, "viewer", viewerRender.value.renderSessionId,
-    (name, args) => callTool(host!.origin, sessionId, 80, name, args))
-  const viewerDelivery = await rendererDeliverySmoke(page, "viewer", viewerRender.value.renderSessionId, viewerRender.value.value.observation.objectTree.id,
-    (name, args) => callTool(host!.origin, sessionId, 60, name, args))
+  const viewerState = await evidence.step("broker-state-viewer", () => brokerStateSmoke(page, "viewer", viewerRender.value.renderSessionId,
+    (name, args) => callTool(host!.origin, sessionId, 80, name, args)))
+  const viewerDelivery = await evidence.step("delivery-viewer", () => rendererDeliverySmoke(page, "viewer", viewerRender.value.renderSessionId, viewerRender.value.value.observation.objectTree.id,
+    (name, args) => callTool(host!.origin, sessionId, 60, name, args)))
+  const viewerLifecycle = await evidence.step("lifecycle-viewer", () => rendererLifecycleSmoke(page, viewerDelivery.reconnectedSessionId,
+    (name, args) => callTool(host!.origin, sessionId, 61, name, args)))
+  evidence.phase("artifact-upload")
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByTestId("visual-report").waitFor()
   if (!(await page.getByTestId("visual-report").innerText()).includes(`Semantic ${visualEvidence.renderState.semanticStateVersion} · View ${visualEvidence.renderState.viewStateVersion}`)) throw new Error("Visual evidence state stamp did not survive reload")
@@ -233,6 +253,20 @@ try {
     () => callTool(host!.origin, sessionId, 4, "open_artifact_player", { artifactId: artifact.artifactId }).catch(() => ({ value: null } as any)),
     (result) => result.value?.browserRequired === false,
   )
+  await evidence.step("player-golden", async () => {
+    const rendered = await callTool(host!.origin, sessionId, 50, "render_artifact_component", {
+      artifactId: artifact.artifactId, requestId: randomUUID(), packageId: "SMOKE001", componentId: "OTHER001", capture: false,
+    })
+    const view = await callTool(host!.origin, sessionId, 51, "set_render_view", { renderSessionId: rendered.value.renderSessionId,
+      requestId: randomUUID(), expectedViewStateVersion: rendered.value.viewStateVersion,
+      view: { width: 482, height: 446, zoom: 1, background: "#202226" } })
+    const captured = await callTool(host!.origin, sessionId, 52, "capture_render_screenshot", { renderSessionId: rendered.value.renderSessionId,
+      requestId: randomUUID(), afterStateVersion: rendered.value.semanticStateVersion, afterViewStateVersion: view.value.viewStateVersion })
+    goldens.push(await saveVisualGolden(page, evidence.directory, "player", assertPng(captured.body), captured.value,
+      { mode: "player", sourceId: artifact.artifactId, sourceRevision: artifact.digest, packageId: "SMOKE001", componentId: "OTHER001" },
+      path.join(process.cwd(), "test/fixtures/design-import/smoke.player.png"), path.join(process.cwd(), "test/fixtures/design-import/smoke.player-baseline.json")))
+    return goldens.at(-1)!.metrics
+  })
   const playerRender = await callTool(host.origin, sessionId, 5, "render_artifact_component", {
     artifactId: artifact.artifactId,
     requestId: randomUUID(),
@@ -241,10 +275,11 @@ try {
     capture: true,
   })
   assertPng(playerRender.body)
-  const playerIsolation = await assertRuntimeIsolated(page, "player", `/api/artifacts/${artifact.artifactId}/files/Smoke.fui`)
+  const playerIsolation = await evidence.step("isolation-player", () => assertRuntimeIsolated(page, "player", `/api/artifacts/${artifact.artifactId}/files/Smoke.fui`))
   if (!JSON.stringify(playerRender.value).includes("TITLE001")) throw new Error("Player observation did not include the rendered title")
-  const playerState = await brokerStateSmoke(page, "player", playerRender.value.renderSessionId,
-    (name, args) => callTool(host!.origin, sessionId, 90, name, args))
+  const playerState = await evidence.step("broker-state-player", () => brokerStateSmoke(page, "player", playerRender.value.renderSessionId,
+    (name, args) => callTool(host!.origin, sessionId, 90, name, args)))
+  evidence.phase("artifact-persistence")
   const stablePlayer = (await callTool(host.origin, sessionId, 91, "open_artifact_player", { artifactId: artifact.artifactId })).value.renderSession
   const relabel = await context.request.post(`${host.origin}/api/artifact-imports`, { data: { name: "Relabeled Smoke", files: [{ path: "Smoke.fui", size: binary.length, sha256: createHash("sha256").update(binary).digest("hex") }] } })
   if (relabel.status() !== 201) throw new Error("Artifact relabel import failed")
@@ -261,25 +296,29 @@ try {
   await page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
   const relabeledPlayer = (await callTool(host.origin, sessionId, 92, "open_artifact_player", { artifactId: artifact.artifactId })).value.renderSession
   if (relabeledPlayer?.renderSessionId !== stablePlayer.renderSessionId || relabeledPlayer?.semanticStateVersion !== stablePlayer.semanticStateVersion) throw new Error("Artifact provenance refresh reset the Player session")
-  const playerDelivery = await rendererDeliverySmoke(page, "player", playerRender.value.renderSessionId, playerRender.value.value.observation.objectTree.id,
-    (name, args) => callTool(host!.origin, sessionId, 70, name, args))
-  const runtimeBudgets = await runtimeBudgetSmoke(page.context(), host.origin, artifact, publishDir)
-  const projectRevision = await projectRevisionSmoke(context, host.origin)
-  const saveGrants = await saveGrantSmoke(context, host, publishDir)
-  const runtimeNavigation = await runtimeNavigationSmoke(context, host.origin, artifact)
+  const playerDelivery = await evidence.step("delivery-player", () => rendererDeliverySmoke(page, "player", playerRender.value.renderSessionId, playerRender.value.value.observation.objectTree.id,
+    (name, args) => callTool(host!.origin, sessionId, 70, name, args)))
+  const playerLifecycle = await evidence.step("lifecycle-player", () => rendererLifecycleSmoke(page, playerDelivery.reconnectedSessionId,
+    (name, args) => callTool(host!.origin, sessionId, 71, name, args)))
+  const runtimeBudgets = await evidence.step("runtime-budgets", () => runtimeBudgetSmoke(page.context(), host!.origin, artifact, publishDir))
+  const projectRevision = await evidence.step("project-revision", () => projectRevisionSmoke(context, host!.origin))
+  const saveGrants = await evidence.step("save-grants", () => saveGrantSmoke(context, host!, publishDir))
+  const runtimeNavigation = await evidence.step("runtime-navigation", () => runtimeNavigationSmoke(context, host!.origin, artifact))
   if (!(await Promise.all(iframeCredentials)).every(Boolean)) throw new Error("Runtime iframe request carried Host credentials")
-  if (pageErrors.length) throw new Error(`Browser page errors: ${pageErrors.join("; ")}`)
+  evidence.verify()
+  await context.close()
+  evidence.verify()
 
   await fetch(`${host.origin}/mcp`, {
     method: "DELETE",
     headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
   })
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, deterministicPlan: true, artifactUpload: true, artifactPersistence: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, projectRevision, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
+  // Golden changes are explicit and happen only after all functional/diagnostic checks pass.
+  if (updateGoldens) for (const golden of goldens) await writeFile(golden.golden, golden.actual)
+  await evidence.finish("passed", { environment, goldenUpdate: updateGoldens }, [])
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, deterministicPlan: true, artifactUpload: true, artifactPersistence: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, viewerLifecycle, playerLifecycle, runtimeBudgets, projectRevision, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 4, artifactId: artifact.artifactId }) + "\n")
 } catch (error) {
-  process.stderr.write(browserDiagnostics.slice(-30).join("\n") + "\n")
-  for (const page of browser?.contexts().flatMap((context) => context.pages()) ?? []) {
-    process.stderr.write(`${page.url()}\n${await page.locator("body").innerText().catch(() => "Page unavailable")}\n`)
-  }
+  await evidence.finish("failed", { environment }, browser?.contexts().flatMap((context) => context.pages()) ?? [], error)
   throw error
 } finally {
   await browser?.close()

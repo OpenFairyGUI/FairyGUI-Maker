@@ -476,6 +476,27 @@ test("Maker Host protects Maker Workbench and accepts an MCP session", async () 
     assert.equal(renderSessionState.session.latestInteraction.targetId, "/rbw1tv9t/main/button")
     assert.equal(renderSessionState.session.observation.controllers[0].pageName, "Second")
 
+    const replacement = await fetch(`${host.origin}/api/renderers`, { method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: createdProject.projectId, sourceRevision: projectInput.sourceRevision, protocolVersion: VIEWER_PROTOCOL_VERSION }),
+    })
+    assert.equal(replacement.status, 201)
+    const requestId = "21c4654e-84a7-48bb-bb98-588096bf25d8"
+    for (const [suffix, body] of [
+      ["", undefined], ["/commands", undefined],
+      ["/commands", { kind: "capture", requestId, afterStateVersion: 0, afterViewStateVersion: 0 }],
+      ["/results", { commandSeq: 4, requestId, ok: true, value: { runtimeEventSeq: 1 } }],
+      ["/interactions", { runtimeEventSeq: 2, targetId: "/rbw1tv9t/main/button", event: "click" }],
+    ] as const) {
+      const response = await fetch(`${host.origin}/api/render-sessions/${renderSession.renderSessionId}${suffix}`, {
+        method: body ? "POST" : "GET", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined,
+      })
+      assert.equal(response.status, 404)
+      const error = await response.json()
+      assert.match(error.error, /renderer_replaced/)
+      assert.deepEqual(Object.keys(error), ["error"], "closed session must not expose stale snapshots")
+    }
+
     const status = await fetch(`${host.origin}/api/status`, { headers: { Authorization: `Bearer ${token}` } }).then((response) => response.json())
     assert.equal(status.mcp.sessions, 1)
     assert.equal(status.viewer.entry, `${host.origin}/viewer`)
