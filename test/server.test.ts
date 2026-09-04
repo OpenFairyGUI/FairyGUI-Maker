@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -611,7 +612,7 @@ test("Maker Host imports, validates, serves, and reloads immutable Player artifa
     const created = await fetch(`${host.origin}/api/artifact-imports`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Demo publish", source: { kind: "published-folder" }, files: [{ path: "Demo.fui", size: binary.byteLength }] }),
+      body: JSON.stringify({ name: "Demo publish", source: { kind: "published-folder" }, files: [{ path: "Demo.fui", size: binary.byteLength, sha256: createHash("sha256").update(binary).digest("hex") }] }),
     })
     assert.equal(created.status, 201)
     const { importId } = await created.json()

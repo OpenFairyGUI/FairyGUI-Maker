@@ -10,6 +10,7 @@ import {
 } from '../design-import/draft-store';
 import { semanticNodeDirectiveSchema } from '../design-import/semantic-overlay';
 import type { RegisteredProject } from './index';
+import { UploadError } from '../upload';
 
 const revisionSchema = z.object({ expectedRevision: z.number().int().positive() }).strict();
 const planSchema = revisionSchema.extend({
@@ -147,10 +148,7 @@ export function registerImportDraftApi(
         const { importDraftStore, importsEnabled } = readState();
         if (!importsEnabled) return readOnly(c);
         try {
-          const contentLength = Number(c.req.header('content-length') ?? 0);
-          if (contentLength > MAX_IMPORT_SOURCE_BYTES) throw new ImportDraftError('Upload exceeds the 530 MiB input limit');
-          const data = new Uint8Array(await c.req.arrayBuffer());
-          return c.json(await importDraftStore.writeUploadFile(c.req.param('draftId'), c.req.valid('query').path, data));
+          return c.json(await importDraftStore.writeUploadFile(c.req.param('draftId'), c.req.valid('query').path, c.req.raw.body, c.req.raw.signal));
         } catch (error) {
           return draftError(c, error);
         }
@@ -210,13 +208,12 @@ export function registerImportDraftApi(
         const { importDraftStore, importsEnabled } = readState();
         if (!importsEnabled) return readOnly(c);
         try {
-          const contentLength = Number(c.req.header('content-length') ?? 0);
-          if (contentLength > MAX_VISUAL_EVIDENCE_BYTES * 3 + 64 * 1024) {
-            throw new ImportDraftError('Visual evidence upload exceeds the 48 MiB limit');
-          }
           const form = await c.req.formData();
+          if ([...form.keys()].length !== 4 || ['report', 'reference', 'capture', 'diff'].some((name) => form.getAll(name).length !== 1)) {
+            throw new ImportDraftError('Visual evidence requires exactly one report, reference, capture and diff');
+          }
           const reportValue = form.get('report');
-          if (typeof reportValue !== 'string') throw new ImportDraftError('Visual evidence report is missing');
+          if (typeof reportValue !== 'string' || reportValue.length > 64 * 1024) throw new ImportDraftError('Visual evidence report is missing or too large');
           const files = await Promise.all((['reference', 'capture', 'diff'] as const).map(async (name) => {
             const value = form.get(name);
             if (!value || typeof value === 'string' || value.type !== 'image/png') {
@@ -253,9 +250,9 @@ function readOnly(c: { json: (value: { error: string }, status: 403) => Response
   return c.json({ error: 'Design imports are unavailable in read-only view mode' }, 403);
 }
 
-function draftError(c: { json: (value: { error: string }, status: 400 | 404 | 409) => Response }, error: unknown) {
+function draftError(c: { json: (value: { error: string }, status: 400 | 404 | 408 | 409 | 413 | 503) => Response }, error: unknown) {
   return c.json(
     { error: error instanceof Error ? error.message : String(error) },
-    error instanceof ImportDraftError ? error.status : 400,
+    error instanceof ImportDraftError || error instanceof UploadError ? error.status : 400,
   );
 }

@@ -1,4 +1,7 @@
 export const PLAYER_RUNTIME_PROFILE = "layaair-3.3.10/fairygui" as const
+export const MAX_ARTIFACT_FILES = 5_000
+export const MAX_ARTIFACT_FILE_BYTES = 128 * 1024 * 1024
+export const MAX_ARTIFACT_TOTAL_BYTES = 512 * 1024 * 1024
 
 export type ArtifactFile = {
   path: string
@@ -40,6 +43,7 @@ export type ArtifactManifest = {
 export type ArtifactImportFile = {
   path: string
   size: number
+  sha256: string
 }
 
 export type PlayerRenderSource = {

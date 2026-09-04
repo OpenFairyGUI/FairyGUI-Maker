@@ -12,6 +12,7 @@ import { createNodeBackendRuntime } from "@openfairygui/backend/node"
 import { createOpenFairyGuiMcpServer, type OpenFairyGuiBackendRuntime } from "@openfairygui/mcp"
 import { Hono } from "hono"
 import { getCookie, setCookie } from "hono/cookie"
+import { HTTPException } from "hono/http-exception"
 import pino from "pino"
 import { z } from "zod"
 
@@ -26,6 +27,8 @@ import { planProjectReimport } from "../design-import/node"
 import { ArtifactStore } from "./artifacts"
 import { registerImportDraftApi } from "./import-drafts"
 import { createHostProjectSnapshot, type HostProjectSnapshot } from "./project-snapshot"
+import { uploadLimits } from "./upload-limits"
+import { UploadError } from "../upload"
 import {
   ViewerRenderBroker,
   registerViewerMcpTools,
@@ -422,13 +425,13 @@ function registerApi(
           projectId: z.string().min(1).max(128).optional(),
           sourceRevision: z.string().min(1).max(128).optional(),
         }).default({ kind: "published-folder" }),
-        files: z.array(z.object({ path: z.string().min(1).max(1_024), size: z.number().int().nonnegative() })).min(1).max(5_000),
+        files: z.array(z.object({ path: z.string().min(1).max(1_024), size: z.number().int().nonnegative(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1).max(5_000),
       })),
       async (c) => {
         try {
           return c.json(await readState().artifactStore.createImport(c.req.valid("json")), 201)
         } catch (error) {
-          return c.json({ error: formatPublicError(error) }, 400)
+          return c.json({ error: formatPublicError(error) }, error instanceof UploadError ? error.status : 400)
         }
       },
     )
@@ -437,11 +440,10 @@ function registerApi(
       zValidator("query", z.object({ path: z.string().min(1).max(1_024) })),
       async (c) => {
         try {
-          const data = new Uint8Array(await c.req.arrayBuffer())
-          const result = await readState().artifactStore.writeImportFile(c.req.param("importId"), c.req.valid("query").path, data)
+          const result = await readState().artifactStore.writeImportFile(c.req.param("importId"), c.req.valid("query").path, c.req.raw.body, c.req.raw.signal)
           return result ? c.json(result) : c.json({ error: "Artifact import not found" }, 404)
         } catch (error) {
-          return c.json({ error: formatPublicError(error) }, 400)
+          return c.json({ error: formatPublicError(error) }, error instanceof UploadError ? error.status : 400)
         }
       },
     )
@@ -450,7 +452,15 @@ function registerApi(
         const artifact = await readState().artifactStore.completeImport(c.req.param("importId"), readState().origin)
         return artifact ? c.json({ artifact }, 201) : c.json({ error: "Artifact import not found" }, 404)
       } catch (error) {
-        return c.json({ error: formatPublicError(error) }, 400)
+        return c.json({ error: formatPublicError(error) }, error instanceof UploadError ? error.status : 400)
+      }
+    })
+    .delete("/api/artifact-imports/:importId", async (c) => {
+      try {
+        const removed = await readState().artifactStore.cancelImport(c.req.param("importId"))
+        return removed ? c.body(null, 204) : c.json({ error: "Artifact import not found" }, 404)
+      } catch (error) {
+        return c.json({ error: formatPublicError(error) }, error instanceof UploadError ? error.status : 400)
       }
     })
     .get(
@@ -585,6 +595,8 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     await next()
   })
 
+  app.use("*", uploadLimits())
+
   app.all("/mcp", async (c) => {
     const sessionId = c.req.header("mcp-session-id")
     if (sessionId) {
@@ -683,6 +695,8 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   app.get("/projects/:projectId/assets", indexFile)
   app.notFound((c) => c.json({ error: "Not found" }, 404))
   app.onError((error, c) => {
+    if (error instanceof UploadError) return c.json({ error: error.message }, error.status)
+    if (error instanceof HTTPException) return c.json({ error: error.message }, error.status)
     logger.error({ err: error, method: c.req.method, path: c.req.path }, "Maker Host request failed")
     return c.json({ error: "Internal server error" }, 500)
   })
@@ -696,6 +710,10 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   artifactStore.setOrigin(origin)
   allowedHosts = new Set([`${host}:${address.port}`, `localhost:${address.port}`])
   allowedOrigins = new Set([origin, `http://localhost:${address.port}`])
+  const uploadCleanup = setInterval(() => {
+    void Promise.allSettled([artifactStore.pruneExpiredImports(), importDraftStore.pruneExpiredUploads()])
+  }, 60_000)
+  uploadCleanup.unref()
 
   const project = projectSource ? {
     projectId: `project_${randomUUID()}`,
@@ -728,6 +746,8 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     async close() {
       if (closing) return
       closing = true
+      clearInterval(uploadCleanup)
+      await Promise.all([artifactStore.close(), importDraftStore.close()])
       renderBroker.close()
       await Promise.allSettled([...mcpSessions.values()].map((record) => record.server.close()))
       await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()))

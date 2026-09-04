@@ -6,15 +6,16 @@ import { z } from "zod"
 
 import {
   PLAYER_RUNTIME_PROFILE,
+  MAX_ARTIFACT_FILES as MAX_FILES,
+  MAX_ARTIFACT_FILE_BYTES as MAX_FILE_BYTES,
+  MAX_ARTIFACT_TOTAL_BYTES as MAX_TOTAL_BYTES,
   type ArtifactFile,
   type ArtifactImportFile,
   type ArtifactManifest,
   type ArtifactPackage,
 } from "../artifact-protocol"
+import { hashUploadFile as hashFile, MAX_PENDING_UPLOADS, PENDING_UPLOAD_TTL_MS, receiveUpload, UploadError, type UploadBody } from "../upload"
 
-const MAX_FILES = 5_000
-const MAX_FILE_BYTES = 128 * 1024 * 1024
-const MAX_TOTAL_BYTES = 512 * 1024 * 1024
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 const MAX_PACKAGE_COMPONENTS = 50_000
 const FGUI_MAGIC = 0x46475549
@@ -60,6 +61,9 @@ type PendingImport = {
   files: Map<string, ArtifactImportFile>
   uploaded: Set<string>
   root: string
+  expiresAt: number
+  state: "open" | "uploading" | "finalizing" | "cancelled"
+  upload: { controller: AbortController; done: Promise<unknown> } | null
 }
 
 export class ArtifactStore {
@@ -67,6 +71,8 @@ export class ArtifactStore {
   private readonly imports = new Map<string, PendingImport>()
   private readonly artifactsRoot: string
   private readonly importsRoot: string
+  // ponytail: finalize one local artifact at a time; a queue is unnecessary while callers can retry 409.
+  private finalizing = false
 
   constructor(private readonly dataDir: string) {
     this.artifactsRoot = path.join(dataDir, "artifacts")
@@ -119,9 +125,15 @@ export class ArtifactStore {
 
   async createImport(input: { name: string; source: ArtifactManifest["source"]; files: ArtifactImportFile[] }) {
     const files = validateDeclaredFiles(input.files)
+    await this.pruneExpiredImports()
+    if (this.imports.size >= MAX_PENDING_UPLOADS) throw new UploadError("artifact_import_limit_reached", 503)
+    const pendingBytes = [...this.imports.values()].reduce((total, pending) => total + [...pending.files.values()].reduce((size, file) => size + file.size, 0), 0)
+    if (pendingBytes + [...files.values()].reduce((total, file) => total + file.size, 0) > MAX_TOTAL_BYTES) {
+      throw new UploadError("artifact_import_capacity_exceeded", 503)
+    }
     const importId = `import_${randomUUID()}`
     const root = this.resolveImportRoot(importId)
-    await mkdir(root, { recursive: true })
+    const expiresAt = Date.now() + PENDING_UPLOAD_TTL_MS
     this.imports.set(importId, {
       importId,
       name: input.name,
@@ -129,76 +141,132 @@ export class ArtifactStore {
       files,
       uploaded: new Set(),
       root,
+      expiresAt,
+      state: "open",
+      upload: null,
     })
-    return { importId, files: files.size }
+    try {
+      await mkdir(root, { recursive: true })
+      return { importId, files: files.size, expiresAt: new Date(expiresAt).toISOString() }
+    } catch (error) {
+      this.imports.delete(importId)
+      throw error
+    }
   }
 
-  async writeImportFile(importId: string, filePath: string, data: Uint8Array) {
-    const pending = this.imports.get(importId)
+  async writeImportFile(importId: string, filePath: string, body: UploadBody, signal?: AbortSignal) {
+    const pending = this.currentImport(importId)
     if (!pending) return null
+    if (pending.state !== "open") throw new UploadError("artifact_import_busy", 409)
     const safePath = normalizeRelativePath(filePath)
     const declared = pending.files.get(safePath)
     if (!declared) throw new Error("artifact_file_not_declared")
-    if (data.byteLength !== declared.size) throw new Error(`artifact_file_size_mismatch:${safePath}`)
-    const target = resolveWithin(pending.root, safePath)
-    await mkdir(path.dirname(target), { recursive: true })
-    await writeFile(target, data, { flag: "wx" }).catch(async (error: NodeJS.ErrnoException) => {
-      if (error.code !== "EEXIST") throw error
-      const existing = await stat(target)
-      if (existing.size !== data.byteLength) throw new Error(`artifact_file_already_uploaded:${safePath}`)
+    pending.state = "uploading"
+    const controller = new AbortController()
+    const cancellation = AbortSignal.any([controller.signal, ...(signal ? [signal] : [])])
+    const done = receiveUpload(resolveWithin(pending.root, safePath), path.join(pending.root, ".uploads"), body, declared, cancellation).then(() => {
+      pending.uploaded.add(safePath)
+      pending.expiresAt = Date.now() + PENDING_UPLOAD_TTL_MS
+      return { uploaded: safePath, sha256: declared.sha256 }
     })
-    pending.uploaded.add(safePath)
-    return { uploaded: safePath }
+    pending.upload = { controller, done }
+    try {
+      return await done
+    } finally {
+      if (pending.state === "uploading") pending.state = "open"
+      pending.upload = null
+    }
   }
 
   async completeImport(importId: string, origin: string) {
-    const pending = this.imports.get(importId)
+    const pending = this.currentImport(importId)
     if (!pending) return null
+    if (pending.state !== "open" || this.finalizing) throw new UploadError("artifact_import_busy", 409)
     const missing = [...pending.files.keys()].filter((filePath) => !pending.uploaded.has(filePath))
     if (missing.length) throw new Error(`artifact_files_missing:${missing.slice(0, 5).join(",")}`)
 
-    const files: ArtifactFile[] = []
-    for (const declared of [...pending.files.values()].sort((left, right) => left.path.localeCompare(right.path))) {
-      const absolutePath = resolveWithin(pending.root, declared.path)
-      const fileStat = await stat(absolutePath)
-      if (!fileStat.isFile() || fileStat.size !== declared.size) throw new Error(`artifact_file_changed:${declared.path}`)
-      files.push({
-        ...declared,
-        sha256: await hashFile(absolutePath),
-        mimeType: mimeType(declared.path),
-      })
-    }
+    pending.state = "finalizing"
+    this.finalizing = true
+    try {
+      const files: ArtifactFile[] = []
+      for (const declared of [...pending.files.values()].sort((left, right) => left.path.localeCompare(right.path))) {
+        const absolutePath = resolveWithin(pending.root, declared.path)
+        const fileStat = await stat(absolutePath)
+        if (!fileStat.isFile() || fileStat.size !== declared.size) throw new Error(`artifact_file_changed:${declared.path}`)
+        if (await hashFile(absolutePath) !== declared.sha256) throw new UploadError(`artifact_file_digest_mismatch:${declared.path}`, 409)
+        files.push({
+          ...declared,
+          mimeType: mimeType(declared.path),
+        })
+      }
 
-    const binaryFiles = files.filter(({ path: filePath }) => /(?:\.fui|_fui\.bytes)$/i.test(filePath))
-    if (binaryFiles.length === 0) throw new Error("artifact_has_no_fui_packages")
-    const packages = await readPackages(pending.root, binaryFiles)
-    validatePackageDependencies(packages)
-    const digest = artifactDigest(files)
-    const artifactId = `artifact_${digest.slice(0, 24)}`
-    const existing = this.artifacts.get(artifactId)
-    if (existing) {
-      await this.discardImport(pending)
-      return existing
-    }
+      const binaryFiles = files.filter(({ path: filePath }) => /(?:\.fui|_fui\.bytes)$/i.test(filePath))
+      if (binaryFiles.length === 0) throw new Error("artifact_has_no_fui_packages")
+      const packages = await readPackages(pending.root, binaryFiles)
+      validatePackageDependencies(packages)
+      const digest = artifactDigest(files)
+      const artifactId = `artifact_${digest.slice(0, 24)}`
+      const existing = this.artifacts.get(artifactId)
+      if (existing) {
+        await this.discardImport(pending)
+        return existing
+      }
 
-    const artifactRoot = this.resolveArtifactRoot(artifactId)
-    const manifest: ArtifactManifest = {
-      schemaVersion: 1,
-      artifactId,
-      name: pending.name,
-      digest,
-      createdAt: new Date().toISOString(),
-      runtimeProfile: PLAYER_RUNTIME_PROFILE,
-      source: pending.source,
-      files,
-      packages,
-      playerUrl: `${origin}/artifacts/${artifactId}/player`,
+      const artifactRoot = this.resolveArtifactRoot(artifactId)
+      const manifest: ArtifactManifest = {
+        schemaVersion: 1,
+        artifactId,
+        name: pending.name,
+        digest,
+        createdAt: new Date().toISOString(),
+        runtimeProfile: PLAYER_RUNTIME_PROFILE,
+        source: pending.source,
+        files,
+        packages,
+        playerUrl: `${origin}/artifacts/${artifactId}/player`,
+      }
+      await rm(path.join(pending.root, ".uploads"), { recursive: true, force: true })
+      await writeFile(path.join(pending.root, "manifest.json"), JSON.stringify(manifest, null, 2))
+      await rename(pending.root, artifactRoot)
+      this.imports.delete(importId)
+      this.artifacts.set(artifactId, manifest)
+      return manifest
+    } finally {
+      pending.state = "open"
+      this.finalizing = false
     }
-    await writeFile(path.join(pending.root, "manifest.json"), JSON.stringify(manifest, null, 2), { flag: "wx" })
-    await rename(pending.root, artifactRoot)
+  }
+
+  async cancelImport(importId: string) {
+    const pending = this.imports.get(importId)
+    if (!pending) return false
+    if (pending.state === "finalizing") throw new UploadError("artifact_import_busy", 409)
+    pending.state = "cancelled"
     this.imports.delete(importId)
-    this.artifacts.set(artifactId, manifest)
-    return manifest
+    if (pending.upload) {
+      pending.upload.controller.abort(new UploadError("artifact_import_cancelled", 409))
+      await pending.upload.done.catch(() => undefined)
+    }
+    await this.discardImport(pending)
+    return true
+  }
+
+  async pruneExpiredImports() {
+    for (const pending of this.imports.values()) {
+      if (pending.expiresAt <= Date.now() && pending.state !== "finalizing") await this.cancelImport(pending.importId)
+    }
+  }
+
+  async close() {
+    const uploads = [...this.imports.values()].flatMap((pending) => pending.upload ? [pending.upload] : [])
+    for (const upload of uploads) upload.controller.abort()
+    await Promise.allSettled(uploads.map((upload) => upload.done))
+  }
+
+  private currentImport(importId: string) {
+    const pending = this.imports.get(importId)
+    if (pending && pending.expiresAt <= Date.now()) throw new UploadError("artifact_import_expired", 404)
+    return pending
   }
 
   async openFile(artifactId: string, filePath: string) {
@@ -234,13 +302,17 @@ function validateDeclaredFiles(input: ArtifactImportFile[]) {
   if (!Array.isArray(input) || input.length === 0 || input.length > MAX_FILES) throw new Error("artifact_file_count_invalid")
   let total = 0
   const files = new Map<string, ArtifactImportFile>()
+  const paths = new Set<string>()
   for (const item of input) {
     const filePath = normalizeRelativePath(item.path)
     if (!Number.isSafeInteger(item.size) || item.size < 0 || item.size > MAX_FILE_BYTES) throw new Error(`artifact_file_size_invalid:${filePath}`)
-    if (files.has(filePath)) throw new Error(`artifact_file_duplicate:${filePath}`)
+    if (paths.has(filePath.toLowerCase())) throw new Error(`artifact_file_duplicate:${filePath}`)
+    if (["manifest.json", ".uploads"].includes(filePath.split("/")[0].toLowerCase())) throw new Error("artifact_path_reserved")
+    if (!/^[a-f0-9]{64}$/.test(item.sha256)) throw new Error(`artifact_file_digest_invalid:${filePath}`)
     total += item.size
     if (total > MAX_TOTAL_BYTES) throw new Error("artifact_total_size_exceeded")
-    files.set(filePath, { path: filePath, size: item.size })
+    paths.add(filePath.toLowerCase())
+    files.set(filePath, { path: filePath, size: item.size, sha256: item.sha256 })
   }
   return files
 }
@@ -248,7 +320,7 @@ function validateDeclaredFiles(input: ArtifactImportFile[]) {
 function normalizeRelativePath(value: string) {
   if (typeof value !== "string" || value.length === 0 || value.length > 1_024 || value.includes("\\") || value.startsWith("/") || /^[a-z]:/i.test(value)) throw new Error("artifact_path_invalid")
   const parts = value.split("/")
-  if (parts.some((part) => !part || part === "." || part === ".." || part.includes("\0"))) throw new Error("artifact_path_invalid")
+  if (parts.some((part) => !part || part === "." || part === ".." || /[\0:]/.test(part) || /[. ]$/.test(part))) throw new Error("artifact_path_invalid")
   return parts.join("/")
 }
 
@@ -261,7 +333,7 @@ function resolveWithin(root: string, relativePath: string) {
 
 async function validateStoredArtifact(artifactRoot: string, directoryName: string, manifest: ArtifactManifest) {
   if (manifest.artifactId !== directoryName) throw new Error("artifact_manifest_id_mismatch")
-  validateDeclaredFiles(manifest.files.map(({ path: filePath, size }) => ({ path: filePath, size })))
+  validateDeclaredFiles(manifest.files)
   const files = [...manifest.files].sort((left, right) => left.path.localeCompare(right.path))
   for (const file of files) {
     const safePath = normalizeRelativePath(file.path)
@@ -288,11 +360,6 @@ function artifactDigest(files: Pick<ArtifactFile, "path" | "size" | "sha256">[])
     .sort((left, right) => left.path.localeCompare(right.path))
     .map(({ path: filePath, size, sha256 }) => ({ path: filePath, size, sha256 }))
   return createHash("sha256").update(JSON.stringify({ runtimeProfile: PLAYER_RUNTIME_PROFILE, files: canonicalFiles })).digest("hex")
-}
-
-async function hashFile(filePath: string) {
-  const data = await readFile(filePath)
-  return createHash("sha256").update(data).digest("hex")
 }
 
 async function readPackages(root: string, files: ArtifactFile[]): Promise<ArtifactPackage[]> {

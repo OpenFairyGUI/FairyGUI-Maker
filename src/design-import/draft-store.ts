@@ -5,6 +5,7 @@ import path from 'node:path';
 import { NodeIO } from '@openfairygui/core/node';
 import { assertValidUamProject, readProjectAsUam, writeProjectFromUam } from '@openfairygui/core/uam';
 import { z } from 'zod';
+import { MAX_PENDING_UPLOADS, PENDING_UPLOAD_TTL_MS, receiveUpload, UploadError, type UploadBody } from '../upload';
 
 import type { MakerImportSourceV1 } from './bundle';
 import { compilePlanToUam, safeName, type ConversionReport } from './convert';
@@ -135,7 +136,7 @@ const uploadInputSchema = z.object({
     size: z.number().int().nonnegative().max(MAX_IMPORT_SOURCE_BYTES),
   }).strict()).min(1).max(MAX_SOURCE_FILES),
 }).strict().superRefine((input, context) => {
-  if (new Set(input.files.map(({ path: filePath }) => filePath)).size !== input.files.length) {
+  if (new Set(input.files.map(({ path: filePath }) => filePath.toLowerCase())).size !== input.files.length) {
     context.addIssue({ code: 'custom', path: ['files'], message: 'Upload paths must be unique' });
   }
   if (input.files.reduce((total, file) => total + file.size, 0) > MAX_IMPORT_SOURCE_BYTES) {
@@ -263,6 +264,7 @@ export class ImportDraftStore {
   private readonly root: string;
   // ponytail: one store-wide queue is enough for local imports; split per draft only if parallel imports become measurable.
   private mutationTail: Promise<unknown> = Promise.resolve();
+  private readonly uploads = new Map<string, { controller: AbortController; done: Promise<unknown> }>();
 
   constructor(dataDir: string) {
     this.root = path.join(path.resolve(dataDir), 'import-drafts');
@@ -283,7 +285,7 @@ export class ImportDraftStore {
         }
         this.drafts.set(draft.draftId, draft);
         for (const child of await readdir(draftRoot, { withFileTypes: true })) {
-          if (child.isDirectory() && child.name.startsWith('.generated-')) {
+          if (child.isDirectory() && (child.name === '.uploads' || child.name.startsWith('.generated-') || child.name.startsWith('.visual-evidence-'))) {
             await rm(path.join(draftRoot, child.name), { recursive: true, force: true });
           }
         }
@@ -391,8 +393,17 @@ export class ImportDraftStore {
   }
 
   async createUpload(inputValue: ImportDraftUploadInput): Promise<ImportDraftV1> {
+    await this.pruneExpiredUploads();
     return this.mutate(async () => {
       const input = uploadInputSchema.parse(inputValue);
+      const pending = [...this.drafts.values()].filter((draft) => draft.status === 'uploading');
+      if (pending.length >= MAX_PENDING_UPLOADS) {
+        throw new UploadError('import_draft_upload_limit_reached', 503);
+      }
+      const pendingBytes = pending.reduce((total, draft) => total + (draft.upload?.files.reduce((size, file) => size + file.size, 0) ?? 0), 0);
+      if (pendingBytes + input.files.reduce((total, file) => total + file.size, 0) > MAX_IMPORT_SOURCE_BYTES) {
+        throw new UploadError('import_draft_upload_capacity_exceeded', 503);
+      }
       const draftId = `draft_${randomUUID()}`;
       const draftRoot = this.resolveDraftRoot(draftId);
       try {
@@ -414,7 +425,7 @@ export class ImportDraftStore {
           materialized: null,
           createdAt: now,
           updatedAt: now,
-          expiresAt: new Date(Date.now() + IMPORT_DRAFT_TTL_MS).toISOString(),
+          expiresAt: new Date(Date.now() + PENDING_UPLOAD_TTL_MS).toISOString(),
         };
         await writeJson(path.join(draftRoot, 'draft.json'), draft);
         this.drafts.set(draftId, draft);
@@ -426,30 +437,37 @@ export class ImportDraftStore {
     });
   }
 
-  async writeUploadFile(draftId: string, filePath: string, data: Uint8Array): Promise<{ path: string; size: number }> {
-    return this.mutate(async () => {
+  async writeUploadFile(draftId: string, filePath: string, body: UploadBody, signal?: AbortSignal): Promise<{ path: string; size: number }> {
+    this.requireCurrentDraft(draftId, ['uploading']);
+    if (this.uploads.has(draftId)) throw new ImportDraftError('Import draft upload is busy', 409);
+    const controller = new AbortController();
+    const cancellation = AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]);
+    const done = this.mutate(async () => {
       const draft = this.requireCurrentDraft(draftId, ['uploading']);
+      if (Date.parse(draft.expiresAt) <= Date.now()) throw new ImportDraftError('Import draft upload expired', 404);
       const safePath = normalizeUploadPath(filePath);
       const declared = draft.upload?.files.find((file) => file.path === safePath);
       if (!declared) throw new ImportDraftError('Upload file was not declared');
-      if (data.byteLength !== declared.size) throw new ImportDraftError(`Upload size mismatch for ${safePath}`);
       const target = path.join(this.uploadRoot(draft), ...safePath.split('/'));
-      await mkdir(path.dirname(target), { recursive: true });
-      try {
-        await writeFile(target, data, { flag: 'wx' });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        if (!Buffer.from(await readFile(target)).equals(Buffer.from(data))) {
-          throw new ImportDraftError(`Upload file already exists with different content: ${safePath}`, 409);
-        }
-      }
-      return { path: safePath, size: data.byteLength };
+      const result = await receiveUpload(target, path.join(this.resolveDraftRoot(draftId), '.uploads'), body, declared, cancellation);
+      const updated = { ...draft, updatedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + PENDING_UPLOAD_TTL_MS).toISOString() };
+      await writeJson(path.join(this.resolveDraftRoot(draftId), 'draft.json'), updated);
+      this.drafts.set(draftId, updated);
+      return { path: safePath, size: result.size };
     });
+    this.uploads.set(draftId, { controller, done });
+    try {
+      return await done;
+    } finally {
+      this.uploads.delete(draftId);
+    }
   }
 
   async completeUpload(draftId: string, expectedRevision: number): Promise<ImportDraftV1> {
+    if (this.uploads.has(draftId)) throw new ImportDraftError('Import draft upload is busy', 409);
     return this.mutate(async () => {
       const draft = this.requireDraft(draftId, expectedRevision, ['uploading']);
+      if (Date.parse(draft.expiresAt) <= Date.now()) throw new ImportDraftError('Import draft upload expired', 404);
       for (const file of draft.upload?.files ?? []) {
         const metadata = await lstat(path.join(this.uploadRoot(draft), ...file.path.split('/'))).catch(() => null);
         if (!metadata?.isFile() || metadata.isSymbolicLink() || metadata.size !== file.size) {
@@ -627,11 +645,25 @@ export class ImportDraftStore {
   }
 
   async delete(draftId: string, expectedRevision: number): Promise<void> {
+    this.requireDraft(draftId, expectedRevision);
+    this.uploads.get(draftId)?.controller.abort(new UploadError('import_draft_upload_cancelled', 409));
     return this.mutate(async () => {
       this.requireDraft(draftId, expectedRevision);
       await rm(this.resolveDraftRoot(draftId), { recursive: true, force: true });
       this.drafts.delete(draftId);
     });
+  }
+
+  async pruneExpiredUploads(): Promise<void> {
+    for (const draft of this.drafts.values()) {
+      if (draft.status === 'uploading' && Date.parse(draft.expiresAt) <= Date.now()) await this.delete(draft.draftId, draft.revision);
+    }
+  }
+
+  async close(): Promise<void> {
+    const uploads = [...this.uploads.values()];
+    for (const upload of uploads) upload.controller.abort();
+    await Promise.allSettled(uploads.map((upload) => upload.done));
   }
 
   async saveVisualEvidence(
@@ -781,7 +813,8 @@ function pngDimensions(data: Uint8Array) {
 }
 
 function normalizeUploadPath(value: string): string {
-  if (!value || value.includes('\\') || value.startsWith('/') || /^[A-Za-z]:/.test(value)) {
+  if (!value || value.includes('\\') || value.startsWith('/') || /[\0:]/.test(value)
+    || value.split('/').some((part) => /[. ]$/.test(part))) {
     throw new ImportDraftError('Upload path must be a safe relative path');
   }
   const normalized = path.posix.normalize(value);

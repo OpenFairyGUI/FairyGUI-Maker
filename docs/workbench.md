@@ -1,7 +1,7 @@
 # FairyGUI Maker Workbench 架构与技术栈基线
 
 状态：核心栈、Viewer 与 Artifact-first Player 第一版已落地
-更新时间：2026-08-11
+更新时间：2026-09-04
 
 本文记录 FairyGUI Maker 浏览器界面层 Maker Workbench 的架构基线和已确认技术选案。Hono、React、TanStack Router/Query/Table/Virtual、Zod、Radix、Pino、react-resizable-panels 与 shadcn/ui 已进入第一版运行链路。
 
@@ -97,6 +97,28 @@ Workbench 保留 `/viewer`、`/player`、`/asset-manager` 作为人工选择入�
 目录句柄不能转换为 Node 可用的绝对路径。Host 因此只接收工程绑定元数据和 `sourceRevision`；UAM snapshot 与资产字节留在 Workbench 浏览器内，由 Project Source Client 按需读取并只把选中组件的依赖闭包传给 iframe。第一版不把整个工程复制到 Host，也不把只读绑定伪装成可保存的 OpenFairyGUI 文件会话。
 
 Project Source Client 属于 Workbench Shell 的同源浏览器服务，而不是 Dashboard React 组件本身；切换到 Viewer 路由后它仍可复用已授权句柄。浏览器重启后通过 IndexedDB 恢复 handle，并先查询 read permission。
+
+### 2.5 有界上传管线（批次 10）
+
+认证后的 POST/PUT/PATCH 请求先经过实际字节计数，再交给 JSON/MCP/multipart 解析器或 Store。`Content-Length` 只用于提前拒绝；缺失或伪报长度仍不能绕过流内限制。被拒绝的请求关闭连接，不继续复用未读完的上传流。
+
+| 边界 | 固定上限 |
+|---|---|
+| REST/MCP JSON（含 renderer 截图 Base64 envelope） | 16 MiB；截图原有 14,000,000 字符校验仍保留 |
+| Artifact 单文件 / 单次导入 | 128 MiB / 512 MiB，最多 5,000 文件 |
+| Import Draft 上传源 | 总计 530 MiB，最多 5,000 文件 |
+| Visual Evidence multipart | 48 MiB + 64 KiB；恰好一个 report 和各一张 reference/capture/diff PNG，每张最多 16 MiB |
+| 活跃二进制与视觉上传 | Host 合计 4 个；每个 Import/Draft 同时仅写一个源文件 |
+| 待完成上传 | Artifact 与 Draft 各最多 16 个；声明容量分别累计最多 512 MiB、530 MiB |
+| 请求体接收时限 / 待完成空闲有效期 | 5 分钟 / 30 分钟，成功写入文件后续期 |
+
+二进制直接流入独立 `.uploads/<uuid>.part`，边写边计数和计算 SHA-256，文件 flush、实际大小与摘要校验通过后才原子改名。超限返回 `413`，短传返回 `400`，同路径不同内容重试返回 `409`；相同内容重试成功且不覆盖既有文件。Artifact 创建 manifest 的每项必须提供 `{ path, size, sha256 }`（64 位小写十六进制），Workbench 会顺序校验文件后再创建 Import。Draft 保持 `{ path, size }` 协议，重试时仍比较实际内容摘要。
+
+取消 Artifact 使用 `DELETE /api/artifact-imports/:importId`；取消 Draft 沿用 `DELETE /api/import-drafts/:draftId?expectedRevision=...`。取消、断流或超时会关闭流并清理临时文件；超时返回 `408`，容量或并发已满返回 `503`。Artifact 完成阶段与写入、取消互斥，Host 同时只 finalize 一个 Artifact，忙碌返回 `409`。Draft 沿用已有变更队列。Host 每分钟及创建新上传前清理过期上传，关闭时中止活跃二进制流；重启清理 Artifact 未完成目录与 Draft 孤立 `.part`。已完成上传的 Draft 仍保留原有七天有效期。
+
+multipart 继续使用原生 `formData()`，但解析前已有固定总量限制，并非全流式解析器；浏览器 SHA-256 也仅逐个缓冲已限制为 128 MiB 的文件。容量配额针对待完成源文件声明，不包括已完成 Artifact/生成工程的长期占用或有界的重试暂存副本。FUI 解压、解码像素预算及证据持久化事务属于后续批次，不把本批次的上传限制当作其保护。
+
+验证入口：`test/uploads.test.ts` 覆盖实际 HTTP、Chunked/伪报长度、超限、摘要冲突、取消、孤立临时文件、容量、TTL、finalize 互斥和并发释放；`pnpm test:browser` 覆盖浏览器摘要上传、FIG Draft、Visual Evidence 与 Viewer/Player（目录选择器结果为测试注入，不代表系统授权弹窗已自动验证）。
 
 ## 3. 核心领域契约
 

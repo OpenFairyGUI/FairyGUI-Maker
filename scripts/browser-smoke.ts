@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { Document, ProjectType } from "@openfairygui/core"
 import { NodeIO } from "@openfairygui/core/node"
 import { chromium } from "playwright"
@@ -80,7 +80,7 @@ try {
   const created = await fetch(`${host.origin}/api/artifact-imports`, {
     method: "POST",
     headers: { ...headers, "Content-Type": "application/json" },
-    body: JSON.stringify({ name: "Browser smoke", source: { kind: "published-folder" }, files: [{ path: "Smoke.fui", size: binary.byteLength }] }),
+    body: JSON.stringify({ name: "Browser smoke", source: { kind: "published-folder" }, files: [{ path: "Smoke.fui", size: binary.byteLength, sha256: createHash("sha256").update(binary).digest("hex") }] }),
   })
   if (!created.ok) throw new Error(await created.text())
   const { importId } = await created.json() as { importId: string }
@@ -157,6 +157,27 @@ try {
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByTestId("visual-report").waitFor()
 
+  await page.goto(`${host.origin}/player`, { waitUntil: "domcontentloaded" })
+  // Inject only the picker result; hashing, upload, finalization and UI run unchanged.
+  // Browser JS avoids tsx name helpers in serialized async-generator functions.
+  await page.evaluate(`(() => {
+    const bytes = ${JSON.stringify(Array.from(binary))};
+    Object.defineProperty(window, "showDirectoryPicker", { configurable: true, value: async () => ({
+      kind: "directory",
+      name: "Smoke",
+      async *entries() {
+        yield ["Smoke.fui", { kind: "file", getFile: async () => new File([Uint8Array.from(bytes)], "Smoke.fui") }]
+      },
+    }) })
+  })()`)
+  const importedResponse = page.waitForResponse((response) => response.request().method() === "POST" && /\/api\/artifact-imports\/[^/]+\/complete$/.test(response.url()))
+  await page.getByRole("button", { name: "导入发布目录", exact: true }).click()
+  const imported = await importedResponse
+  if (!imported.ok() || (await imported.json()).artifact?.artifactId !== artifact.artifactId) {
+    throw new Error("Browser Artifact SHA-256 upload did not reproduce the immutable artifact")
+  }
+  await page.getByRole("button", { name: "导入发布目录", exact: true }).waitFor()
+
   await page.goto(`${host.origin}/artifacts/${artifact.artifactId}/player`, { waitUntil: "domcontentloaded" })
   await waitFor(
     () => callTool(host!.origin, sessionId, 4, "open_artifact_player", { artifactId: artifact.artifactId }).catch(() => ({ value: null } as any)),
@@ -177,7 +198,7 @@ try {
     method: "DELETE",
     headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
   })
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, mapping: true, visualEvidence: true, viewer: true, player: true, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
 } finally {
   await browser?.close()
   await host?.close()

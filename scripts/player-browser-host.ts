@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { Document } from "@openfairygui/core"
+import { createHash } from "node:crypto"
 import { NodeIO } from "@openfairygui/core/node"
 
 import { startMakerHost } from "../src/server/index"
@@ -26,7 +27,7 @@ const headers = { Authorization: `Bearer ${token}` }
 const created = await fetch(`${host.origin}/api/artifact-imports`, {
   method: "POST",
   headers: { ...headers, "Content-Type": "application/json" },
-  body: JSON.stringify({ name: "Player browser smoke", source: { kind: "published-folder" }, files: [{ path: "Smoke.fui", size: binary.byteLength }] }),
+  body: JSON.stringify({ name: "Player browser smoke", source: { kind: "published-folder" }, files: [{ path: "Smoke.fui", size: binary.byteLength, sha256: createHash("sha256").update(binary).digest("hex") }] }),
 })
 if (!created.ok) throw new Error(await created.text())
 const { importId } = await created.json() as { importId: string }
