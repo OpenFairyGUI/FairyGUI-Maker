@@ -1,5 +1,5 @@
 import { isViewerConnectMessage } from "./viewer-protocol"
-import { readBoundedStream, withRuntimeLoad } from "./runtime/resource-budget"
+import { readBoundedResponse, withRuntimeLoad } from "./runtime/resource-budget"
 
 // The URL nonce is a per-document channel binding, never a Host authorization token.
 export function acceptRuntimeConnection(connect: (revision: string, port: MessagePort, imageProbeWorker: string) => Promise<void>) {
@@ -28,7 +28,7 @@ export async function prepareRuntimeFrame(frame: HTMLIFrameElement, signal: Abor
   const imageProbeWorker = new TextDecoder().decode(await withRuntimeLoad(signal, async (workerSignal) => {
     const workerResponse = await fetch(imageProbeWorkerUrl, { signal: workerSignal, redirect: "error", credentials: "omit" })
     if (!workerResponse.ok || !workerResponse.body) throw new Error("Image probe worker is unavailable")
-    return readBoundedStream(workerResponse.body, 256 * 1024, workerSignal)
+    return readBoundedResponse(workerResponse, 256 * 1024, workerSignal)
   }))
   signal.throwIfAborted()
   const target = frame.contentWindow

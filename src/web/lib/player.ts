@@ -9,7 +9,7 @@ import { startRendererDelivery } from "./renderer-delivery"
 import { connectRendererChannel, executeRendererCommand, type RendererFrameSession } from "./renderer-frame"
 import { createRenderSessionClient, type RenderSessionClient } from "./render-session"
 import { prepareRuntimeFrame } from "../../runtime-channel"
-import { checkBudget, readBoundedStream, ResourceBudget, RUNTIME_LIMITS, withRuntimeLoad } from "../../runtime/resource-budget"
+import { checkBudget, readBoundedResponse, ResourceBudget, RUNTIME_LIMITS, withRuntimeLoad } from "../../runtime/resource-budget"
 
 async function connectPlayerFrame(frame: HTMLIFrameElement, artifact: ArtifactManifest, signal: AbortSignal): Promise<RendererFrameSession> {
   if (!frame.contentWindow) throw new Error("Player iframe 尚未就绪。")
@@ -49,7 +49,7 @@ export async function readArtifactFiles(artifact: ArtifactManifest, lifetime: Ab
     const bytes = await withRuntimeLoad(lifetime, async (signal) => {
       const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifactId)}/files/${path}`, { signal, redirect: "error" })
       if (!response.ok || !response.body) throw new Error(`读取 Artifact 失败：${file.path} (${response.status})`)
-      return readBoundedStream(response.body, file.size, signal)
+      return readBoundedResponse(response, file.size, signal)
     })
     if (bytes.byteLength !== file.size) throw new Error(`Artifact file size mismatch: ${file.path}`)
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))

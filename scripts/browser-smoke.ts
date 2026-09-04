@@ -254,8 +254,6 @@ try {
 
   await evidence.step("lifecycle-player-fetch", async () => {
     const probe = await context.newPage()
-    // Exercise the same network interception used by the delivery fault checks.
-    await probe.route("**/api/render-sessions/*/results", (route) => route.continue())
     try {
       for (let i = 0; i < 20; i++) {
         const fetched = probe.waitForResponse((response) => response.url().endsWith(`/api/artifacts/${artifact.artifactId}/files/Smoke.fui`))

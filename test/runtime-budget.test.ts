@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { randomBytes } from "node:crypto"
 import { deflateRawSync } from "node:zlib"
 import test from "node:test"
-import { checkImageDimensions, checkPngDimensions, checkRuntimeMetadata, decompressFuiIfNeeded, ObservationBudget, probeWebpDimensions, readBoundedStream, ResourceBudget, RUNTIME_LIMITS, withRuntimeLoad } from "../src/runtime/resource-budget"
+import { checkImageDimensions, checkPngDimensions, checkRuntimeMetadata, decompressFuiIfNeeded, ObservationBudget, probeWebpDimensions, readBoundedResponse, readBoundedStream, ResourceBudget, RUNTIME_LIMITS, withRuntimeLoad } from "../src/runtime/resource-budget"
 
 function fui(payload: Uint8Array, compressed = true) {
   const header = Buffer.alloc(33)
@@ -31,7 +31,7 @@ test("runtime FUI inflation bounds output, ratio, malformed headers and remainin
   await assert.rejects(decompressFuiIfNeeded(source, AbortSignal.abort(new Error("cancelled"))), /cancelled/)
 })
 
-test("runtime stream collector releases failed reads but retains completed body ownership", async () => {
+test("runtime stream collector bounds bytes, chunks and deadlines and releases readers", async () => {
   let cancelled = false
   const stream = new ReadableStream<Uint8Array>({
     pull(controller) { controller.enqueue(new Uint8Array(8)) },
@@ -49,7 +49,7 @@ test("runtime stream collector releases failed reads but retains completed body 
   await assert.rejects(readBoundedStream(new ReadableStream({ start(c) { c.error(new Error("broken stream")) } }), 10), /broken stream/)
   const complete = new Blob([new Uint8Array([1, 2, 3])]).stream()
   const result = await readBoundedStream(complete, 3)
-  assert.equal(complete.locked, true, "EOF must retain body ownership until fetch completion")
+  assert.equal(complete.locked, false)
   assert.deepEqual(Array.from(result), [1, 2, 3])
 })
 
@@ -72,6 +72,37 @@ test("runtime load deadlines cancel active reads but detach from completed fetch
     await rejected
     assert.equal(cancelled, true)
   }
+})
+
+test("native response completion is bounded before buffering and cancels both tee branches", async (t) => {
+  const signal = new AbortController().signal
+  const response = new Response(new Uint8Array([1, 2, 3]))
+  const buffered = t.mock.method(response, "arrayBuffer")
+  assert.deepEqual(Array.from(await readBoundedResponse(response, 3, signal)), [1, 2, 3])
+  assert.equal(buffered.mock.callCount(), 1)
+  const failed = new Response(new Uint8Array([1, 2, 3]))
+  t.mock.method(failed, "arrayBuffer", async () => { throw new Error("network completion failed") })
+  await assert.rejects(readBoundedResponse(failed, 3, signal), /network completion failed/)
+  for (const empty of [false, true]) {
+    let cancelled = false
+    const overflowing = new Response(new ReadableStream<Uint8Array>({
+      pull(c) { c.enqueue(new Uint8Array(empty ? 0 : 8)) },
+      cancel() { cancelled = true },
+    }), { headers: { "Content-Length": "1" } })
+    const allocate = t.mock.method(overflowing, "arrayBuffer")
+    await assert.rejects(readBoundedResponse(overflowing, 10, signal), empty ? /stream_chunks/ : /stream_bytes/)
+    assert.equal(allocate.mock.callCount(), 0, "headers must not bypass streaming limits")
+    assert.equal(cancelled, true)
+  }
+  let cancelled = false
+  const stalled = new Response(new ReadableStream({ cancel() { cancelled = true; return new Promise(() => {}) } }))
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new DOMException("load deadline", "TimeoutError")), 10)
+  try { await assert.rejects(readBoundedResponse(stalled, 10, controller.signal), { name: "TimeoutError" }) }
+  finally { clearTimeout(timer) }
+  assert.equal(cancelled, true, "a stalled cancellation must not hold the caller open")
+  await assert.rejects(readBoundedResponse(new Response(new ReadableStream({ start(c) { c.error(new Error("broken stream")) } })), 10, signal), /broken stream/)
+  await assert.rejects(readBoundedResponse(new Response("unused"), 10, AbortSignal.abort()), { name: "AbortError" })
 })
 
 test("runtime image and scene accounting reject oversized inputs before allocating textures/nodes", () => {

@@ -172,7 +172,6 @@ export async function readBoundedStream(
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
   let length = 0
-  let complete = false
   const abort = () => { void reader.cancel(signal.reason).catch(() => {}) }
   signal.addEventListener("abort", abort, { once: true })
   try {
@@ -180,7 +179,7 @@ export async function readBoundedStream(
     while (true) {
       const { value, done } = await reader.read()
       signal.throwIfAborted()
-      if (done) { complete = true; break }
+      if (done) break
       checkBudget(chunks.length + 1, maxChunks, "stream_chunks")
       checkBudget(length + value.byteLength, maxBytes, "stream_bytes")
       chunks.push(value)
@@ -195,9 +194,31 @@ export async function readBoundedStream(
     throw error
   } finally {
     signal.removeEventListener("abort", abort)
-    // Like native Response body consumption, keep an EOF reader locked. Unlocking
-    // it can abort Chromium's still-pending fetch completion even after all bytes arrived.
-    if (!complete) reader.releaseLock()
+    reader.releaseLock()
+  }
+}
+
+export async function readBoundedResponse(response: Response, maxBytes: number, signal: AbortSignal) {
+  signal.throwIfAborted()
+  // Keep native body consumption alive: closing a directly-read fetch stream can
+  // abort Chromium's pending network completion even after its last byte arrived.
+  const bounded = response.clone().body!
+  let length = 0
+  let chunks = 0
+  try {
+    // A tee cancellation waits for both branches; cancel them together on failure.
+    await bounded.pipeTo(new WritableStream<Uint8Array>({
+      write(value) {
+        checkBudget(++chunks, RUNTIME_LIMITS.streamChunks, "stream_chunks")
+        checkBudget(length += value.byteLength, maxBytes, "stream_bytes")
+      },
+    }), { signal, preventCancel: true })
+    signal.throwIfAborted()
+    return new Uint8Array(await response.arrayBuffer())
+  } catch (error) {
+    void bounded.cancel(error).catch(() => {})
+    void response.body?.cancel(error).catch(() => {})
+    throw error
   }
 }
 
