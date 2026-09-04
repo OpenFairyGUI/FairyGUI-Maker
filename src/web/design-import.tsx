@@ -11,7 +11,7 @@ import type { FairyBuildPlanV1 } from "../design-import/plan"
 import type { MakerSemanticOverlayV1, SemanticTarget } from "../design-import/semantic-overlay"
 import { compareVisualBlobs } from "@/lib/visual-evidence"
 
-export type VisualCaptureInfo = { packageId: string; componentId: string; packageName: string; componentName: string }
+export type VisualCaptureInfo = { packageId: string; componentId: string; packageName: string; componentName: string; renderState: NonNullable<ImportVisualEvidenceV1["renderState"]> }
 
 type DraftDetail = {
   draft: ImportDraftV1
@@ -308,6 +308,7 @@ function VisualComparison({ referenceUrl, evidence, imageUrl, mode, opacity, onM
 }) {
   if (!evidence) return <div className="grid max-h-[480px] place-items-center overflow-auto rounded-lg border bg-muted/20 p-3"><img src={referenceUrl} alt="Reference Image" className="max-h-[440px] max-w-full" /></div>
   return <div className="space-y-4" data-testid="visual-report">
+    <p className="text-xs text-muted-foreground">{evidence.renderState ? `Semantic ${evidence.renderState.semanticStateVersion} · View ${evidence.renderState.viewStateVersion} · ${evidence.renderState.sourceRevision.slice(0, 12)}` : "旧版证据：未记录 Broker 状态版本"}</p>
     <div className="flex flex-wrap items-center gap-2">
       {(["overlay", "side-by-side", "diff"] as const).map((value) => <Button key={value} type="button" size="sm" variant={mode === value ? "default" : "outline"} onClick={() => onMode(value)}>{value === "overlay" ? "Opacity Overlay" : value === "side-by-side" ? "Side-by-side" : "Pixel Diff"}</Button>)}
       {mode === "overlay" ? <label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">Capture {opacity}%<input aria-label="Overlay opacity" type="range" min="0" max="100" value={opacity} onChange={(event) => onOpacity(Number(event.target.value))} /></label> : null}

@@ -58,6 +58,8 @@ export interface ImportVisualEvidenceV1 {
   componentId: string;
   packageName: string;
   componentName: string;
+  // Older v1 evidence remains readable; new Workbench captures always include the Broker stamp.
+  renderState?: { renderSessionId: string; sourceRevision: string; semanticStateVersion: number; viewStateVersion: number };
   reference: { width: number; height: number };
   capture: { width: number; height: number };
   comparison: {
@@ -170,12 +172,18 @@ const diagnosticSchema = z.object({
   rootId: z.string().optional(),
   rootName: z.string().optional(),
 }).strict();
-const visualEvidenceSchema = z.object({
+export const visualEvidenceSchema = z.object({
   schemaVersion: z.literal(1),
   packageId: z.string().min(1).max(128),
   componentId: z.string().min(1).max(128),
   packageName: z.string().min(1).max(256),
   componentName: z.string().min(1).max(256),
+  renderState: z.object({
+    renderSessionId: z.string().regex(/^render_[0-9a-f-]{36}$/),
+    sourceRevision: z.string().min(1).max(128),
+    semanticStateVersion: z.number().int().nonnegative(),
+    viewStateVersion: z.number().int().nonnegative(),
+  }).strict().optional(),
   reference: z.object({ width: z.number().int().positive().max(8_192), height: z.number().int().positive().max(8_192) }).strict(),
   capture: z.object({ width: z.number().int().positive().max(8_192), height: z.number().int().positive().max(8_192) }).strict(),
   comparison: z.object({

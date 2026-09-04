@@ -57,7 +57,7 @@ async function renderer(t: TestContext, options: {
   const delivery = await startRendererDelivery(
     async () => { options.duringRegistration?.(emit); return { session: registered } },
     { setInteractionHandler: (value) => { handler = value } },
-    options.execute ?? (async () => ({})),
+    async (command) => ({ runtimeEventSeq: command.executionState?.runtimeEventSeq ?? 0, ...await (options.execute?.(command) ?? {}) }),
     (error) => errors.push(error),
     lifetime.signal,
   )
@@ -84,7 +84,7 @@ test("result retries preserve one execution and exact bytes before acceptance an
     await until(() => posts.length === 3)
     assert.equal(executions, 1)
     assert.equal(new Set(posts).size, 1)
-    assert.equal(r.broker.getSession(r.id)?.stateVersion, failed ? 0 : 1)
+    assert.equal(r.broker.getSession(r.id)?.stateVersion, 1)
     assert.deepEqual(r.errors, [])
   })
 })
@@ -165,7 +165,7 @@ test("stop during registration closes a late session without starting a poll or 
   t.mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => { requests.push(init.method ?? "GET"); return new Response(null, { status: 204 }) })
   const lifetime = new AbortController()
   let finish!: (value: { session: { renderSessionId: string } }) => void
-  const pending = startRendererDelivery(() => new Promise((resolve) => { finish = resolve }), { setInteractionHandler() {} }, async () => assert.fail("late execution"), () => assert.fail("late error"), lifetime.signal)
+  const pending = startRendererDelivery(() => new Promise<{ session: { renderSessionId: string } }>((resolve) => { finish = resolve }), { setInteractionHandler() {} }, async () => assert.fail("late execution"), () => assert.fail("late error"), lifetime.signal)
   lifetime.abort()
   finish({ session: { renderSessionId: "late" } })
   await assert.rejects(pending, { name: "AbortError" })
@@ -205,11 +205,12 @@ test("Broker replay receipts are canonical, bounded, conflict-safe and do not ad
     const requestId = randomUUID()
     const pending = broker.executeForProject(project.projectId, "update", { a: 1, b: 2 }, requestId)!
     assert.equal(broker.executeForProject(project.projectId, "update", { b: 2, a: 1 }, requestId), pending)
-    const result = { commandSeq: 1, requestId, ok: true, value: { a: 1, b: { c: 2, d: [1, 2] } } }
+    await broker.readCommands(id, 0, new AbortController().signal)
+    const result = { commandSeq: 1, requestId, ok: true, value: { runtimeEventSeq: 0, a: 1, b: { c: 2, d: [1, 2] } } }
     assert.equal(broker.submitResult(id, result), true)
     await pending
-    assert.equal(broker.submitResult(id, { ...result, value: { b: { d: [1, 2], c: 2 }, a: 1 } }), true)
-    assert.throws(() => broker.submitResult(id, { ...result, value: { a: 2 } }), /result_conflict/)
+    assert.equal(broker.submitResult(id, { ...result, value: { b: { d: [1, 2], c: 2 }, a: 1, runtimeEventSeq: 0 } }), true)
+    assert.throws(() => broker.submitResult(id, { ...result, value: { a: 2, runtimeEventSeq: 0 } }), /result_conflict/)
     assert.throws(() => broker.submitResult(id, { ...result, requestId: randomUUID() }), /result_conflict/)
     assert.equal(broker.getSession(id)?.stateVersion, 1)
     const interaction = { ...event(1), data: { selected: true, index: 2 } }
@@ -222,7 +223,8 @@ test("Broker replay receipts are canonical, bounded, conflict-safe and do not ad
       broker.recordInteraction(id, event(seq))
       const requestId = randomUUID()
       const pending = broker.executeForProject(project.projectId, "capture", {}, requestId)!
-      broker.submitResult(id, { commandSeq: seq, requestId, ok: true, value: {} })
+      await broker.readCommands(id, seq - 1, new AbortController().signal)
+      broker.submitResult(id, { commandSeq: seq, requestId, ok: true, value: { runtimeEventSeq: seq } })
       await pending
     }
     assert.throws(() => broker.recordInteraction(id, interaction), /interaction_conflict/)

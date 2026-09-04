@@ -68,7 +68,8 @@ test("render request idempotency history stays bounded", async () => {
     const requestId = `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`
     const result = broker.executeForProject(project.projectId, "capture", { index }, requestId)
     assert.ok(result)
-    assert.equal(broker.submitResult(renderer.renderSessionId, { commandSeq: index + 1, requestId, ok: true, value: {} }), true)
+    await broker.readCommands(renderer.renderSessionId, index, new AbortController().signal)
+    assert.equal(broker.submitResult(renderer.renderSessionId, { commandSeq: index + 1, requestId, ok: true, value: { runtimeEventSeq: 0 } }), true)
     await result
   }
   assert.equal(broker.getSession(renderer.renderSessionId)?.commandSeq, 257)
@@ -77,7 +78,8 @@ test("render request idempotency history stays bounded", async () => {
   const repeated = broker.executeForProject(project.projectId, "capture", { index: 0 }, evictedRequestId)
   assert.ok(repeated)
   assert.equal(broker.getSession(renderer.renderSessionId)?.commandSeq, 258)
-  assert.equal(broker.submitResult(renderer.renderSessionId, { commandSeq: 258, requestId: evictedRequestId, ok: true, value: {} }), true)
+  await broker.readCommands(renderer.renderSessionId, 257, new AbortController().signal)
+  assert.equal(broker.submitResult(renderer.renderSessionId, { commandSeq: 258, requestId: evictedRequestId, ok: true, value: { runtimeEventSeq: 0 } }), true)
   await repeated
   broker.close()
 })
@@ -304,7 +306,7 @@ test("Maker Host protects Maker Workbench and accepts an MCP session", async () 
         commandSeq: commandBatch.commands[0].commandSeq,
         requestId: commandBatch.commands[0].requestId,
         ok: true,
-        value: { rendered: { packageName: "Bag", componentName: "Main", width: 1136, height: 640 } },
+        value: { runtimeEventSeq: 0, rendered: { packageName: "Bag", componentName: "Main", width: 1136, height: 640 } },
       }),
     })).status, 200)
     const toolResult = await toolCall.then((response) => response.json())
@@ -339,7 +341,7 @@ test("Maker Host protects Maker Workbench and accepts an MCP session", async () 
         commandSeq: captureBatch.commands[0].commandSeq,
         requestId: captureBatch.commands[0].requestId,
         ok: true,
-        value: { screenshotBase64 },
+        value: { screenshotBase64, runtimeEventSeq: 0 },
       }),
     })).status, 200)
     const captureResult = await captureCall.then((response) => response.json())
@@ -411,7 +413,7 @@ test("Maker Host protects Maker Workbench and accepts an MCP session", async () 
         commandSeq: observationBatch.commands[0].commandSeq,
         requestId: observationBatch.commands[0].requestId,
         ok: true,
-        value: { observation },
+        value: { observation, runtimeEventSeq: 1 },
       }),
     })).status, 200)
     const observationResult = await observationCall.then((response) => response.json())
@@ -461,7 +463,7 @@ test("Maker Host protects Maker Workbench and accepts an MCP session", async () 
         commandSeq: updateBatch.commands[0].commandSeq,
         requestId: updateBatch.commands[0].requestId,
         ok: true,
-        value: { observation },
+        value: { observation, runtimeEventSeq: 1 },
       }),
     })).status, 200)
     assert.equal(JSON.parse((await updateCall.then((response) => response.json())).result.content[0].text).stateVersion, 3)

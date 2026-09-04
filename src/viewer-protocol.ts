@@ -1,7 +1,7 @@
 import type { UamAssetResource, UamComponentResource } from "@openfairygui/core"
 import type { PlayerRenderSource } from "./artifact-protocol"
 
-export const VIEWER_PROTOCOL_VERSION = 4
+export const VIEWER_PROTOCOL_VERSION = 5
 export const MAX_RENDERER_INTERACTION_BYTES = 64 * 1024
 
 export type ViewerComponent = {
@@ -57,14 +57,36 @@ export type ViewerConnectMessage = {
   sourceRevision: string
 }
 
-export type ViewerCommand =
+export type ViewerCommand = { expectedRuntimeEventSeq?: number } & (
   | { kind: "render"; requestId: string; scene: ViewerScene }
   | { kind: "render-artifact"; requestId: string; source: PlayerRenderSource }
   | { kind: "capture"; requestId: string }
   | { kind: "observe"; requestId: string }
-  | { kind: "set-view"; requestId: string; zoom: number; background: string }
+  | { kind: "set-view"; requestId: string; view: Partial<ViewerViewState> }
   | { kind: "play-transition"; requestId: string; transitionName?: string }
   | { kind: "apply-operations"; requestId: string; operations: ViewerOperation[] }
+)
+
+export type ViewerViewState = { zoom: number; background: string; width: number; height: number }
+export type RenderStateVersions = { semanticStateVersion: number; viewStateVersion: number }
+export type RenderCommandResult = RenderStateVersions & {
+  renderSessionId: string
+  sourceRevision: string
+  /** Compatibility alias for semanticStateVersion. */
+  stateVersion: number
+  value: Record<string, unknown>
+}
+export type RenderSessionState = RenderStateVersions & {
+  stateSeq: number
+  renderSessionId: string
+  sourceRevision: string
+  stateVersion: number
+  commandSeq: number
+  lastAcceptedRuntimeEventSeq: number
+  rendered: ViewerRendered | null
+  observation: ViewerObservation | null
+  view: ViewerViewState
+}
 
 export type ViewerRendered = {
   packageId: string
@@ -164,8 +186,12 @@ export type ViewerInteractionEvent = {
 export type ViewerBrokerCommand = {
   commandSeq: number
   requestId: string
-  kind: "render" | "capture" | "observe" | "update"
+  kind: "render" | "capture" | "observe" | "update" | "view"
   payload: Record<string, unknown>
+  expectedStateVersion?: number
+  expectedViewStateVersion?: number
+  /** Assigned once, when the head command is dispatched. */
+  executionState?: RenderStateVersions & { runtimeEventSeq: number }
 }
 
 export type ViewerRuntimeMessage =
@@ -173,7 +199,7 @@ export type ViewerRuntimeMessage =
   | { kind: "fatal"; error: string }
   | { kind: "rendered"; value: ViewerRendered }
   | { kind: "interaction"; value: ViewerInteractionEvent }
-  | { kind: "response"; requestId: string; ok: true; value?: unknown }
+  | { kind: "response"; requestId: string; ok: true; value?: unknown; runtimeEventSeq: number }
   | { kind: "response"; requestId: string; ok: false; error: string }
 
 export function isViewerConnectMessage(value: unknown): value is ViewerConnectMessage {

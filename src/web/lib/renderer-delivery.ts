@@ -1,4 +1,4 @@
-import { MAX_RENDERER_INTERACTION_BYTES, type ViewerBrokerCommand, type ViewerInteractionEvent } from "../../viewer-protocol"
+import { MAX_RENDERER_INTERACTION_BYTES, type ViewerBrokerCommand, type ViewerInteractionEvent, type RenderSessionState } from "../../viewer-protocol"
 import {
   closeRendererSession,
   readViewerCommands,
@@ -11,12 +11,13 @@ const MAX_OUTBOX_EVENTS = 256
 const MAX_OUTBOX_BYTES = 1024 * 1024
 
 // ponytail: one live iframe owns this in-memory outbox; reload starts a new session, not a replay of old side effects.
-export async function startRendererDelivery(
-  register: (signal: AbortSignal) => Promise<{ session: { renderSessionId: string } }>,
+export async function startRendererDelivery<T extends { renderSessionId: string }>(
+  register: (signal: AbortSignal) => Promise<{ session: T }>,
   frame: { setInteractionHandler(handler: ((event: ViewerInteractionEvent) => void) | null): void },
   execute: (command: ViewerBrokerCommand) => Promise<Record<string, unknown>>,
   onError: (error: Error) => void,
   lifetime: AbortSignal,
+  onState?: (state: RenderSessionState) => void,
 ) {
   const controller = new AbortController()
   const { signal } = controller
@@ -24,7 +25,7 @@ export async function startRendererDelivery(
   let failure: Error | undefined
   let receivedSeq = 0
   let outboxBytes = 0
-  let draining = false
+  let draining: Promise<void> | undefined
   const outbox: Array<{ runtimeEventSeq: number; body: string; bytes: number }> = []
   const close = () => {
     if (renderSessionId) void closeRendererSession(renderSessionId).catch((error) => console.warn("Renderer close failed; Host TTL will reclaim it.", error))
@@ -50,21 +51,21 @@ export async function startRendererDelivery(
     stop()
     onError(failure)
   }
-  const drain = async () => {
-    if (draining || !renderSessionId || signal.aborted) return
-    draining = true
-    try {
+  const drain = (): Promise<void> => {
+    if (draining) return draining
+    if (!renderSessionId || signal.aborted) return Promise.resolve()
+    draining = (async () => {
       while (outbox.length && !signal.aborted) {
         const event = outbox[0]
         const ack = await retry(() => submitViewerInteraction(renderSessionId, event.body, signal), signal)
         signal.throwIfAborted()
         if (ack.accepted !== true || ack.runtimeEventSeq !== event.runtimeEventSeq) throw new Error("interaction_ack_mismatch")
+        if (ack.session) onState?.(ack.session)
         outbox.shift()
         outboxBytes -= event.bytes
       }
-    } finally {
-      draining = false
-    }
+    })().finally(() => { draining = undefined })
+    return draining
   }
 
   lifetime.throwIfAborted()
@@ -89,20 +90,22 @@ export async function startRendererDelivery(
     const { session } = await register(signal)
     renderSessionId = session.renderSessionId
     if (signal.aborted) { close(); signal.throwIfAborted() }
-    void runCommands(renderSessionId, execute, signal).catch(fail)
+    void runCommands(renderSessionId, execute, signal, drain, onState).catch(fail)
     void drain().catch(fail)
-    return { renderSessionId, stop }
+    return { renderSessionId, session, stop }
   } catch (error) {
     stop()
     throw failure ?? error
   }
 }
 
-async function runCommands(renderSessionId: string, execute: (command: ViewerBrokerCommand) => Promise<Record<string, unknown>>, signal: AbortSignal) {
+async function runCommands(renderSessionId: string, execute: (command: ViewerBrokerCommand) => Promise<Record<string, unknown>>, signal: AbortSignal, drain: () => Promise<void>, onState?: (state: RenderSessionState) => void) {
   let after = 0
   while (!signal.aborted) {
-    const { commands } = await retry(() => readViewerCommands(renderSessionId, after, signal), signal)
+    await drain()
+    const { commands, session } = await retry(() => readViewerCommands(renderSessionId, after, signal), signal)
     signal.throwIfAborted()
+    if (session) onState?.(session)
     // Fetch again after each ACK: a previously fetched batch may have expired while delivery was retrying.
     const command = commands[0]
     if (!command) continue
@@ -111,11 +114,14 @@ async function runCommands(renderSessionId: string, execute: (command: ViewerBro
       .then((value) => ({ ok: true, value }))
       .catch((error) => ({ ok: false, error: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) }))
     signal.throwIfAborted()
+    // MessagePort orders interactions before their response watermark; acknowledge those events before the result.
+    await drain()
     // Only one command is in flight. Keep its exact wire result until ACK, including failed executions.
     const body = JSON.stringify({ commandSeq: command.commandSeq, requestId: command.requestId, ...result })
     const ack = await retry(() => submitViewerCommandResult(renderSessionId, body, signal), signal)
     signal.throwIfAborted()
     if (ack.accepted !== true || ack.commandSeq !== command.commandSeq || ack.requestId !== command.requestId) throw new Error("result_ack_mismatch")
+    if (ack.session) onState?.(ack.session)
     after = command.commandSeq
   }
 }

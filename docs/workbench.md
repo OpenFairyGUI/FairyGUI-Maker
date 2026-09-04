@@ -78,7 +78,7 @@ Agent 不直接操作 iframe 或 Canvas。它只向 Host 提交语义命令，�
 | 交互语义 | Maker 解释 UAM Controller/Gear/Transition 与常用控件 | 发布 runtime 执行原生 Controller/Gear/Transition 与控件行为 |
 | 持久化 | 工程和临时运行态都不写回；session 仅 Host 内存 | Artifact 内容寻址并持久化；session 仍仅 Host 内存 |
 
-当前共享协议为 v4，分成两层：Host 与 Workbench 页面通过 `/api/renderers`、命令长轮询、结果 ACK 和 interaction 上报通信；页面与 iframe 通过同源校验后的 `MessageChannel` 通信。Host 命令统一为 `render / update / observe / capture`，页面再分别转换为 Viewer 的 `render` 或 Player 的 `render-artifact`，因此共享控制面不会把两种 renderer 混为一套。
+当前共享协议为 v5，分成两层：Host 与 Workbench 页面通过 `/api/renderers`、命令长轮询、结果 ACK 和 interaction 上报通信；Renderer 与 iframe 通过同源校验后的 `MessageChannel` 通信。Host 命令统一为 `render / update / view / observe / capture`，Renderer 再分别转换为 Viewer 的 `render` 或 Player 的 `render-artifact`，因此共享控制面不会把两种 renderer 混为一套。Workbench 不持有可直接修改 iframe 的 FrameSession。
 
 对应实现边界：`src/web/lib/viewer.ts` 与 `src/runtime/viewer-runtime.ts` 负责工程态；`src/web/lib/player.ts`、`src/runtime/player-runtime.ts` 与 `src/server/artifacts.ts` 负责发布态；`src/server/viewer.ts` 只负责两者共用的 Render Session Broker 和 MCP 工具。
 
@@ -139,7 +139,7 @@ PNG 在任何解码器运行前检查 IHDR；PNG/JPEG 的完整校验复用 Core
 
 Player 仍使用原生 `UIPackage`，在工厂、组件构造与纹理创建边界计数；不另写一套 FUI 组件解析器，也不改动冻结的 vendor 文件。构造失败会恢复原生 constructing 计数并回收部分实例。Observation 超限明确失败，不截断、更不把不完整树伪装为完整结果；批量 operation 的子结果与末尾 observation 共用同一预算。
 
-这些是输入与资源句柄预算，不是浏览器进程的硬内存沙箱：纹理估算不含驱动/mipmap/字体排版等额外开销；音频不再预解码，PCM 时长预算和组件级按需资源闭包仍未实现。ACK/outbox 由批次 12 提供；Broker 状态统一与 iframe 权限隔离继续留在后续批次。
+这些是输入与资源句柄预算，不是浏览器进程的硬内存沙箱：纹理估算不含驱动/mipmap/字体排版等额外开销；音频不再预解码，PCM 时长预算和组件级按需资源闭包仍未实现。ACK/outbox 由批次 12 提供，Broker 状态统一见批次 13；iframe 权限隔离继续留在后续批次。
 
 验证：`test/runtime-budget.test.ts` 覆盖压缩炸弹、绝对/累计输出限制、流中断/超时/块数、图像尺寸、纹理、节点、Observation 与稀疏元数据；`pnpm test:browser` 中的 `scripts/runtime-budget-smoke.ts` 验证真实 Viewer/Player 的超深/展开超量场景、巨型 PNG/SVG、MovieClip 与原生 atlas 子纹理上限、正常 PNG/JPEG/WebP/SVG、Observation 拒绝、重连后的迟到解码回收及 Artifact A→B→正常场景的缓存释放。
 
@@ -162,9 +162,29 @@ Interaction 在注册请求前就接入 outbox，严格按序发送，队头收�
 | 命令超时 | 沿用入队起 30 s；未收到结果时执行状态未知，关闭整个会话并拒绝剩余 pending，不复用可能已变化的运行态 |
 | 关闭 / TTL | 页面卸载、切换或 stop 中止 poll/POST/退避，移除 interaction handler，并以 keepalive DELETE 关闭 Host 会话；关闭请求失败由 5 分钟不活跃 TTL 兜底，每分钟及访问时检查 |
 
-严重断线、Host 重启、会话替换、gap 或超限都会移除 AGENT READY，显示原因与“重新连接”。重新连接会重新加载页面、重置 iframe 并注册新会话；浏览器后退缓存（bfcache）恢复已关闭的页面时也会重新加载。Agent 必须重新获取 session ID，不自动重放旧会话操作。正常短暂断网可以在同一页面恢复交付，但本批次不承诺跨页面刷新/浏览器崩溃/Host 重启的 exactly-once，不保存持久 outbox。Workbench 本地修改统一进入 Broker 和双状态版本属于批次 13，尚未纳入本次。
+严重断线、Host 重启、会话替换、gap 或超限都会移除 AGENT READY，显示原因与“重新连接”。重新连接会重新加载页面、重置 iframe 并注册新会话；浏览器后退缓存（bfcache）恢复已关闭的页面时也会重新加载。Agent 必须重新获取 session ID，不自动重放旧会话操作。正常短暂断网可以在同一页面恢复交付，但不承诺跨页面刷新/浏览器崩溃/Host 重启的 exactly-once，不保存持久 outbox。
 
 验证：`test/renderer-delivery.test.ts` 覆盖结果送达前故障、Host ACK 丢失、失败结果、注册期间事件、队头重试、关闭/迟到结果、容量/字节超限、错误 ACK、规范化重放/冲突、receipt 淘汰、命令超时和 TTL。`pnpm test:browser` 中的 `scripts/renderer-delivery-smoke.ts` 在真实 Viewer 与原生 Player 上注入 HTTP 故障，断言三次结果 POST 只执行一次 iframe 更新、两条事件按序续传、Host 重复/冲突响应及错误提示→重新连接；交互事件 envelope 从真实 MessagePort 测试注入，不把它当作所有鼠标控件行为的验收。
+
+### 2.8 统一 Broker 状态（批次 13）
+
+Workbench 的组件选择、Controller、Transition、缩放、背景、视口和截图全部通过 `POST /api/render-sessions/:id/commands`，与 MCP 共用同一个队列、幂等缓存与版本校验。MessageChannel 仅留在 Renderer 内部。界面的已选组件、控件与视图参数来自 Host ACK，Agent 切换组件不会触发 Workbench 再渲染一次。
+
+| 版本 | 推进条件 | 前置条件 |
+|---|---|---|
+| `semanticStateVersion` | render/update、每条已接收的 runtime interaction | 更新及 Workbench 组件切换使用 `expectedStateVersion` |
+| `viewStateVersion` | zoom/background/width/height 的 view 命令 | `expectedViewStateVersion` |
+| `stateVersion` | 兼容别名，始终等于 semanticStateVersion | 旧 Agent 调用继续有效 |
+
+两个 CAS 都在入队和队头首次下发前校验；同版本并发请求不会全部执行。runtime 在语义命令执行前校验 `expectedRuntimeEventSeq`，防止尚在上报的人工事件被旧命令覆盖。冲突返回 409，Workbench 刷新 Host 状态并提示重新确认，不自动重放。批量 operation 不承诺回滚，失败也会使旧语义版本失效；不确定的 view 失败或 iframe 请求超时关闭会话。`stateSeq` 只用于过滤乱序状态响应，不是第三种业务版本。
+
+`set_render_view` 向 Agent 提供相同的视图能力：zoom 0.1–4、六位十六进制背景色、正整数 width/height；尺寸受批次 11 图像预算限制。面板 resize 合并为最多一个在途 view 请求。runtime 使用固定设计视口，不再自行根据 window.resize 修改截图尺寸与布局。
+
+截图结果包含 `renderSessionId + sourceRevision + semanticStateVersion + viewStateVersion`，以及组件身份和视图参数。runtime 在 `drawToCanvas` 时固定 interaction watermark，Renderer 先交付相关事件，再提交结果；Host 按下发基线和捕获序号计算截图版本。PNG 编码或 ACK 重试期间的新交互不会污染旧图的版本；重试返回同一截图及版本。`afterStateVersion`、新增的 `afterViewStateVersion` 是新鲜度下限，不是历史状态恢复请求。
+
+Visual Evidence 的 report/draft 元数据保存 `renderState` 双版本，重载继续显示；旧 v1 报告可读取但标注没有状态版本。该记录仍不是签名证据或跨重启 session，且版本描述语义操作，不代表动画/hover 的每一帧或 `settle`。sourceRevision 刷新、证据落盘事务与 iframe 权限隔离未纳入本批次。
+
+验证：`test/broker-state.test.ts` 覆盖队头 CAS、别名、双版本独立性、幂等参数、捕获后交互和失败失效；`scripts/broker-state-smoke.ts` 验证 Viewer/Player 实际视图、409 提示、viewport/PNG 尺寸，以及 Player Controller/Transition 与组件选择的双向同步。原有交付故障、资源预算和 FIG 视觉基线烟测继续执行。
 
 ## 3. 核心领域契约
 
@@ -210,6 +230,8 @@ type RenderSession = {
   sourceRevision: string // Viewer 为工程版本；Player 为 artifact digest
   status: 'ready' | 'running' | 'failed' | 'closed'
   stateVersion: number
+  semanticStateVersion: number
+  viewStateVersion: number
   commandSeq: number
   interactionSeq: number
   lastAcceptedRuntimeEventSeq: number
@@ -229,7 +251,7 @@ type UpdateRenderSessionInput = {
 }
 ```
 
-当前 v4 不暴露 `settle`；命令结果只确认对应 runtime 已执行本次操作。`idle`、条件等待与事件断言留给后续 `run_ui_scenario`，不提前塞入单次更新接口。
+当前 v5 不暴露 `settle`；命令结果只确认对应 runtime 已执行本次操作。`idle`、条件等待与事件断言留给后续 `run_ui_scenario`，不提前塞入单次更新接口。
 
 约束：
 
@@ -287,8 +309,9 @@ sequenceDiagram
 
     Agent->>MCP: update_render_session
     MCP->>Host: enqueue ordered command
+    Page->>Host: POST commands (Workbench controls)
     Page->>Host: long poll commands after commandSeq
-    Host-->>Page: command batch
+    Host-->>Page: head command + execution versions
     Page->>Runtime: MessageChannel
     Runtime->>Runtime: render / apply / observe / capture
     Runtime-->>Page: result / observation / PNG bytes
@@ -297,16 +320,16 @@ sequenceDiagram
     MCP-->>Agent: structured result and resource links
 ```
 
-Workbench 页面负责认证、领取命令和上传结果；隔离 iframe 只实现 FairyGUI runtime adapter。页面与 iframe 使用带 `renderSessionId`、协议版本和消息类型的 `MessageChannel` envelope，并校验消息来源。
+Workbench 页面负责认证、领取命令和上传结果；隔离 iframe 只实现 FairyGUI runtime adapter。MessageChannel 握手校验 origin、消息来源、协议版本和 `sourceRevision`；内部请求以 `requestId` 关联，`renderSessionId` 由外层 Renderer HTTP 通道持有。
 
 TanStack Query 只管理 Dashboard 和页面展示所需的服务状态，不承载 renderer 命令队列。命令通道需要严格顺序、ACK 和幂等，必须由独立的 Renderer Client 循环处理。
 
 ### 4.5 更新顺序、幂等与数据绑定
 
 - Host 为命令分配严格递增的 `commandSeq`；renderer 只能按序执行并回传 ACK。
-- 同一个 `operations` 批次在一次提交中应用；成功的 render/update 和人工交互各推进一次 `stateVersion`，observe/capture 不推进版本。
+- 同一个 `operations` 批次在一次提交中应用；render/update 和人工交互推进语义版本（失败批次也失效旧版本，不表示原子回滚）；view 只推进视图版本，observe/capture 不推进这两个版本。
 - `requestId` 用于安全重试；同一 ID 和同一 payload 返回原 promise，同一 ID 换 payload 则报冲突。每个 render session 只保留最近 256 个 request ID，已完成的旧项按插入顺序淘汰，未完成请求不会被淘汰。
-- `expectedStateVersion` 阻止 Agent 更新覆盖其他输入；observe/capture 用 `afterStateVersion` 拒绝读取尚未到达的版本。
+- `expectedStateVersion` 阻止 Agent/Workbench 更新覆盖其他语义输入，`expectedViewStateVersion` 保护视图更新；observe/capture 用 `afterStateVersion` 和 `afterViewStateVersion` 拒绝读取尚未到达的版本。
 - Host 缓存最新 observation 和最近交互摘要；render session 与截图都不跨 Host 重启持久化。
 
 第一版只以稳定对象 ID 的白名单语义操作驱动 UI，不接受业务 JSON、任意 JavaScript、表达式或显示名称猜测。
@@ -320,6 +343,7 @@ type CaptureRenderScreenshotInput = {
   renderSessionId: string
   requestId: string
   afterStateVersion: number
+  afterViewStateVersion?: number // MCP 默认 0；Workbench REST 必须显式传入
 }
 ```
 
@@ -348,6 +372,7 @@ REST 供 Workbench WebUI 和 Renderer Client 使用。当前接口为：
 - `GET /api/render-sessions/:renderSessionId`
 - `DELETE /api/render-sessions/:renderSessionId`
 - `GET /api/render-sessions/:renderSessionId/commands?after={commandSeq}`
+- `POST /api/render-sessions/:renderSessionId/commands`
 - `POST /api/render-sessions/:renderSessionId/results`
 - `POST /api/render-sessions/:renderSessionId/interactions`
 - `POST /api/import-drafts`
@@ -380,8 +405,9 @@ REST handler 与 MCP tools 调用同一组应用函数，不分别实现发布�
 | `open_artifact_player` | 返回 Player URL 和当前 render session（若页面已打开） |
 | `render_artifact_component` | 在已打开 Player 通过原生 `UIPackage` 渲染组件；可同时返回 PNG |
 | `update_render_session` | 应用白名单 operation，返回新的 state version 或版本冲突 |
+| `set_render_view` | 按 expectedViewStateVersion 修改 zoom/background/width/height，返回双版本 |
 | `get_render_observation` | 返回当前对象树、控件状态和 Controller page |
-| `capture_render_screenshot` | 返回当前 state version 对应的 MCP `image/png` content |
+| `capture_render_screenshot` | 返回实际捕获时双版本、组件/视图元数据与 MCP `image/png` content |
 
 `publish_artifact` 和 `run_ui_scenario` 尚未实现，保留在后续阶段。
 
@@ -479,7 +505,7 @@ test/               Node Host 测试
 
 已落地 Dashboard 只读工程绑定与发布目录导入、`/projects/:projectId/viewer`、`/artifacts/:artifactId/player`、原始工程 UAM Viewer、内容寻址 Artifact Store、原生 UIPackage Player、组件虚拟列表、缩放/背景/Transition 播放/PNG 截图，以及 Host 内存 Render Session Broker。Viewer 不发布工程、不生成或读取 `.fui`；Player 不读取或修改工程目录，只消费固定 Artifact。Artifact 在 Host 启动时重新校验实际文件并忽略被篡改内容，中断导入目录自动清理。浏览器通过 HTTP 长轮询领取严格递增命令，并用 MessageChannel 顺序驱动各自 iframe；MCP session 和 request ID 缓存均有固定上限。
 
-Maker MCP 已增加 `list_viewer_components`、`render_component_preview`、`list_artifact_components`、`open_artifact_player`、`render_artifact_component`、`update_render_session`、`get_render_observation` 和 `capture_render_screenshot`。组件使用 package/component resource ID 定位；临时更新只接受白名单 `set-property`、`set-controller-page`、`play-transition` 和 `dispatch-event`，不接受任意 JavaScript、坐标操作或显示名称猜测。`get_render_observation` 返回对象树、控件状态和 Controller page；未打开对应 Viewer / Player 时返回 `browser_required` 和稳定入口 URL。
+Maker MCP 已增加 `list_viewer_components`、`render_component_preview`、`list_artifact_components`、`open_artifact_player`、`render_artifact_component`、`update_render_session`、`set_render_view`、`get_render_observation` 和 `capture_render_screenshot`。组件使用 package/component resource ID 定位；临时更新只接受白名单 `set-property`、`set-controller-page`、`play-transition` 和 `dispatch-event`，不接受任意 JavaScript、坐标操作或显示名称猜测。`get_render_observation` 返回对象树、控件状态和 Controller page；未打开对应 Viewer / Player 时返回 `browser_required` 和稳定入口 URL。
 
 当前截图直接作为 MCP image content 返回，不做跨重启持久化；Render Session 也只保存在 Host 内存。下一阶段再补 ScreenshotRef digest/resource、条件等待/事件断言和 `run_ui_scenario`。Viewer 的 ComboBox 弹层由 Maker 提供通用工程态交互，未被 UAM 表达的业务脚本和宿主绑定不执行；发布后原生行为由 Player 验证。
 

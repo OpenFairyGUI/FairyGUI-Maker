@@ -35,6 +35,7 @@ import {
   rendererInteractionSchema,
   rendererRegistrationSchema,
   rendererResultSchema,
+  renderSessionCommandSchema,
 } from "./viewer"
 
 const require = createRequire(import.meta.url)
@@ -389,6 +390,17 @@ function registerApi(
       readState().renderBroker.disconnectRenderer(c.req.param("renderSessionId"))
       return c.body(null, 204)
     })
+    .post("/api/render-sessions/:renderSessionId/commands", zValidator("json", renderSessionCommandSchema), async (c) => {
+      const broker = readState().renderBroker
+      const id = c.req.param("renderSessionId")
+      try {
+        const pending = broker.executeCommand(id, c.req.valid("json"))
+        return pending ? c.json({ result: await pending, session: broker.getSession(id) }) : c.json({ error: "Render session not found" }, 404)
+      } catch (error) {
+        const message = formatPublicError(error)
+        return c.json({ error: message, session: broker.getSession(id) }, /(?:conflict|not_reached):/.test(message) ? 409 : 422)
+      }
+    })
     .get(
       "/api/render-sessions/:renderSessionId/commands",
       zValidator("query", z.object({ after: z.coerce.number().int().nonnegative().default(0) })),
@@ -408,7 +420,7 @@ function registerApi(
         const input = c.req.valid("json")
         try {
           return readState().renderBroker.submitResult(c.req.param("renderSessionId"), input)
-            ? c.json({ accepted: true, commandSeq: input.commandSeq, requestId: input.requestId })
+            ? c.json({ accepted: true, commandSeq: input.commandSeq, requestId: input.requestId, session: readState().renderBroker.getSession(c.req.param("renderSessionId")) })
             : c.json({ error: "Render session not found" }, 404)
         } catch (error) {
           return c.json({ error: formatPublicError(error) }, 409)

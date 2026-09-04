@@ -6,6 +6,7 @@ import {
   ImportDraftError,
   MAX_IMPORT_SOURCE_BYTES,
   MAX_VISUAL_EVIDENCE_BYTES,
+  visualEvidenceSchema,
   type ImportDraftStore,
 } from '../design-import/draft-store';
 import { semanticNodeDirectiveSchema } from '../design-import/semantic-overlay';
@@ -24,23 +25,7 @@ const semanticUpdateSchema = z.object({
   nodeId: z.string().min(1).max(1_024),
   directive: semanticNodeDirectiveSchema,
 }).strict();
-const visualEvidenceSchema = z.object({
-  schemaVersion: z.literal(1),
-  packageId: z.string().min(1).max(128),
-  componentId: z.string().min(1).max(128),
-  packageName: z.string().min(1).max(256),
-  componentName: z.string().min(1).max(256),
-  reference: z.object({ width: z.number().int().positive().max(8_192), height: z.number().int().positive().max(8_192) }).strict(),
-  capture: z.object({ width: z.number().int().positive().max(8_192), height: z.number().int().positive().max(8_192) }).strict(),
-  comparison: z.object({
-    width: z.number().int().positive().max(8_192),
-    height: z.number().int().positive().max(8_192),
-    totalPixels: z.number().int().positive().max(32_000_000),
-    differentPixels: z.number().int().nonnegative().max(32_000_000),
-    meanAbsoluteError: z.number().nonnegative().max(255),
-    maxChannelDelta: z.number().int().nonnegative().max(255),
-  }).strict(),
-}).strict();
+const visualEvidenceInputSchema = visualEvidenceSchema.omit({ createdAt: true });
 const createSchema = z.union([
   z.object({ sourcePath: z.string().trim().min(1).max(4_096) }).strict(),
   z.object({
@@ -225,7 +210,7 @@ export function registerImportDraftApi(
           const draft = await importDraftStore.saveVisualEvidence(
             c.req.param('draftId'),
             c.req.valid('query').expectedRevision,
-            visualEvidenceSchema.parse(JSON.parse(reportValue)),
+            visualEvidenceInputSchema.parse(JSON.parse(reportValue)),
             Object.fromEntries(files) as { reference: Uint8Array; capture: Uint8Array; diff: Uint8Array },
           );
           return c.json({ draft, visualEvidence: draft.visualEvidence }, 201);

@@ -13,10 +13,13 @@ import {
   type ViewerProjectCatalog,
   type ViewerRendered,
   type ViewerRuntimeMessage,
+  type RenderSessionState,
+  type ViewerViewState,
   type ViewerScene,
 } from "../../viewer-protocol"
 import { registerViewerRenderer } from "./api"
 import { startRendererDelivery } from "./renderer-delivery"
+import { createRenderSessionClient, type RenderSessionClient } from "./render-session"
 import {
   getProjectBinding,
   queryProjectBindingPermission,
@@ -259,21 +262,19 @@ function restoreImagePackageRefs(document: Document, project: UamProject) {
   }
 }
 
-export type ViewerFrameSession = {
-  render(packageId: string, componentId: string): Promise<ViewerRendered>
-  capture(): Promise<Blob>
-  observe(): Promise<ViewerObservation>
-  setView(zoom: number, background: string): Promise<void>
-  playTransition(transitionName?: string): Promise<void>
-  applyOperations(operations: ViewerOperation[]): Promise<Record<string, unknown>>
+type ViewerFrameSession = {
+  render(packageId: string, componentId: string, expectedRuntimeEventSeq?: number): Promise<ViewerRendered & { runtimeEventSeq: number }>
+  capture(): Promise<{ blob: Blob; runtimeEventSeq: number; observation?: ViewerObservation }>
+  observe(): Promise<ViewerObservation & { runtimeEventSeq: number }>
+  setView(view: Partial<ViewerViewState>): Promise<Record<string, unknown>>
+  applyOperations(operations: ViewerOperation[], expectedRuntimeEventSeq?: number): Promise<Record<string, unknown>>
   setInteractionHandler(handler: ((event: ViewerInteractionEvent) => void) | null): void
   destroy(): void
 }
 
-export async function connectViewerFrame(
+async function connectViewerFrame(
   frame: HTMLIFrameElement,
   bundle: ViewerProjectBundle,
-  onRendered: (value: ViewerRendered) => void,
 ): Promise<ViewerFrameSession> {
   if (!frame.contentWindow) throw new Error("Viewer iframe 尚未就绪。")
   const channel = new MessageChannel()
@@ -299,10 +300,6 @@ export async function connectViewerFrame(
       rejectReady(new Error(message.error))
       return
     }
-    if (message.kind === "rendered") {
-      onRendered(message.value)
-      return
-    }
     if (message.kind === "interaction") {
       interactionHandler?.(message.value)
       return
@@ -312,7 +309,7 @@ export async function connectViewerFrame(
     if (!request) return
     window.clearTimeout(request.timeout)
     pending.delete(message.requestId)
-    if (message.ok) request.resolve(message.value)
+    if (message.ok) request.resolve({ ...message.value as object, runtimeEventSeq: message.runtimeEventSeq })
     else request.reject(new Error(message.error))
   }
   channel.port1.start()
@@ -338,18 +335,17 @@ export async function connectViewerFrame(
   }
 
   return {
-    render(packageId, componentId) {
+    render(packageId, componentId, expectedRuntimeEventSeq) {
       const scene = compileViewerScene(bundle, packageId, componentId)
-      return send<ViewerRendered>({ kind: "render", scene }, scene.assets.map(({ data }) => data))
+      return send<ViewerRendered & { runtimeEventSeq: number }>({ kind: "render", scene, expectedRuntimeEventSeq }, scene.assets.map(({ data }) => data))
     },
     async capture() {
-      const value = await send<{ data: ArrayBuffer; type: string }>({ kind: "capture" })
-      return new Blob([value.data], { type: value.type })
+      const value = await send<{ data: ArrayBuffer; type: string; runtimeEventSeq: number; observation?: ViewerObservation }>({ kind: "capture" })
+      return { blob: new Blob([value.data], { type: value.type }), runtimeEventSeq: value.runtimeEventSeq, observation: value.observation }
     },
-    observe: () => send<ViewerObservation>({ kind: "observe" }),
-    setView: (zoom, background) => send<void>({ kind: "set-view", zoom, background }),
-    playTransition: (transitionName) => send<void>({ kind: "play-transition", transitionName }),
-    applyOperations: (operations) => send<Record<string, unknown>>({ kind: "apply-operations", operations }),
+    observe: () => send<ViewerObservation & { runtimeEventSeq: number }>({ kind: "observe" }),
+    setView: (view) => send<Record<string, unknown>>({ kind: "set-view", view }),
+    applyOperations: (operations, expectedRuntimeEventSeq) => send<Record<string, unknown>>({ kind: "apply-operations", operations, expectedRuntimeEventSeq }),
     setInteractionHandler(handler) {
       interactionHandler = handler
     },
@@ -365,8 +361,12 @@ export async function connectViewerFrame(
   }
 }
 
-export async function startViewerRenderer(projectId: string, bundle: ViewerProjectBundle, frame: ViewerFrameSession, onError: (error: Error) => void, signal: AbortSignal) {
-  return startRendererDelivery(
+export async function startViewerRenderer(projectId: string, bundle: ViewerProjectBundle, iframe: HTMLIFrameElement, onState: (state: RenderSessionState) => void, onError: (error: Error) => void, signal: AbortSignal) {
+  const frame = await connectViewerFrame(iframe, bundle)
+  if (signal.aborted) { frame.destroy(); signal.throwIfAborted() }
+  signal.addEventListener("abort", () => frame.destroy(), { once: true })
+  let client: RenderSessionClient | undefined
+  const delivery = await startRendererDelivery(
     (signal) => registerViewerRenderer({
       projectId,
       sourceRevision: bundle.sourceRevision,
@@ -377,16 +377,20 @@ export async function startViewerRenderer(projectId: string, bundle: ViewerProje
     (command) => executeBrokerCommand(bundle, frame, command),
     onError,
     signal,
+    (state) => client?.accept(state),
   )
+  client = createRenderSessionClient(delivery.session, onState, signal)
+  return { client, renderSessionId: delivery.renderSessionId, stop: () => { delivery.stop(); frame.destroy() } }
 }
 
 async function executeBrokerCommand(bundle: ViewerProjectBundle, frame: ViewerFrameSession, command: ViewerBrokerCommand) {
-  if (command.kind === "capture") return { screenshotBase64: await blobToBase64(await frame.capture()) }
-  if (command.kind === "observe") return { observation: await frame.observe() }
+  if (command.kind === "capture") return captureFrame(frame)
+  if (command.kind === "observe") { const observation = await frame.observe(); return { observation, runtimeEventSeq: observation.runtimeEventSeq } }
+  if (command.kind === "view") return frame.setView(command.payload)
   if (command.kind === "update") {
     const operations = command.payload.operations
     if (!Array.isArray(operations)) throw new Error("Viewer update command is missing operations.")
-    return await frame.applyOperations(operations as ViewerOperation[])
+    return await frame.applyOperations(operations as ViewerOperation[], command.executionState?.runtimeEventSeq)
   }
 
   const packageId = String(command.payload.packageId ?? "")
@@ -394,12 +398,18 @@ async function executeBrokerCommand(bundle: ViewerProjectBundle, frame: ViewerFr
   const pkg = bundle.catalog.packages.find((candidate) => candidate.packageId === packageId)
   const component = pkg?.components.find((candidate) => candidate.id === componentId)
   if (!pkg || !component) throw new Error(`Viewer resource not found: ${packageId}/${componentId}`)
-  const rendered = await frame.render(packageId, componentId)
+  const rendered = await frame.render(packageId, componentId, command.executionState?.runtimeEventSeq)
   return {
     rendered,
-    observation: { objectTree: rendered.objectTree, controllers: rendered.controllers },
-    ...(command.payload.capture === true ? { screenshotBase64: await blobToBase64(await frame.capture()) } : {}),
+    observation: { objectTree: rendered.objectTree, controllers: rendered.controllers, availableTransitions: rendered.availableTransitions },
+    runtimeEventSeq: rendered.runtimeEventSeq,
+    ...(command.payload.capture === true ? await captureFrame(frame) : {}),
   }
+}
+
+async function captureFrame(frame: ViewerFrameSession) {
+  const { blob, ...snapshot } = await frame.capture()
+  return { ...snapshot, screenshotBase64: await blobToBase64(blob) }
 }
 
 function blobToBase64(blob: Blob) {

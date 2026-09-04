@@ -48,7 +48,8 @@ import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/compon
 import { DesignImportPage, ImportDraftPage, type VisualCaptureInfo } from "@/design-import"
 import { createProject, getArtifact, getArtifacts, getProject, getProjects, getSessions, getStatus, registerProjectAssetAnalysis, type RegisteredProjectData } from "@/lib/api"
 import { importPublishedFolder } from "@/lib/artifacts"
-import { connectPlayerFrame, startPlayerRenderer, type PlayerFrameSession } from "@/lib/player"
+import { startPlayerRenderer } from "@/lib/player"
+import { watchRenderViewport, type RenderSessionClient } from "@/lib/render-session"
 import {
   authorizeProjectDirectory,
   deleteProjectBinding,
@@ -57,13 +58,11 @@ import {
   type ProjectBindingPermission,
 } from "@/lib/project-source"
 import {
-  connectViewerFrame,
   readViewerProject,
   startViewerRenderer,
-  type ViewerFrameSession,
 } from "@/lib/viewer"
 import { analyzeProjectAssets, displayAssetPath, summarizeAssetAnalysis, type AssetIssue, type AssetReference, type AssetResource } from "../asset-analysis"
-import type { ViewerCatalogPackage, ViewerComponent, ViewerObservation, ViewerOperation, ViewerRendered } from "../viewer-protocol"
+import type { ViewerCatalogPackage, ViewerComponent, ViewerOperation, ViewerRendered, RenderSessionState } from "../viewer-protocol"
 
 const statusQuery = { queryKey: ["host-status"], queryFn: getStatus, refetchInterval: 5_000 }
 const sessionsQuery = { queryKey: ["sessions"], queryFn: getSessions, refetchInterval: 5_000 }
@@ -595,17 +594,17 @@ function ArtifactPlayerPage() {
 function ArtifactPlayer({ artifact }: { artifact: ArtifactListItem }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const resourcePanelRef = useRef<PanelImperativeHandle>(null)
-  const [session, setSession] = useState<PlayerFrameSession | null>(null)
-  const [selected, setSelected] = useState<{ packageId: string; componentId: string } | null>(() => {
-    const pkg = artifact.packages.find((candidate) => candidate.components.length > 0)
-    return pkg ? { packageId: pkg.packageId, componentId: pkg.components[0].id } : null
-  })
-  const [rendered, setRendered] = useState<ViewerRendered | null>(null)
+  const [session, setSession] = useState<RenderSessionClient | null>(null)
+  const [brokerState, setBrokerState] = useState<RenderSessionState | null>(null)
+  const rendered = brokerRendered(brokerState)
+  const selected = rendered
   const [filter, setFilter] = useState("")
   const [runtimeError, setRuntimeError] = useState("")
   const [renderSessionId, setRenderSessionId] = useState("")
-  const [zoom, setZoom] = useState(1)
-  const [background, setBackground] = useState("#202226")
+  const zoom = brokerState?.view.zoom ?? 1
+  const background = brokerState?.view.background ?? "#202226"
+  const [commandError, setCommandError] = useState("")
+  const commandFailed = (error: unknown) => setCommandError(error instanceof Error ? error.message : String(error))
   const [busyAction, setBusyAction] = useState<"capture" | null>(null)
   const [resourcesCollapsed, setResourcesCollapsed] = useState(false)
   const [collapsedPackages, setCollapsedPackages] = useState(() => new Set<string>())
@@ -614,28 +613,29 @@ function ArtifactPlayer({ artifact }: { artifact: ArtifactListItem }) {
     const frame = iframeRef.current
     if (!frame) return
     let disposed = false
-    let active: PlayerFrameSession | null = null
     let stopRenderer: (() => void) | null = null
     const lifetime = new AbortController()
     const connect = async () => {
       try {
         setRuntimeError("")
-        active = await connectPlayerFrame(frame, artifact, setRendered)
-        if (disposed) { active.destroy(); return }
-        setSession(active)
-        const renderer = await startPlayerRenderer(artifact, active, (error) => {
+        const renderer = await startPlayerRenderer(artifact, frame, setBrokerState, (error) => {
           if (disposed) return
-          active?.destroy()
+          lifetime.abort()
           setSession(null)
           setRenderSessionId("")
           setRuntimeError(error.message)
         }, lifetime.signal)
         stopRenderer = renderer.stop
         if (disposed) { renderer.stop(); return }
+        setSession(renderer.client)
+        await renderer.client.setView({ width: Math.max(1, frame.clientWidth), height: Math.max(1, frame.clientHeight) })
+        watchRenderViewport(frame, renderer.client, commandFailed, lifetime.signal)
+        const pkg = artifact.packages.find((candidate) => candidate.components.length > 0)
+        if (pkg) await renderer.client.render(pkg.packageId, pkg.components[0].id).catch(commandFailed)
         setRenderSessionId(renderer.renderSessionId)
       } catch (error) {
         if (!disposed) {
-          active?.destroy()
+          lifetime.abort()
           setSession(null)
           setRenderSessionId("")
           setRuntimeError(error instanceof Error ? error.message : String(error))
@@ -647,22 +647,10 @@ function ArtifactPlayer({ artifact }: { artifact: ArtifactListItem }) {
       disposed = true
       lifetime.abort()
       stopRenderer?.()
-      active?.destroy()
       setSession(null)
       setRenderSessionId("")
     }
   }, [artifact])
-
-  useEffect(() => {
-    if (!session || !selected) return
-    setRendered(null)
-    setRuntimeError("")
-    void session.render(selected.packageId, selected.componentId).catch((error) => setRuntimeError(error instanceof Error ? error.message : String(error)))
-  }, [selected, session])
-
-  useEffect(() => {
-    if (session) void session.setView(zoom, background).catch((error) => setRuntimeError(error instanceof Error ? error.message : String(error)))
-  }, [background, session, zoom])
 
   const packages = useMemo(() => {
     const query = filter.trim().toLocaleLowerCase()
@@ -678,14 +666,15 @@ function ArtifactPlayer({ artifact }: { artifact: ArtifactListItem }) {
     if (!session || !selected) return
     setBusyAction("capture")
     try {
-      const blob = await session.capture()
+      const { blob, result } = await session.capture()
+      const component = result.value.component as Pick<ViewerRendered, "packageName" | "componentName">
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement("a")
       anchor.href = url
-      anchor.download = `${rendered?.packageName ?? selected.packageId}-${rendered?.componentName ?? selected.componentId}.png`
+      anchor.download = `${component.packageName}-${component.componentName}.png`
       anchor.click()
       URL.revokeObjectURL(url)
-    } catch (error) { setRuntimeError(error instanceof Error ? error.message : String(error)) } finally { setBusyAction(null) }
+    } catch (error) { commandFailed(error) } finally { setBusyAction(null) }
   }
 
   const toggleResources = () => {
@@ -700,24 +689,25 @@ function ArtifactPlayer({ artifact }: { artifact: ArtifactListItem }) {
       <section className="space-y-4">
         <div><p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-blue-400">Artifact Player</p><h1 className="font-heading text-3xl font-semibold tracking-tight">{artifact.name}</h1><p className="mt-2 text-sm text-muted-foreground">{artifact.runtimeProfile} · {artifact.digest.slice(0, 16)} · 不可变快照</p></div>
         <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-3 shadow-sm">
-          <RenderStateControls rendered={rendered} session={session} onObservation={(observation) => setRendered((current) => current ? { ...current, ...observation } : current)} onError={setRuntimeError} />
+          <RenderStateControls rendered={rendered} session={session} onError={setCommandError} />
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             <Badge variant="outline">{renderSessionId ? "AGENT READY" : "AGENT WAITING"}</Badge>
-            <Button variant="outline" size="sm" onClick={() => setZoom((value) => Math.max(0.25, value - 0.1))} disabled={!session} aria-label="缩小"><ZoomOut /></Button>
+            <Button variant="outline" size="sm" onClick={() => void session?.setView({ zoom: Math.max(0.25, zoom - 0.1) }).catch(commandFailed)} disabled={!session} aria-label="缩小"><ZoomOut /></Button>
             <span className="min-w-14 text-center text-xs text-muted-foreground">{Math.round(zoom * 100)}%</span>
-            <Button variant="outline" size="sm" onClick={() => setZoom((value) => Math.min(4, value + 0.1))} disabled={!session} aria-label="放大"><ZoomIn /></Button>
-            <Button variant="outline" size="sm" onClick={() => setBackground((value) => value === "#202226" ? "#f4f4f5" : "#202226")} disabled={!session}>背景</Button>
+            <Button variant="outline" size="sm" onClick={() => void session?.setView({ zoom: Math.min(4, zoom + 0.1) }).catch(commandFailed)} disabled={!session} aria-label="放大"><ZoomIn /></Button>
+            <Button variant="outline" size="sm" onClick={() => void session?.setView({ background: background === "#202226" ? "#f4f4f5" : "#202226" }).catch(commandFailed)} disabled={!session}>背景</Button>
             <Button size="sm" onClick={() => void capture()} disabled={!session || !selected || busyAction !== null}><Camera />截图</Button>
           </div>
         </div>
       </section>
+      <RenderCommandStatus state={brokerState} error={commandError} dismiss={() => setCommandError("")} />
       <Card className="overflow-hidden"><CardContent className="h-[62vh] min-h-[440px] max-h-[680px] p-0">
         <ResizablePanelGroup orientation="horizontal" className="h-full">
           <ResizablePanel id="player-resources" panelRef={resourcePanelRef} defaultSize={340} minSize={280} maxSize={520} collapsible collapsedSize={44} onResize={({ inPixels }) => setResourcesCollapsed(inPixels <= 44)} className="min-w-0 bg-card">
             <div className="flex h-full min-h-0 flex-col overflow-hidden">
               {resourcesCollapsed ? <Button variant="ghost" size="icon" onClick={toggleResources} aria-label="展开组件列表" className="mx-auto mt-2 shrink-0"><PanelLeftOpen /></Button> : <>
                 <div className="flex shrink-0 items-center gap-2 border-b p-3"><label className="relative min-w-0 flex-1"><Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="搜索 Package / Component" aria-label="搜索 Player 组件" className="h-9 w-full rounded-md border bg-background pl-9 pr-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" /></label><Button variant="ghost" size="icon" onClick={() => setCollapsedPackages(allPackagesCollapsed ? new Set<string>() : new Set(packages.map(({ packageId }) => packageId)))} aria-label={allPackagesCollapsed ? "展开全部 Package" : "折叠全部 Package"} title={allPackagesCollapsed ? "展开全部 Package" : "折叠全部 Package"} disabled={packages.length === 0} className="shrink-0">{allPackagesCollapsed ? <ChevronsUpDown /> : <ChevronsDownUp />}</Button><Button variant="ghost" size="icon" onClick={toggleResources} aria-label="折叠组件列表" className="shrink-0"><PanelLeftClose /></Button></div>
-                <ViewerComponentList packages={packages} selected={selected} onSelect={setSelected} collapsedPackages={collapsedPackages} onCollapsedPackagesChange={setCollapsedPackages} />
+                <ViewerComponentList packages={packages} selected={selected} onSelect={({ packageId, componentId }) => void session?.render(packageId, componentId).catch(commandFailed)} collapsedPackages={collapsedPackages} onCollapsedPackagesChange={setCollapsedPackages} />
               </>}
             </div>
           </ResizablePanel>
@@ -917,14 +907,17 @@ function formatAssetBytes(value: number | null) {
 function ProjectViewer({ project, compact = false, onCapture }: { project: RegisteredProjectData; compact?: boolean; onCapture?: (blob: Blob, info: VisualCaptureInfo) => Promise<void> }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const resourcePanelRef = useRef<PanelImperativeHandle>(null)
-  const [session, setSession] = useState<ViewerFrameSession | null>(null)
-  const [selected, setSelected] = useState<{ packageId: string; componentId: string } | null>(null)
-  const [rendered, setRendered] = useState<ViewerRendered | null>(null)
+  const [session, setSession] = useState<RenderSessionClient | null>(null)
+  const [brokerState, setBrokerState] = useState<RenderSessionState | null>(null)
+  const rendered = brokerRendered(brokerState)
+  const selected = rendered
   const [filter, setFilter] = useState("")
   const [runtimeError, setRuntimeError] = useState("")
   const [renderSessionId, setRenderSessionId] = useState("")
-  const [zoom, setZoom] = useState(1)
-  const [background, setBackground] = useState("#202226")
+  const zoom = brokerState?.view.zoom ?? 1
+  const background = brokerState?.view.background ?? "#202226"
+  const [commandError, setCommandError] = useState("")
+  const commandFailed = (error: unknown) => setCommandError(error instanceof Error ? error.message : String(error))
   const [busyAction, setBusyAction] = useState<"capture" | null>(null)
   const [resourcesCollapsed, setResourcesCollapsed] = useState(false)
   const [collapsedPackages, setCollapsedPackages] = useState(() => new Set<string>())
@@ -936,44 +929,32 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
   })
 
   useEffect(() => {
-    const first = bundle.data?.catalog.packages.find((pkg) => pkg.components.length > 0)
-    if (first) setSelected((current) => {
-      const stillExists = current && bundle.data?.catalog.packages.some((pkg) => (
-        pkg.packageId === current.packageId && pkg.components.some(({ id }) => id === current.componentId)
-      ))
-      return stillExists ? current : { packageId: first.packageId, componentId: first.components[0].id }
-    })
-  }, [bundle.data])
-
-  useEffect(() => {
     const frame = iframeRef.current
     if (!frame || !bundle.data) return
     let disposed = false
-    let active: ViewerFrameSession | null = null
     let stopRenderer: (() => void) | null = null
     const lifetime = new AbortController()
     const connect = async () => {
       try {
         setRuntimeError("")
-        active = await connectViewerFrame(frame, bundle.data, setRendered)
-        if (disposed) {
-          active.destroy()
-          return
-        }
-        setSession(active)
-        const renderer = await startViewerRenderer(project.projectId, bundle.data, active, (error) => {
+        const renderer = await startViewerRenderer(project.projectId, bundle.data, frame, setBrokerState, (error) => {
           if (disposed) return
-          active?.destroy()
+          lifetime.abort()
           setSession(null)
           setRenderSessionId("")
           setRuntimeError(error.message)
         }, lifetime.signal)
         stopRenderer = renderer.stop
         if (disposed) { renderer.stop(); return }
+        setSession(renderer.client)
+        await renderer.client.setView({ width: Math.max(1, frame.clientWidth), height: Math.max(1, frame.clientHeight) })
+        watchRenderViewport(frame, renderer.client, commandFailed, lifetime.signal)
+        const pkg = bundle.data.catalog.packages.find((candidate) => candidate.components.length > 0)
+        if (pkg) await renderer.client.render(pkg.packageId, pkg.components[0].id).catch(commandFailed)
         setRenderSessionId(renderer.renderSessionId)
       } catch (error) {
         if (!disposed) {
-          active?.destroy()
+          lifetime.abort()
           setSession(null)
           setRenderSessionId("")
           setRuntimeError(error instanceof Error ? error.message : String(error))
@@ -987,27 +968,10 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
       frame.removeEventListener("load", connect)
       lifetime.abort()
       stopRenderer?.()
-      active?.destroy()
       setSession(null)
       setRenderSessionId("")
     }
   }, [bundle.data, project.projectId])
-
-  useEffect(() => {
-    if (!session || !selected) return
-    setRuntimeError("")
-    setRendered(null)
-    void session.render(selected.packageId, selected.componentId).catch((error) => {
-      setRuntimeError(error instanceof Error ? error.message : String(error))
-    })
-  }, [selected, session])
-
-  useEffect(() => {
-    if (!session) return
-    void session.setView(zoom, background).catch((error) => {
-      setRuntimeError(error instanceof Error ? error.message : String(error))
-    })
-  }, [background, session, zoom])
 
   const filteredPackages = useMemo(() => {
     const query = filter.trim().toLocaleLowerCase()
@@ -1023,24 +987,23 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
     if (!session || !selected) return
     setBusyAction("capture")
     try {
-      const blob = await session.capture()
+      const { blob, result } = await session.capture()
+      const component = result.value.component as Pick<VisualCaptureInfo, "packageId" | "componentId" | "packageName" | "componentName">
       if (onCapture) {
         await onCapture(blob, {
-          packageId: selected.packageId,
-          componentId: selected.componentId,
-          packageName: rendered?.packageName ?? selected.packageId,
-          componentName: rendered?.componentName ?? selected.componentId,
+          ...component,
+          renderState: { renderSessionId: result.renderSessionId, sourceRevision: result.sourceRevision, semanticStateVersion: result.semanticStateVersion, viewStateVersion: result.viewStateVersion },
         })
         return
       }
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement("a")
       anchor.href = url
-      anchor.download = `${rendered?.packageName ?? selected.packageId}-${rendered?.componentName ?? selected.componentId}.png`
+      anchor.download = `${component.packageName}-${component.componentName}.png`
       anchor.click()
       URL.revokeObjectURL(url)
     } catch (error) {
-      setRuntimeError(error instanceof Error ? error.message : String(error))
+      commandFailed(error)
     } finally {
       setBusyAction(null)
     }
@@ -1062,16 +1025,16 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
           <p className="mt-2 text-sm text-muted-foreground">{project.directoryName}/{project.fairyPath} · 尚未发布的工程 · 只读</p>
         </div> : null}
         <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-3 shadow-sm">
-          <RenderStateControls rendered={rendered} session={session} onObservation={(observation) => setRendered((current) => current ? { ...current, ...observation } : current)} onError={setRuntimeError} />
+          <RenderStateControls rendered={rendered} session={session} onError={setCommandError} />
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             <Button variant="outline" size="sm" onClick={() => void bundle.refetch()} disabled={bundle.isFetching}>
               <RefreshCw className={bundle.isFetching ? "animate-spin" : ""} />刷新工程
             </Button>
             <Badge variant="outline">{renderSessionId ? "AGENT READY" : "AGENT WAITING"}</Badge>
-            <Button variant="outline" size="sm" onClick={() => setZoom((value) => Math.max(0.25, value - 0.1))} disabled={!session} aria-label="缩小"><ZoomOut /></Button>
+            <Button variant="outline" size="sm" onClick={() => void session?.setView({ zoom: Math.max(0.25, zoom - 0.1) }).catch(commandFailed)} disabled={!session} aria-label="缩小"><ZoomOut /></Button>
             <span className="min-w-14 text-center text-xs text-muted-foreground">{Math.round(zoom * 100)}%</span>
-            <Button variant="outline" size="sm" onClick={() => setZoom((value) => Math.min(4, value + 0.1))} disabled={!session} aria-label="放大"><ZoomIn /></Button>
-            <Button variant="outline" size="sm" onClick={() => setBackground((value) => value === "#202226" ? "#f4f4f5" : "#202226")} disabled={!session}>背景</Button>
+            <Button variant="outline" size="sm" onClick={() => void session?.setView({ zoom: Math.min(4, zoom + 0.1) }).catch(commandFailed)} disabled={!session} aria-label="放大"><ZoomIn /></Button>
+            <Button variant="outline" size="sm" onClick={() => void session?.setView({ background: background === "#202226" ? "#f4f4f5" : "#202226" }).catch(commandFailed)} disabled={!session}>背景</Button>
             <Button size="sm" onClick={() => void capture()} disabled={!session || !selected || busyAction !== null}><Camera />{onCapture ? "捕获视觉证据" : "截图"}</Button>
           </div>
         </div>
@@ -1095,7 +1058,7 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
                       <Button variant="ghost" size="icon" onClick={toggleResources} aria-label="折叠组件列表" title="折叠组件列表" className="shrink-0"><PanelLeftClose /></Button>
                     </div>
                     {bundle.data
-                      ? <ViewerComponentList packages={filteredPackages} selected={selected} onSelect={setSelected} collapsedPackages={collapsedPackages} onCollapsedPackagesChange={setCollapsedPackages} />
+                      ? <ViewerComponentList packages={filteredPackages} selected={selected} onSelect={({ packageId, componentId }) => void session?.render(packageId, componentId).catch(commandFailed)} collapsedPackages={collapsedPackages} onCollapsedPackagesChange={setCollapsedPackages} />
                       : bundle.isError
                         ? <div className="grid min-h-0 flex-1 place-items-center p-4 text-center text-sm text-muted-foreground">工程模型读取失败</div>
                         : <ViewerLoading message="正在读取当前工程模型…" compact />}
@@ -1133,6 +1096,7 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
           </ResizablePanelGroup>
         </CardContent>
       </Card>
+      <RenderCommandStatus state={brokerState} error={commandError} dismiss={() => setCommandError("")} />
       {bundle.data?.diagnostics.some(({ level }) => level === "warning") && (
         <p className="text-xs text-amber-500">{bundle.data.diagnostics.filter(({ level }) => level === "warning").map(({ message }) => message).join("；")}</p>
       )}
@@ -1190,10 +1154,21 @@ function ViewerComponentList({ packages, selected, onSelect, collapsedPackages, 
   )
 }
 
-function RenderStateControls({ rendered, session, onObservation, onError }: {
+function brokerRendered(state: RenderSessionState | null): ViewerRendered | null {
+  if (!state?.rendered) return null
+  return { ...state.rendered, ...(state.observation ?? { controllers: [], availableTransitions: [] }) }
+}
+
+function RenderCommandStatus({ state, error, dismiss }: { state: RenderSessionState | null; error: string; dismiss(): void }) {
+  return <div className="text-xs text-muted-foreground">
+    {state ? <span aria-label="Broker 状态版本">Semantic {state.semanticStateVersion} · View {state.viewStateVersion}</span> : null}
+    {error ? <div role="alert" className="mt-2 flex items-center gap-3 rounded-md border border-amber-500/40 p-3"><span className="flex-1">{error}</span><Button size="sm" variant="outline" onClick={dismiss}>知道了</Button></div> : null}
+  </div>
+}
+
+function RenderStateControls({ rendered, session, onError }: {
   rendered: ViewerRendered | null
-  session: Pick<ViewerFrameSession, "applyOperations" | "observe"> | null
-  onObservation: (observation: ViewerObservation) => void
+  session: RenderSessionClient | null
   onError: (message: string) => void
 }) {
   const [controllerIndex, setControllerIndex] = useState("0")
@@ -1212,7 +1187,6 @@ function RenderStateControls({ rendered, session, onObservation, onError }: {
     setBusy(true)
     try {
       await session.applyOperations([operation])
-      onObservation(await session.observe())
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error))
     } finally {

@@ -3,7 +3,9 @@ import { hc } from "hono/client"
 import type { AppType } from "../../server/index"
 import type { ArtifactManifest } from "../../artifact-protocol"
 import type { ProjectAssetAnalysis } from "../../asset-analysis"
-import { VIEWER_PROTOCOL_VERSION, type ViewerBrokerCommand, type ViewerProjectCatalog } from "../../viewer-protocol"
+import { VIEWER_PROTOCOL_VERSION, type ViewerBrokerCommand, type ViewerProjectCatalog, type RenderSessionState, type RenderCommandResult } from "../../viewer-protocol"
+import type { z } from "zod"
+import type { renderSessionCommandSchema } from "../../server/viewer"
 
 const client = hc<AppType>("/")
 
@@ -80,7 +82,7 @@ export async function registerViewerRenderer(input: {
   })
   if (!response.ok) throw new Error(`Renderer registration failed: ${response.status}`)
   return await response.json() as {
-    session: { renderSessionId: string; stateVersion: number; commandSeq: number }
+    session: RenderSessionState
   }
 }
 
@@ -93,13 +95,13 @@ export async function registerPlayerRenderer(input: { artifactId: string; source
   })
   if (!response.ok) throw new Error(`Player renderer registration failed: ${response.status}`)
   return await response.json() as {
-    session: { renderSessionId: string; stateVersion: number; commandSeq: number }
+    session: RenderSessionState
   }
 }
 
 export async function readViewerCommands(renderSessionId: string, after: number, signal: AbortSignal) {
   const response = await fetch(`/api/render-sessions/${encodeURIComponent(renderSessionId)}/commands?after=${after}`, { signal: AbortSignal.any([signal, AbortSignal.timeout(35_000)]) })
-  return await rendererJson(response) as { commands: ViewerBrokerCommand[] }
+  return await rendererJson(response) as { commands: ViewerBrokerCommand[]; session: RenderSessionState }
 }
 
 export async function submitViewerCommandResult(renderSessionId: string, body: string, signal: AbortSignal) {
@@ -109,7 +111,7 @@ export async function submitViewerCommandResult(renderSessionId: string, body: s
     body,
     signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
   })
-  return await rendererJson(response) as { accepted: true; commandSeq: number; requestId: string }
+  return await rendererJson(response) as { accepted: true; commandSeq: number; requestId: string; session: RenderSessionState }
 }
 
 export async function submitViewerInteraction(renderSessionId: string, body: string, signal: AbortSignal) {
@@ -119,7 +121,18 @@ export async function submitViewerInteraction(renderSessionId: string, body: str
     body,
     signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
   })
-  return await rendererJson(response) as { accepted: true; runtimeEventSeq: number }
+  return await rendererJson(response) as { accepted: true; runtimeEventSeq: number; session: RenderSessionState }
+}
+
+export async function getRenderSession(renderSessionId: string, signal: AbortSignal) {
+  return await rendererJson(await fetch(`/api/render-sessions/${encodeURIComponent(renderSessionId)}`, { signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]) })) as { session: RenderSessionState }
+}
+
+export async function sendRenderCommand(renderSessionId: string, command: z.input<typeof renderSessionCommandSchema>, signal: AbortSignal) {
+  return await rendererJson(await fetch(`/api/render-sessions/${encodeURIComponent(renderSessionId)}/commands`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(command),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(35_000)]),
+  })) as { result: RenderCommandResult; session: RenderSessionState }
 }
 
 export async function closeRendererSession(renderSessionId: string) {

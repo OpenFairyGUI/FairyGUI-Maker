@@ -9,6 +9,9 @@ import {
   type ViewerInteractionEvent,
   type ViewerObservation,
   type ViewerProjectCatalog,
+  type ViewerRendered,
+  type ViewerViewState,
+  type RenderCommandResult,
 } from "../viewer-protocol"
 import type { ArtifactManifest } from "../artifact-protocol"
 import { assetResourceKey, summarizeAssetAnalysis, type ProjectAssetAnalysis } from "../asset-analysis"
@@ -51,6 +54,25 @@ export const viewerOperationSchema = z.discriminatedUnion("op", [
     times: z.number().int().min(1).max(100).optional(),
   }),
   viewerDispatchEventSchema,
+])
+
+export const renderViewSchema = z.object({
+  zoom: z.number().finite().min(0.1).max(4).optional(),
+  background: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  width: z.number().int().min(1).max(8192).optional(),
+  height: z.number().int().min(1).max(8192).optional(),
+}).strict().refine((view) => Object.keys(view).length > 0, "View patch must not be empty")
+
+const versionSchema = z.number().int().nonnegative()
+const commandIdentity = { requestId: z.string().uuid() }
+export const renderSessionCommandSchema = z.discriminatedUnion("kind", [
+  z.object({ ...commandIdentity, kind: z.literal("render"), expectedStateVersion: versionSchema,
+    payload: z.object({ packageId: z.string().min(1).max(128), componentId: z.string().min(1).max(128), capture: z.boolean().default(false) }).strict() }).strict(),
+  z.object({ ...commandIdentity, kind: z.literal("update"), expectedStateVersion: versionSchema,
+    payload: z.object({ operations: z.array(viewerOperationSchema).min(1).max(100) }).strict() }).strict(),
+  z.object({ ...commandIdentity, kind: z.literal("view"), expectedViewStateVersion: versionSchema, payload: renderViewSchema }).strict(),
+  z.object({ ...commandIdentity, kind: z.enum(["observe", "capture"]), afterStateVersion: versionSchema,
+    afterViewStateVersion: versionSchema }).strict(),
 ])
 
 export const rendererInteractionSchema = z.object({
@@ -96,7 +118,7 @@ export const rendererResultSchema = z.object({
   commandSeq: z.number().int().positive(),
   requestId: z.string().uuid(),
   ok: z.boolean(),
-  value: z.object({ screenshotBase64: z.string().max(14_000_000).optional() }).loose().optional(),
+  value: z.object({ runtimeEventSeq: versionSchema, screenshotBase64: z.string().max(14_000_000).optional() }).loose().optional(),
   error: z.string().max(2_000).optional(),
 })
 
@@ -110,7 +132,7 @@ type ViewerProject = {
   assetManagerUrl?: string
 }
 type PlayerArtifact = Pick<ArtifactManifest, "artifactId" | "playerUrl" | "digest" | "packages">
-type CommandResult = { renderSessionId: string; stateVersion: number; value: Record<string, unknown> }
+type CommandResult = RenderCommandResult
 type PendingCommand = {
   resolve(value: CommandResult): void
   reject(error: Error): void
@@ -124,6 +146,8 @@ type RenderSession = {
   sourceRevision: string
   status: "ready" | "running" | "failed" | "closed"
   stateVersion: number
+  stateSeq: number
+  viewStateVersion: number
   runtimeEventSeq: number
   interactionSeq: number
   commandSeq: number
@@ -136,6 +160,8 @@ type RenderSession = {
   waiters: Set<() => void>
   interactions: Array<ViewerInteractionEvent & { interactionSeq: number; stateVersion: number; at: number }>
   observation: ViewerObservation | null
+  rendered: ViewerRendered | null
+  view: ViewerViewState
   catalog: ViewerProjectCatalog | null
 }
 
@@ -168,6 +194,8 @@ export class ViewerRenderBroker {
       sourceRevision: input.sourceRevision,
       status: "ready",
       stateVersion: 0,
+      stateSeq: 0,
+      viewStateVersion: 0,
       runtimeEventSeq: 0,
       interactionSeq: 0,
       commandSeq: 0,
@@ -180,6 +208,8 @@ export class ViewerRenderBroker {
       waiters: new Set(),
       interactions: [],
       observation: null,
+      rendered: null,
+      view: { zoom: 1, background: "#202226", width: 1, height: 1 },
       catalog: mode === "viewer" && "catalog" in input ? input.catalog ?? null : null,
     }
     this.sessions.set(session.renderSessionId, session)
@@ -191,7 +221,27 @@ export class ViewerRenderBroker {
     const session = this.currentSession(renderSessionId)
     if (!session || session.status === "closed") return null
     session.rendererLastSeen = Date.now()
-    const read = () => session.commands.filter(({ commandSeq }) => commandSeq > after)
+    const read = () => {
+      while (session.commands.length) {
+        const command = session.commands[0]
+        if (command.commandSeq <= after) return []
+        if (!command.executionState) {
+          const conflict = this.commandConflict(session, command)
+          if (conflict) {
+            const pending = session.pending.get(command.requestId)!
+            clearTimeout(pending.timeout)
+            session.pending.delete(command.requestId)
+            session.commands.shift()
+            pending.reject(new Error(conflict))
+            continue
+          }
+          command.executionState = { semanticStateVersion: session.stateVersion, viewStateVersion: session.viewStateVersion, runtimeEventSeq: session.runtimeEventSeq }
+        }
+        return [command]
+      }
+      session.status = "ready"
+      return []
+    }
     let commands = read()
     if (commands.length === 0) {
       await new Promise<void>((resolve) => {
@@ -228,6 +278,12 @@ export class ViewerRenderBroker {
     if (!command || command.commandSeq !== input.commandSeq || command.requestId !== input.requestId || !pending) {
       throw new Error("result_conflict: command is stale or out of order")
     }
+    const execution = command.executionState
+    if (!execution) throw new Error("result_conflict: command was not dispatched")
+    const runtimeEventSeq = input.value?.runtimeEventSeq
+    if (input.ok && (!Number.isSafeInteger(runtimeEventSeq) || runtimeEventSeq! < execution.runtimeEventSeq || runtimeEventSeq! > session.runtimeEventSeq)) {
+      throw new Error("result_conflict: snapshot interaction watermark is not acknowledged")
+    }
     // Receipts retain only hashes, never another copy of screenshot/observation payloads.
     session.resultReceipts.set(input.commandSeq, { requestId: input.requestId, digest })
     if (session.resultReceipts.size > MAX_RENDER_REQUESTS_PER_SESSION) session.resultReceipts.delete(session.resultReceipts.keys().next().value!)
@@ -235,15 +291,38 @@ export class ViewerRenderBroker {
     session.pending.delete(input.requestId)
     session.commands = session.commands.filter(({ commandSeq }) => commandSeq > input.commandSeq)
     session.rendererLastSeen = Date.now()
+    const semanticMutation = command.kind === "render" || command.kind === "update"
+    session.stateSeq += 1
+    // A failed operation batch can have applied a prefix. Invalidate the old version, never imply rollback.
+    const conflict = !input.ok && input.error?.startsWith("state_version_conflict:")
+    if (!conflict) {
+      if (semanticMutation) session.stateVersion += 1
+      if (command.kind === "view") session.viewStateVersion += 1
+    }
     if (input.ok) {
-      if (command.kind !== "capture" && command.kind !== "observe") session.stateVersion += 1
+      const semanticStateVersion = execution.semanticStateVersion + runtimeEventSeq! - execution.runtimeEventSeq + Number(semanticMutation)
+      const viewStateVersion = execution.viewStateVersion + Number(command.kind === "view")
       const observation = input.value?.observation
-      if (isViewerObservation(observation)) session.observation = observation
+      if (semanticMutation) session.observation = null
+      if (isViewerObservation(observation) && semanticStateVersion === session.stateVersion) session.observation = observation
+      if (command.kind === "render") session.rendered = input.value?.rendered as ViewerRendered ?? null
+      if (command.kind === "view") session.view = { ...session.view, ...command.payload } as ViewerViewState
       session.status = "ready"
-      pending.resolve({ renderSessionId, stateVersion: session.stateVersion, value: input.value ?? {} })
+      const value = { ...input.value }
+      if (typeof value.screenshotBase64 === "string") {
+        const rendered = session.rendered
+        value.component = rendered ? { packageId: rendered.packageId, componentId: rendered.componentId, packageName: rendered.packageName, componentName: rendered.componentName } : null
+        value.view = { ...session.view }
+      }
+      pending.resolve({ renderSessionId, sourceRevision: session.sourceRevision, stateVersion: semanticStateVersion, semanticStateVersion, viewStateVersion, value })
     } else {
+      if (semanticMutation && !conflict) session.observation = null
+      if (command.kind === "render" && !conflict) session.rendered = null
       session.status = "failed"
       pending.reject(new Error(input.error || "Viewer renderer command failed."))
+      if (command.kind === "view" || input.error?.includes("runtime command timed out")) {
+        this.removeSession(session, "render_state_uncertain: the renderer may have changed; reopen Viewer or Player")
+      }
     }
     return true
   }
@@ -263,24 +342,40 @@ export class ViewerRenderBroker {
     return this.enqueue(session, kind, payload, requestId)
   }
 
-  executeForSession(renderSessionId: string, expectedStateVersion: number, kind: "update", payload: Record<string, unknown>, requestId?: string) {
+  executeForSession(renderSessionId: string, expectedStateVersion: number, kind: "update" | "render", payload: Record<string, unknown>, requestId?: string) {
     const session = this.currentSession(renderSessionId)
     if (!session || Date.now() - session.rendererLastSeen > 45_000) return null
-    if (requestId && session.requests.has(requestId)) return this.enqueue(session, kind, payload, requestId)
-    if (session.stateVersion !== expectedStateVersion) {
+    if (!session.requests.has(requestId ?? "") && session.stateVersion !== expectedStateVersion) {
       throw new Error(`state_version_conflict: expected ${expectedStateVersion}, current ${session.stateVersion}`)
     }
-    return this.enqueue(session, kind, payload, requestId)
+    return this.enqueue(session, kind, payload, requestId, { expectedStateVersion })
   }
 
-  executeReadForSession(renderSessionId: string, afterStateVersion: number, kind: "capture" | "observe", requestId?: string) {
+  executeViewForSession(renderSessionId: string, expectedViewStateVersion: number, payload: z.infer<typeof renderViewSchema>, requestId?: string) {
     const session = this.currentSession(renderSessionId)
     if (!session || Date.now() - session.rendererLastSeen > 45_000) return null
-    if (requestId && session.requests.has(requestId)) return this.enqueue(session, kind, {}, requestId)
+    if (!session.requests.has(requestId ?? "") && session.viewStateVersion !== expectedViewStateVersion) {
+      throw new Error(`view_state_version_conflict: expected ${expectedViewStateVersion}, current ${session.viewStateVersion}`)
+    }
+    return this.enqueue(session, "view", payload, requestId, { expectedViewStateVersion })
+  }
+
+  executeCommand(renderSessionId: string, input: z.infer<typeof renderSessionCommandSchema>) {
+    if (input.kind === "render" || input.kind === "update") return this.executeForSession(renderSessionId, input.expectedStateVersion, input.kind, input.payload, input.requestId)
+    if (input.kind === "view") return this.executeViewForSession(renderSessionId, input.expectedViewStateVersion, input.payload, input.requestId)
+    return this.executeReadForSession(renderSessionId, input.afterStateVersion, input.kind, input.requestId, input.afterViewStateVersion)
+  }
+
+  executeReadForSession(renderSessionId: string, afterStateVersion: number, kind: "capture" | "observe", requestId?: string, afterViewStateVersion = 0) {
+    const session = this.currentSession(renderSessionId)
+    if (!session || Date.now() - session.rendererLastSeen > 45_000) return null
+    const payload = { afterStateVersion, afterViewStateVersion }
+    if (requestId && session.requests.has(requestId)) return this.enqueue(session, kind, payload, requestId)
     if (session.stateVersion < afterStateVersion) {
       throw new Error(`state_version_not_reached: requested ${afterStateVersion}, current ${session.stateVersion}`)
     }
-    return this.enqueue(session, kind, {}, requestId)
+    if (session.viewStateVersion < afterViewStateVersion) throw new Error(`view_state_version_not_reached: requested ${afterViewStateVersion}, current ${session.viewStateVersion}`)
+    return this.enqueue(session, kind, payload, requestId)
   }
 
   getSession(renderSessionId: string) {
@@ -332,7 +427,9 @@ export class ViewerRenderBroker {
     if (input.runtimeEventSeq !== session.runtimeEventSeq + 1) throw new Error(`interaction_sequence_gap: expected ${session.runtimeEventSeq + 1}, received ${input.runtimeEventSeq}`)
     session.runtimeEventSeq = input.runtimeEventSeq
     session.interactionSeq += 1
+    session.stateSeq += 1
     session.stateVersion += 1
+    session.observation = null
     session.rendererLastSeen = Date.now()
     session.interactionReceipts.set(input.runtimeEventSeq, digest)
     if (session.interactionReceipts.size > MAX_RENDER_REQUESTS_PER_SESSION) session.interactionReceipts.delete(session.interactionReceipts.keys().next().value!)
@@ -358,8 +455,8 @@ export class ViewerRenderBroker {
     this.sessionBySource.clear()
   }
 
-  private enqueue(session: RenderSession, kind: ViewerBrokerCommand["kind"], payload: Record<string, unknown>, requestedId: string = randomUUID()) {
-    const fingerprint = wireFingerprint({ kind, payload })
+  private enqueue(session: RenderSession, kind: ViewerBrokerCommand["kind"], payload: Record<string, unknown>, requestedId: string = randomUUID(), expected: Pick<ViewerBrokerCommand, "expectedStateVersion" | "expectedViewStateVersion"> = {}) {
+    const fingerprint = wireFingerprint({ kind, payload, ...expected })
     const existing = session.requests.get(requestedId)
     if (existing) {
       if (existing.fingerprint !== fingerprint) throw new Error("request_id_conflict: requestId was already used for a different Viewer command")
@@ -371,7 +468,7 @@ export class ViewerRenderBroker {
     }
     session.commandSeq += 1
     session.status = "running"
-    const command: ViewerBrokerCommand = { commandSeq: session.commandSeq, requestId: requestedId, kind, payload }
+    const command: ViewerBrokerCommand = { commandSeq: session.commandSeq, requestId: requestedId, kind, payload, ...expected }
     session.commands.push(command)
     const promise = new Promise<CommandResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -399,13 +496,24 @@ export class ViewerRenderBroker {
       ...(session.mode === "viewer" ? { projectId: session.sourceId } : { artifactId: session.sourceId }),
       sourceRevision: session.sourceRevision,
       status: session.status,
+      stateSeq: session.stateSeq,
       stateVersion: session.stateVersion,
+      semanticStateVersion: session.stateVersion,
+      viewStateVersion: session.viewStateVersion,
       commandSeq: session.commandSeq,
       interactionSeq: session.interactionSeq,
       lastAcceptedRuntimeEventSeq: session.runtimeEventSeq,
       latestInteraction: session.interactions.at(-1) ?? null,
       observation: session.observation,
+      rendered: session.rendered,
+      view: session.view,
     }
+  }
+
+  private commandConflict(session: RenderSession, command: ViewerBrokerCommand) {
+    if (command.expectedStateVersion !== undefined && command.expectedStateVersion !== session.stateVersion) return `state_version_conflict: expected ${command.expectedStateVersion}, current ${session.stateVersion}`
+    if (command.expectedViewStateVersion !== undefined && command.expectedViewStateVersion !== session.viewStateVersion) return `view_state_version_conflict: expected ${command.expectedViewStateVersion}, current ${session.viewStateVersion}`
+    return null
   }
 
   private sourceRevision(mode: "viewer" | "player", sourceId: string) {
@@ -498,6 +606,8 @@ export function registerViewerMcpTools(
             sourceRevision: renderer.session.sourceRevision,
             status: renderer.session.status,
             stateVersion: renderer.session.stateVersion,
+            semanticStateVersion: renderer.session.semanticStateVersion,
+            viewStateVersion: renderer.session.viewStateVersion,
           } : null,
           packages: renderer?.catalog?.packages ?? [],
         }
@@ -540,6 +650,19 @@ export function registerViewerMcpTools(
   }, async ({ renderSessionId, requestId, expectedStateVersion, operations }) => {
     try {
       const result = broker.executeForSession(renderSessionId, expectedStateVersion, "update", { operations }, requestId)
+      return result ? commandToolResult(await result) : sessionBrowserRequired(renderSessionId)
+    } catch (error) {
+      return toolResult({ ok: false, code: "render_session_error", message: formatError(error) }, true)
+    }
+  })
+
+  server.registerTool("set_render_view", {
+    title: "Set FairyGUI render view",
+    description: "Change zoom, background or viewport through the shared Broker. Uses viewStateVersion, independently of semanticStateVersion (the legacy stateVersion).",
+    inputSchema: z.object({ renderSessionId: z.string().min(1), requestId: z.string().uuid(), expectedViewStateVersion: versionSchema, view: renderViewSchema }),
+  }, async ({ renderSessionId, requestId, expectedViewStateVersion, view }) => {
+    try {
+      const result = broker.executeViewForSession(renderSessionId, expectedViewStateVersion, view, requestId)
       return result ? commandToolResult(await result) : sessionBrowserRequired(renderSessionId)
     } catch (error) {
       return toolResult({ ok: false, code: "render_session_error", message: formatError(error) }, true)
@@ -670,11 +793,12 @@ export function registerViewerMcpTools(
       renderSessionId: z.string().min(1),
       requestId: z.string().uuid(),
       afterStateVersion: z.number().int().nonnegative(),
+      afterViewStateVersion: versionSchema.default(0),
     }),
     annotations: { readOnlyHint: true },
-  }, async ({ renderSessionId, requestId, afterStateVersion }) => {
+  }, async ({ renderSessionId, requestId, afterStateVersion, afterViewStateVersion }) => {
     try {
-      const result = broker.executeReadForSession(renderSessionId, afterStateVersion, "observe", requestId)
+      const result = broker.executeReadForSession(renderSessionId, afterStateVersion, "observe", requestId, afterViewStateVersion)
       return result ? commandToolResult(await result) : sessionBrowserRequired(renderSessionId)
     } catch (error) {
       return toolResult({ ok: false, code: "render_session_error", message: formatError(error) }, true)
@@ -688,11 +812,12 @@ export function registerViewerMcpTools(
       renderSessionId: z.string().min(1),
       requestId: z.string().uuid(),
       afterStateVersion: z.number().int().nonnegative(),
+      afterViewStateVersion: versionSchema.default(0),
     }),
     annotations: { readOnlyHint: true },
-  }, async ({ renderSessionId, requestId, afterStateVersion }) => {
+  }, async ({ renderSessionId, requestId, afterStateVersion, afterViewStateVersion }) => {
     try {
-      const result = broker.executeReadForSession(renderSessionId, afterStateVersion, "capture", requestId)
+      const result = broker.executeReadForSession(renderSessionId, afterStateVersion, "capture", requestId, afterViewStateVersion)
       return result ? commandToolResult(await result) : sessionBrowserRequired(renderSessionId)
     } catch (error) {
       return toolResult({ ok: false, code: "render_session_error", message: formatError(error) }, true)

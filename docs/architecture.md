@@ -53,7 +53,7 @@ FairyGUI-Maker/
 ├─ src/server/                Node Host、MCP、Artifact Store、Render Broker
 ├─ src/web/                   React Maker Workbench、Project Source Client、Renderer Client
 ├─ src/runtime/               Viewer 与 Player 的独立 iframe runtime
-├─ src/viewer-protocol.ts     共用的 render session/runtime 协议（v4）
+├─ src/viewer-protocol.ts     共用的 render session/runtime 协议（v5）
 ├─ src/artifact-protocol.ts   Artifact manifest 与 Player source 契约
 ├─ .agents/skills/            通用/Codex Agent Skill
 ├─ .claude/skills/            Claude Skill 兼容入口
@@ -70,6 +70,7 @@ Viewer: Dashboard read-only binding -> Project Source Client -> UAM ViewerScene 
 Player: published folder import -> Artifact Store -> manifest + files -> player-runtime / UIPackage
 
 Agent -> Maker MCP -> Render Session Broker -> Renderer Client -> MessageChannel -> selected runtime
+Workbench controls -> REST -> same Render Session Broker
 ```
 
 Node Host 是项目记录、import draft、render session 和发布产物的所有者。设计源先复制进 data dir；Parse、Plan 和 Compile 只更新带 revision 的 Draft，Materialize 才通过临时目录写入用户指定的新目录。Draft 的 Visual Evidence 复用同页 Viewer Capture，由浏览器原生 Canvas 生成 Pixel Diff，Host 只持久化经过 PNG 尺寸与 revision 校验的 Reference、Capture、Diff 和原始指标；是否接受差异由 fixture 或人工审查决定，不存在全局相似度阈值。Draft 可在 Host 重启后恢复，过期或损坏的 Draft 会在启动时清理。交互式工程绑定仍由浏览器 Project Source Client 按需读取；用户授权的 `FileSystemDirectoryHandle` 只保存在同源浏览器，不发送给 Host、Agent 或 runtime iframe。自动化 `view` 则由 Host 在启动时读取唯一显式目录并保存只读内存快照，Agent 只能按相对路径读取该快照。两种来源都用 `sourceRevision` 绑定 renderer；源 revision 改变后旧 renderer 和 render session 立即失效。Host 重启时重新校验 Artifact manifest、文件大小、SHA-256、整体 digest 和包目录，并清理不能恢复的中断导入目录；不一致的 Artifact 不载入但也不会被自动删除。
@@ -98,7 +99,8 @@ Maker 只补充面向用户任务的高层工具。Viewer 与 Artifact-first Pla
 | `render_artifact_component` | 在已打开的 Player 中通过原生 `UIPackage` 创建指定组件，可同时截图 |
 | `render_component_preview` | 渲染指定组件并返回截图或预览资源链接 |
 | `update_render_session` | 以稳定对象 ID 更新白名单临时属性，或驱动 Controller、Transition 与控件语义事件 |
-| `capture_render_screenshot` | 获取当前确定状态版本的 Canvas PNG |
+| `set_render_view` | 使用独立 viewStateVersion 修改缩放、背景和视口 |
+| `capture_render_screenshot` | 获取实际捕获时 semanticStateVersion/viewStateVersion 对应的 Canvas PNG |
 
 工程态工具应返回 `projectId`、稳定 package/component ID 和 Viewer URL；发布态工具返回 `artifactId`、manifest URI 或 Player URL。两类工具都不应把整个工程或全部发布资源编码进单次 MCP 响应。
 
@@ -138,7 +140,7 @@ Viewer 与 Player 是两条独立渲染链路：
 | 行为语义 | Maker 的 UAM 交互适配层；不推断工程中未表达的业务脚本 | 发布 runtime 的原生 Controller、Gear、Transition 和控件行为 |
 | 持久化边界 | 不发布、不生成 artifact、不写回工程 | Artifact 内容寻址且不可变；运行态更新不改写 Artifact |
 
-两者只共用 Host Render Session Broker、协议 v4、白名单 operation、observation、人工交互上报和 PNG capture，不共用 renderer 实现，也不互相降级。
+两者只共用 Host Render Session Broker、协议 v5、白名单 operation、observation、人工交互上报和 PNG capture，不共用 renderer 实现，也不互相降级。Workbench 控件与 Agent 经过同一个 Broker；MessageChannel 仅供 Renderer 内部使用，语义版本与视图版本独立校验。
 
 第一种视觉 runtime 固定为 LayaAir 3.3.10 与配套 FairyGUI Web runtime，并运行在隔离 iframe。Viewer iframe 只接收 Project Source Client 编译的结构化 `ViewerScene` 及所选组件依赖资产，不获得目录句柄或整个工程。Maker 自己维护 Viewer 的 UAM Scene compiler 和直接对象构造；FairyGUI Editor Online 只作为工程态 Canvas 行为与视觉效果的参考。Player 使用独立 runtime，按 manifest 加载 Artifact 文件并调用原生 `fgui.UIPackage.addPackage/createObject`，因此发布包中的原生 Controller、Gear、Transition 和控件行为由 FairyGUI runtime 执行。压缩 `.fui` 在浏览器中用标准 `DecompressionStream('deflate-raw')` 解压后加载，不恢复旧 `RawInflate` 生成物。
 

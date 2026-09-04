@@ -10,6 +10,7 @@ import { startMakerHost } from "../src/server/index"
 import type { ArtifactManifest } from "../src/artifact-protocol"
 import { runtimeBudgetSmoke } from "./runtime-budget-smoke"
 import { rendererDeliverySmoke } from "./renderer-delivery-smoke"
+import { brokerStateSmoke } from "./broker-state-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -72,6 +73,12 @@ try {
     .addChild(document.createGGraph("background").setId("BACK0001").setXY(0, 0).setSize(520, 300).setGraphType(1).setFillColor("#172554"))
     .addChild(document.createGTextField("title").setId("TITLE001").setXY(42, 58).setSize(440, 64).setFontSize(32).setColor("#dbeafe").setText("FairyGUI Maker"))
   pkg.addResource(component)
+  component.addController(document.createController("page").setSelectedIndex(0)
+    .addPage(document.createControllerPage("First").setId("first"))
+    .addPage(document.createControllerPage("Second").setId("second")))
+  component.addTransition(document.createTransition("show").addItem(document.createTransitionItem("title")
+    .setTime(0).setTargetId("TITLE001").setActionType(14).setStartValue(["Played"]).setEndValue(["Played"])))
+  pkg.addResource(document.createComponent("Other").setId("OTHER001").setExported(true).setSize(100, 100))
 
   const io = new NodeIO()
   const binaryPath = path.join(publishDir, "Smoke.fui")
@@ -148,7 +155,8 @@ try {
   await page.getByRole("button", { name: "捕获视觉证据" }).click()
   const savedEvidence = await evidenceResponse
   if (!savedEvidence.ok()) throw new Error(`Workbench visual evidence failed: ${await savedEvidence.text()}`)
-  const { visualEvidence } = await savedEvidence.json() as { visualEvidence: { comparison: { differentPixels: number; meanAbsoluteError: number } } }
+  const { visualEvidence } = await savedEvidence.json() as { visualEvidence: { renderState: { renderSessionId: string; semanticStateVersion: number; viewStateVersion: number }; comparison: { differentPixels: number; meanAbsoluteError: number } } }
+  if (visualEvidence.renderState?.renderSessionId !== viewerRender.value.renderSessionId || visualEvidence.renderState.semanticStateVersion < viewerRender.value.semanticStateVersion || visualEvidence.renderState.viewStateVersion < 1) throw new Error("Visual evidence lost its Broker state stamp")
   if (visualEvidence.comparison.differentPixels > visualBaseline.maxDifferentPixels
     || visualEvidence.comparison.meanAbsoluteError > visualBaseline.maxMeanAbsoluteError) {
     throw new Error(`basic-shapes visual baseline changed: ${JSON.stringify(visualEvidence.comparison)}`)
@@ -158,10 +166,13 @@ try {
   await page.getByAltText("Viewer Capture").waitFor()
   await page.getByRole("button", { name: "Pixel Diff" }).click()
   await page.getByAltText("Pixel Diff").waitFor()
+  const viewerState = await brokerStateSmoke(page, "viewer", viewerRender.value.renderSessionId,
+    (name, args) => callTool(host!.origin, sessionId, 80, name, args))
   const viewerDelivery = await rendererDeliverySmoke(page, "viewer", viewerRender.value.renderSessionId, viewerRender.value.value.observation.objectTree.id,
     (name, args) => callTool(host!.origin, sessionId, 60, name, args))
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByTestId("visual-report").waitFor()
+  if (!(await page.getByTestId("visual-report").innerText()).includes(`Semantic ${visualEvidence.renderState.semanticStateVersion} · View ${visualEvidence.renderState.viewStateVersion}`)) throw new Error("Visual evidence state stamp did not survive reload")
 
   await page.goto(`${host.origin}/player`, { waitUntil: "domcontentloaded" })
   // Inject only the picker result; hashing, upload, finalization and UI run unchanged.
@@ -198,6 +209,8 @@ try {
   })
   assertPng(playerRender.body)
   if (!JSON.stringify(playerRender.value).includes("TITLE001")) throw new Error("Player observation did not include the rendered title")
+  const playerState = await brokerStateSmoke(page, "player", playerRender.value.renderSessionId,
+    (name, args) => callTool(host!.origin, sessionId, 90, name, args))
   const playerDelivery = await rendererDeliverySmoke(page, "player", playerRender.value.renderSessionId, playerRender.value.value.observation.objectTree.id,
     (name, args) => callTool(host!.origin, sessionId, 70, name, args))
   const runtimeBudgets = await runtimeBudgetSmoke(page.context(), host.origin, artifact, publishDir)
@@ -207,7 +220,7 @@ try {
     method: "DELETE",
     headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
   })
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerDelivery, playerDelivery, runtimeBudgets, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
 } finally {
   await browser?.close()
   await host?.close()

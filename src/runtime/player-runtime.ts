@@ -35,6 +35,8 @@ const runtime = {
   interactionSeq: 0,
   zoom: 1,
   background: "#202226",
+  width: Math.max(1, innerWidth),
+  height: Math.max(1, innerHeight),
 }
 
 let bootPromise: Promise<void> | null = null
@@ -80,7 +82,7 @@ async function connect(sourceRevision: string, port: MessagePort) {
 async function boot() {
   if (typeof Laya === "undefined" || typeof fgui === "undefined") throw new Error("LayaAir 或 FairyGUI Web runtime 未加载。")
   const resolution = {
-    scaleMode: "full",
+    scaleMode: "noscale",
     backgroundColor: runtime.background,
     designWidth: Math.max(1, innerWidth),
     designHeight: Math.max(1, innerHeight),
@@ -96,12 +98,15 @@ async function boot() {
   installConstructionBudget()
   bindInteractionEvents()
   resize()
-  window.addEventListener("resize", resize)
 }
 
 async function handleCommand(command: ViewerCommand) {
   try {
     if (!command || typeof command.requestId !== "string") return
+    if (command.expectedRuntimeEventSeq !== undefined && command.expectedRuntimeEventSeq !== runtime.interactionSeq) {
+      respond(command.requestId, undefined, "state_version_conflict: a runtime interaction occurred before execution; refresh the Broker state")
+      return
+    }
     switch (command.kind) {
       case "render-artifact": {
         const value = await renderArtifact(command.source)
@@ -109,14 +114,17 @@ async function handleCommand(command: ViewerCommand) {
         respond(command.requestId, value)
         return
       }
-      case "set-view":
-        runtime.zoom = Math.min(4, Math.max(0.1, command.zoom))
-        if (!CSS.supports("color", command.background)) throw new Error("无效的 Player 背景颜色。")
-        runtime.background = command.background
-        Laya.stage.bgColor = command.background
-        layoutCurrent()
-        respond(command.requestId)
+      case "set-view": {
+        const view = { zoom: runtime.zoom, background: runtime.background, width: runtime.width, height: runtime.height, ...command.view }
+        if (!Number.isFinite(view.zoom) || view.zoom < 0.1 || view.zoom > 4 || !/^#[0-9a-fA-F]{6}$/.test(view.background)) throw new Error("Invalid render view")
+        if (!Number.isInteger(view.width) || !Number.isInteger(view.height)) throw new Error("Invalid viewport")
+        checkImageDimensions(view.width, view.height)
+        Object.assign(runtime, view)
+        Laya.stage.bgColor = view.background
+        resize()
+        respond(command.requestId, { view, ...(runtime.current ? { observation: createObservation() } : {}) })
         return
+      }
       case "play-transition":
         playTransition(runtime.current, command.transitionName)
         respond(command.requestId)
@@ -134,12 +142,14 @@ async function handleCommand(command: ViewerCommand) {
         return
       }
       case "capture": {
-        checkImageDimensions(Math.max(1, innerWidth), Math.max(1, innerHeight))
-        const canvas = Laya.stage.drawToCanvas(Math.max(1, innerWidth), Math.max(1, innerHeight), 0, 0)?.source as HTMLCanvasElement | undefined
+        checkImageDimensions(runtime.width, runtime.height)
+        const runtimeEventSeq = runtime.interactionSeq
+        const observation = runtime.current ? createObservation() : undefined
+        const canvas = Laya.stage.drawToCanvas(runtime.width, runtime.height, 0, 0)?.source as HTMLCanvasElement | undefined
         if (!canvas) throw new Error("LayaAir Canvas 尚未创建。")
         const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("Canvas 截图失败。")), "image/png"))
         const data = await blob.arrayBuffer()
-        runtime.port?.postMessage({ kind: "response", requestId: command.requestId, ok: true, value: { data, type: blob.type } } satisfies ViewerRuntimeMessage, [data])
+        runtime.port?.postMessage({ kind: "response", requestId: command.requestId, ok: true, runtimeEventSeq, value: { data, type: blob.type, observation } } satisfies ViewerRuntimeMessage, [data])
         return
       }
       case "render":
@@ -569,7 +579,8 @@ function installConstructionBudget() {
 
 function resize() {
   if (!fgui.GRoot?.inst) return
-  fgui.GRoot.inst.setSize(Math.max(1, innerWidth), Math.max(1, innerHeight))
+  Laya.stage.size(runtime.width, runtime.height)
+  fgui.GRoot.inst.setSize(runtime.width, runtime.height)
   layoutCurrent()
 }
 
@@ -585,7 +596,7 @@ function artifactFileUrl(artifactId: string, filePath: string) {
 }
 
 function respond(requestId: string, value?: unknown, error?: string) {
-  post(error ? { kind: "response", requestId, ok: false, error } : { kind: "response", requestId, ok: true, value })
+  post(error ? { kind: "response", requestId, ok: false, error } : { kind: "response", requestId, ok: true, value, runtimeEventSeq: runtime.interactionSeq })
 }
 
 function post(message: ViewerRuntimeMessage) {

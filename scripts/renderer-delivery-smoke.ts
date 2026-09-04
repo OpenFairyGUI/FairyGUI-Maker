@@ -60,7 +60,7 @@ export async function rendererDeliverySmoke(
   } finally { await page.unroute(`${endpoint}/results`, resultFault) }
   const result = JSON.parse(results[0])
   assert.equal((await page.request.post(`${endpoint}/results`, { data: result })).status(), 200)
-  assert.equal((await page.request.post(`${endpoint}/results`, { data: { ...result, value: { changed: true } } })).status(), 409)
+  assert.equal((await page.request.post(`${endpoint}/results`, { data: { ...result, value: { ...result.value, changed: true } } })).status(), 409)
 
   const interactions: string[] = []
   const interactionFault = async (route: Route) => {
@@ -76,8 +76,13 @@ export async function rendererDeliverySmoke(
   const before = await state()
   const firstSeq = before.lastAcceptedRuntimeEventSeq + 1
   try {
-    // Inject runtime event envelopes at its real MessagePort; the Workbench outbox and HTTP remain unchanged.
+    // Fault-injected events must also advance response watermarks; production increments both inside the runtime.
     await frame.evaluate(`(() => {
+      const post = MessagePort.prototype.postMessage;
+      MessagePort.prototype.postMessage = function(message, ...rest) {
+        if (message?.kind === "response" && message.ok) message.runtimeEventSeq += 2;
+        return post.call(this, message, ...rest);
+      };
       for (let seq = ${firstSeq}; seq < ${firstSeq + 2}; seq++) {
         window.deliveryPort.postMessage({ kind: "interaction", value: { runtimeEventSeq: seq, targetId: ${JSON.stringify(rootId)}, event: "click", data: { selected: true } } });
       }

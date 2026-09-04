@@ -86,7 +86,7 @@ Maker 对外只提供一个 Streamable HTTP MCP 服务。客户端应将令牌�
 |---|---|
 | Viewer 发现与渲染 | `list_viewer_components`、`render_component_preview` |
 | Player 发现与渲染 | `list_artifact_components`、`open_artifact_player`、`render_artifact_component` |
-| Render session | `update_render_session`、`get_render_observation`、`capture_render_screenshot` |
+| Render session | `update_render_session`、`set_render_view`、`get_render_observation`、`capture_render_screenshot` |
 | 资源分析 | `inspect_project_assets` |
 
 完整模式中的工程读写继续使用同一 MCP 服务内的 OpenFairyGUI backend tools。`view <project-path>` 模式只注册 Maker 的 Viewer、Player、资源分析与 render-session 工具，不提供任何 backend 工程写工具。Agent 应始终使用工具返回的项目、包、组件、对象、session、revision 和 state-version ID，不应从显示名称猜测。
@@ -178,6 +178,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 - 同一 Host 最多保留 32 个 MCP session；客户端应正常发送 MCP `DELETE` 关闭不再使用的 session。
 - Viewer 使用原始工程 UAM；Player 只消费固定 Artifact，两条渲染链路不会互相降级。
 - Viewer 和 Player 都只接受白名单语义操作，不执行任意 JavaScript、表达式或业务 JSON。
+- Workbench 与 Agent 共用 Broker；语义状态和 zoom/background/viewport 分别计版本，截图记录实际捕获的双版本。`stateVersion` 保留为语义版本别名，详见[统一 Broker 状态](./docs/workbench.md#28-统一-broker-状态批次-13)。
 - 每个 render session 最多保留最近 256 个 request ID 用于安全重试；更早的已完成请求可能被淘汰。
 - 普通 Viewer/Player 截图直接作为 MCP `image/png` 返回，不持久化 ScreenshotRef；Import Draft 的 Visual Evidence 是独立、带 revision 的审查记录。
 - 当前不包含远程部署、守护进程、WebSocket、自动 `publishBrowser` 或 `run_ui_scenario`。
@@ -189,7 +190,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 |---|---|
 | Node.js | `>=22.18`；CI 覆盖 Node 22 与 24 |
 | OpenFairyGUI | `@openfairygui/core/backend/mcp` `0.3.1` |
-| MCP | Streamable HTTP；Viewer protocol v4 |
+| MCP | Streamable HTTP；Viewer protocol v5 |
 | Viewer / Player runtime | 冻结的 LayaAir 3.3.10 + FairyGUI Web runtime |
 | 浏览器 | 当前稳定版 Chrome 与 Edge；自动门禁使用 Chromium |
 

@@ -9,22 +9,24 @@ import {
   type ViewerOperation,
   type ViewerRendered,
   type ViewerRuntimeMessage,
+  type RenderSessionState,
+  type ViewerViewState,
 } from "../../viewer-protocol"
 import { registerPlayerRenderer } from "./api"
 import { startRendererDelivery } from "./renderer-delivery"
+import { createRenderSessionClient, type RenderSessionClient } from "./render-session"
 
-export type PlayerFrameSession = {
-  render(packageId: string, componentId: string): Promise<ViewerRendered>
-  capture(): Promise<Blob>
-  observe(): Promise<ViewerObservation>
-  setView(zoom: number, background: string): Promise<void>
-  playTransition(transitionName?: string): Promise<void>
-  applyOperations(operations: ViewerOperation[]): Promise<Record<string, unknown>>
+type PlayerFrameSession = {
+  render(packageId: string, componentId: string, expectedRuntimeEventSeq?: number): Promise<ViewerRendered & { runtimeEventSeq: number }>
+  capture(): Promise<{ blob: Blob; runtimeEventSeq: number; observation?: ViewerObservation }>
+  observe(): Promise<ViewerObservation & { runtimeEventSeq: number }>
+  setView(view: Partial<ViewerViewState>): Promise<Record<string, unknown>>
+  applyOperations(operations: ViewerOperation[], expectedRuntimeEventSeq?: number): Promise<Record<string, unknown>>
   setInteractionHandler(handler: ((event: ViewerInteractionEvent) => void) | null): void
   destroy(): void
 }
 
-export async function connectPlayerFrame(frame: HTMLIFrameElement, artifact: ArtifactManifest, onRendered: (value: ViewerRendered) => void): Promise<PlayerFrameSession> {
+async function connectPlayerFrame(frame: HTMLIFrameElement, artifact: ArtifactManifest): Promise<PlayerFrameSession> {
   if (!frame.contentWindow) throw new Error("Player iframe 尚未就绪。")
   await waitForPlayerRuntime(frame)
   const channel = new MessageChannel()
@@ -44,14 +46,13 @@ export async function connectPlayerFrame(frame: HTMLIFrameElement, artifact: Art
       return
     }
     if (message.kind === "fatal") { window.clearTimeout(readyTimeout); rejectReady(new Error(message.error)); return }
-    if (message.kind === "rendered") { onRendered(message.value); return }
     if (message.kind === "interaction") { interactionHandler?.(message.value); return }
     if (message.kind !== "response") return
     const request = pending.get(message.requestId)
     if (!request) return
     window.clearTimeout(request.timeout)
     pending.delete(message.requestId)
-    if (message.ok) request.resolve(message.value)
+    if (message.ok) request.resolve({ ...message.value as object, runtimeEventSeq: message.runtimeEventSeq })
     else request.reject(new Error(message.error))
   }
   channel.port1.start()
@@ -69,15 +70,14 @@ export async function connectPlayerFrame(frame: HTMLIFrameElement, artifact: Art
   }
 
   return {
-    render: (packageId, componentId) => send<ViewerRendered>({ kind: "render-artifact", source: { artifact, packageId, componentId } }),
+    render: (packageId, componentId, expectedRuntimeEventSeq) => send<ViewerRendered & { runtimeEventSeq: number }>({ kind: "render-artifact", source: { artifact, packageId, componentId }, expectedRuntimeEventSeq }),
     async capture() {
-      const value = await send<{ data: ArrayBuffer; type: string }>({ kind: "capture" })
-      return new Blob([value.data], { type: value.type })
+      const value = await send<{ data: ArrayBuffer; type: string; runtimeEventSeq: number; observation?: ViewerObservation }>({ kind: "capture" })
+      return { blob: new Blob([value.data], { type: value.type }), runtimeEventSeq: value.runtimeEventSeq, observation: value.observation }
     },
-    observe: () => send<ViewerObservation>({ kind: "observe" }),
-    setView: (zoom, background) => send<void>({ kind: "set-view", zoom, background }),
-    playTransition: (transitionName) => send<void>({ kind: "play-transition", transitionName }),
-    applyOperations: (operations) => send<Record<string, unknown>>({ kind: "apply-operations", operations }),
+    observe: () => send<ViewerObservation & { runtimeEventSeq: number }>({ kind: "observe" }),
+    setView: (view) => send<Record<string, unknown>>({ kind: "set-view", view }),
+    applyOperations: (operations, expectedRuntimeEventSeq) => send<Record<string, unknown>>({ kind: "apply-operations", operations, expectedRuntimeEventSeq }),
     setInteractionHandler(handler) { interactionHandler = handler },
     destroy() {
       window.clearTimeout(readyTimeout)
@@ -108,33 +108,47 @@ async function waitForPlayerRuntime(frame: HTMLIFrameElement) {
   })
 }
 
-export async function startPlayerRenderer(artifact: ArtifactManifest, frame: PlayerFrameSession, onError: (error: Error) => void, signal: AbortSignal) {
-  return startRendererDelivery(
+export async function startPlayerRenderer(artifact: ArtifactManifest, iframe: HTMLIFrameElement, onState: (state: RenderSessionState) => void, onError: (error: Error) => void, signal: AbortSignal) {
+  const frame = await connectPlayerFrame(iframe, artifact)
+  if (signal.aborted) { frame.destroy(); signal.throwIfAborted() }
+  signal.addEventListener("abort", () => frame.destroy(), { once: true })
+  let client: RenderSessionClient | undefined
+  const delivery = await startRendererDelivery(
     (signal) => registerPlayerRenderer({ artifactId: artifact.artifactId, sourceRevision: artifact.digest, protocolVersion: VIEWER_PROTOCOL_VERSION }, signal),
     frame,
     (command) => executeBrokerCommand(artifact, frame, command),
     onError,
     signal,
+    (state) => client?.accept(state),
   )
+  client = createRenderSessionClient(delivery.session, onState, signal)
+  return { client, renderSessionId: delivery.renderSessionId, stop: () => { delivery.stop(); frame.destroy() } }
 }
 
 async function executeBrokerCommand(artifact: ArtifactManifest, frame: PlayerFrameSession, command: ViewerBrokerCommand) {
-  if (command.kind === "capture") return { screenshotBase64: await blobToBase64(await frame.capture()) }
-  if (command.kind === "observe") return { observation: await frame.observe() }
+  if (command.kind === "capture") return captureFrame(frame)
+  if (command.kind === "observe") { const observation = await frame.observe(); return { observation, runtimeEventSeq: observation.runtimeEventSeq } }
+  if (command.kind === "view") return frame.setView(command.payload)
   if (command.kind === "update") {
     if (!Array.isArray(command.payload.operations)) throw new Error("Player update command is missing operations.")
-    return await frame.applyOperations(command.payload.operations as ViewerOperation[])
+    return await frame.applyOperations(command.payload.operations as ViewerOperation[], command.executionState?.runtimeEventSeq)
   }
   const packageId = String(command.payload.packageId ?? "")
   const componentId = String(command.payload.componentId ?? "")
   const component = artifact.packages.find((pkg) => pkg.packageId === packageId)?.components.find((item) => item.id === componentId)
   if (!component) throw new Error(`Artifact component not found: ${packageId}/${componentId}`)
-  const rendered = await frame.render(packageId, componentId)
+  const rendered = await frame.render(packageId, componentId, command.executionState?.runtimeEventSeq)
   return {
     rendered,
-    observation: { objectTree: rendered.objectTree, controllers: rendered.controllers },
-    ...(command.payload.capture === true ? { screenshotBase64: await blobToBase64(await frame.capture()) } : {}),
+    observation: { objectTree: rendered.objectTree, controllers: rendered.controllers, availableTransitions: rendered.availableTransitions },
+    runtimeEventSeq: rendered.runtimeEventSeq,
+    ...(command.payload.capture === true ? await captureFrame(frame) : {}),
   }
+}
+
+async function captureFrame(frame: PlayerFrameSession) {
+  const { blob, ...snapshot } = await frame.capture()
+  return { ...snapshot, screenshotBase64: await blobToBase64(blob) }
 }
 
 function blobToBase64(blob: Blob) {
