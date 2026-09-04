@@ -138,6 +138,21 @@ try {
   environment.browserVersion = browser.version()
   await evidence.step("evidence-gate-self-test", () => browserEvidenceSmoke(browser!))
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1, locale: "en-US", timezoneId: "UTC", colorScheme: "light", reducedMotion: "reduce" })
+  context.on("page", (page) => page.on("console", (message) => { if (message.type() === "info" && message.text().startsWith("artifact-signal ")) console.log(message.text()) }))
+  await context.addInitScript(`(() => {
+    const original = window.fetch;
+    window.fetch = function(input, init) {
+      if (!String(input).includes("/api/artifacts/") || !String(input).includes("/files/")) return original.call(this, input, init);
+      const started = performance.now(); let response;
+      init?.signal?.addEventListener("abort", () => console.info("artifact-signal " + JSON.stringify({
+        elapsed: performance.now() - started, reason: String(init.signal.reason), stack: init.signal.reason?.stack,
+        status: response?.status, used: response?.bodyUsed, locked: response?.body?.locked, url: location.pathname,
+      })), { once: true });
+      const pending = original.call(this, input, init);
+      void pending.then(value => { response = value; }, () => {});
+      return pending;
+    };
+  })()`)
   await evidence.attach(context)
   const iframeCredentials: Array<Promise<boolean>> = []
   context.on("request", (request) => {
