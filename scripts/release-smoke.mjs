@@ -1,0 +1,182 @@
+import { access, mkdtemp, readFile, readdir, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
+import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
+import { createInterface } from "node:readline"
+
+const root = path.resolve(import.meta.dirname, "..")
+const tempRoot = await mkdtemp(path.join(tmpdir(), "fairygui-maker-release-"))
+const consumer = path.join(tempRoot, "consumer")
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm"
+const npmEnv = { ...process.env, npm_config_cache: path.join(tempRoot, "npm-cache") }
+const packageMetadata = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"))
+const expectedVersion = packageMetadata.version
+
+function run(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: root,
+      env: process.env,
+      shell: process.platform === "win32",
+      ...options,
+    })
+    let stdout = ""
+    let stderr = ""
+    child.stdout?.on("data", (chunk) => { stdout += chunk })
+    child.stderr?.on("data", (chunk) => { stderr += chunk })
+    child.once("error", reject)
+    child.once("exit", (code) => code === 0
+      ? resolve({ stdout, stderr })
+      : reject(new Error(`${command} ${args.join(" ")} exited ${code}\n${stdout}\n${stderr}`)))
+  })
+}
+
+async function initializeMcp(origin, token) {
+  const headers = {
+    Accept: "application/json, text/event-stream",
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  }
+  const initialized = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "release-smoke", version: "1.0.0" } },
+    }),
+  })
+  if (!initialized.ok) throw new Error(await initialized.text())
+  const initializeBody = await initialized.json()
+  if (!initializeBody.result?.instructions?.includes("stable IDs")) throw new Error("MCP server instructions are missing")
+  const sessionId = initialized.headers.get("mcp-session-id")
+  if (!sessionId) throw new Error("MCP session id missing")
+  const listed = await fetch(`${origin}/mcp`, {
+    method: "POST",
+    headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+  })
+  const body = await listed.json()
+  if (!listed.ok || body.error) throw new Error(JSON.stringify(body))
+  await fetch(`${origin}/mcp`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}`, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
+  })
+  return body.result.tools.map((tool) => tool.name)
+}
+
+let host
+try {
+  const metadataErrors = []
+  if (!packageMetadata.license || packageMetadata.license === "UNLICENSED") metadataErrors.push("package.json must declare the approved project license")
+  await access(path.join(root, "LICENSE")).catch(() => { metadataErrors.push("the approved project LICENSE file is missing") })
+  const repositoryUrl = typeof packageMetadata.repository === "string" ? packageMetadata.repository : packageMetadata.repository?.url
+  if (!repositoryUrl) metadataErrors.push("package.json.repository must match the public release repository")
+  if (metadataErrors.length) throw new Error(`Release metadata is incomplete: ${metadataErrors.join("; ")}`)
+  const notices = await readFile(path.join(root, "THIRD_PARTY_NOTICES.md"), "utf8")
+  for (const file of ["laya.core.js", "laya.webgl_2D.js", "fairygui.js"]) {
+    const digest = createHash("sha256").update(await readFile(path.join(root, "public", "viewer-runtime", file))).digest("hex")
+    if (!notices.includes(digest)) throw new Error(`Third-party notice hash is stale for ${file}`)
+  }
+  for (const marker of ["SIL OPEN FONT LICENSE Version 1.1", "pako 2.2.0", "Zlib License text"]) {
+    if (!notices.includes(marker)) throw new Error(`Third-party notice is missing: ${marker}`)
+  }
+
+  await run(npmCommand, ["pack", "--silent", "--pack-destination", tempRoot], { env: npmEnv })
+  const tarballs = (await readdir(tempRoot)).filter((file) => file.endsWith(".tgz"))
+  if (tarballs.length !== 1) throw new Error(`Expected one package tarball, found ${tarballs.length}`)
+  const tarball = path.join(tempRoot, tarballs[0])
+  await run(npmCommand, ["install", "--prefix", consumer, "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", tarball], { env: npmEnv })
+
+  const installedRoot = path.join(consumer, "node_modules", packageMetadata.name)
+  await Promise.all([
+    access(path.join(installedRoot, "dist", "server", "index.js")),
+    access(path.join(installedRoot, "dist", "web", "index.html")),
+    access(path.join(installedRoot, "dist", "web", "THIRD_PARTY_LICENSES.md")),
+    access(path.join(installedRoot, "README.md")),
+    access(path.join(installedRoot, "LICENSE")),
+    access(path.join(installedRoot, "THIRD_PARTY_NOTICES.md")),
+    access(path.join(installedRoot, ".agents", "skills", "use-fairygui-maker", "SKILL.md")),
+    access(path.join(installedRoot, ".claude", "skills", "use-fairygui-maker", "SKILL.md")),
+  ])
+  const bundledLicenses = await readFile(path.join(installedRoot, "dist", "web", "THIRD_PARTY_LICENSES.md"), "utf8")
+  for (const marker of ["@openfairygui/core", "react -", "class-variance-authority", "lucide-react"]) {
+    if (!bundledLicenses.includes(marker)) throw new Error(`Generated bundle licenses are missing: ${marker}`)
+  }
+  const bin = path.join(consumer, "node_modules", ".bin", process.platform === "win32" ? "fairygui-maker.cmd" : "fairygui-maker")
+  const help = await run(bin, ["--help"], { cwd: consumer })
+  if (!help.stdout.includes("fairygui-maker import") || !help.stdout.includes("fairygui-maker reimport") || !help.stdout.includes("view <project-path>") || !help.stdout.includes("--data-dir <path>")) throw new Error("Installed CLI help is incomplete")
+  const version = await run(bin, ["--version"], { cwd: consumer })
+  if (version.stdout.trim() !== expectedVersion) throw new Error(`Unexpected installed CLI version: ${version.stdout.trim()}`)
+  const importedDirectory = path.join(tempRoot, "imported-fig")
+  const imported = await run(bin, ["import", path.join(root, "test", "fixtures", "design-import", "basic-shapes.fig"), "--out", importedDirectory], { cwd: consumer })
+  const importResult = JSON.parse(imported.stdout)
+  if (importResult.source?.kind !== "fig" || importResult.report?.nodes < 1) throw new Error("Installed CLI did not return an import report")
+  await Promise.all([access(importResult.fairyPath), access(path.join(importedDirectory, "maker-import-state.json"))])
+  const reimport = JSON.parse((await run(bin, ["reimport", importedDirectory, "--dry-run"], { cwd: consumer })).stdout)
+  if (reimport.added?.length || reimport.changed?.length || reimport.removed?.length || reimport.conflict?.length || !reimport.preserved?.length) {
+    throw new Error("Installed CLI returned an unstable no-change reimport plan")
+  }
+  let overwriteError = ""
+  try {
+    await run(bin, ["import", path.join(root, "test", "fixtures", "design-import", "basic-shapes.fig"), "--out", importedDirectory], { cwd: consumer })
+  } catch (error) {
+    overwriteError = String(error)
+  }
+  if (!overwriteError.includes("EEXIST")) throw new Error("Installed CLI did not refuse an existing output directory")
+  let missingTokenError = ""
+  try {
+    await run(bin, ["--port", "0"], { cwd: consumer, env: { ...process.env, FAIRYGUI_MAKER_TOKEN: "" } })
+  } catch (error) {
+    missingTokenError = String(error)
+  }
+  if (!missingTokenError.includes("FAIRYGUI_MAKER_TOKEN is required when stdout is not an interactive terminal")) {
+    throw new Error("Installed CLI did not enforce an explicit token outside an interactive terminal")
+  }
+
+  const token = "release-smoke-token-with-24-chars"
+  host = spawn(process.execPath, [path.join(installedRoot, "scripts", "fairygui-maker.mjs"), "--port", "0", "--data-dir", path.join(tempRoot, "data")], {
+    cwd: consumer,
+    env: { ...process.env, FAIRYGUI_MAKER_TOKEN: token },
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+  let stdout = ""
+  host.stdout.on("data", (chunk) => { stdout += chunk })
+  let stderr = ""
+  host.stderr.on("data", (chunk) => { stderr += chunk })
+  const lines = createInterface({ input: host.stdout })
+  const origin = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Installed Host did not start\n${stderr}`)), 20_000)
+    lines.on("line", (line) => {
+      const match = /^Maker Host: (http:\/\/\S+)$/.exec(line)
+      if (!match) return
+      clearTimeout(timer)
+      resolve(match[1])
+    })
+    host.once("exit", (code) => {
+      clearTimeout(timer)
+      reject(new Error(`Installed Host exited ${code}\n${stderr}`))
+    })
+  })
+
+  const headers = { Authorization: `Bearer ${token}` }
+  const status = await fetch(`${origin}/api/status`, { headers })
+  if (!status.ok) throw new Error(await status.text())
+  const home = await fetch(origin, { headers })
+  if (!home.ok || !(await home.text()).includes("FairyGUI Workbench")) throw new Error("Installed Host did not serve the Workbench")
+  const toolNames = await initializeMcp(origin, token)
+  if (!toolNames.includes("list_viewer_components") || !toolNames.some((name) => name.startsWith("openfairygui_backend_"))) {
+    throw new Error("Installed Host MCP tool surface is incomplete")
+  }
+  if (stdout.includes(token) || stderr.includes(token)) throw new Error("Installed Host exposed its configured token in process output")
+  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), version: version.stdout.trim(), host: true, mcp: true }) + "\n")
+} finally {
+  if (host && host.exitCode === null) {
+    const exited = new Promise((resolve) => host.once("exit", resolve))
+    host.kill()
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))])
+  }
+  await rm(tempRoot, { recursive: true, force: true })
+}

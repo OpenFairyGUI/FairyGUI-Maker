@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use FairyGUI Maker"
+  short_description: "Operate FairyGUI projects and previews safely"
+  default_prompt: "Use $use-fairygui-maker to inspect, edit, or visually validate a FairyGUI project safely."
