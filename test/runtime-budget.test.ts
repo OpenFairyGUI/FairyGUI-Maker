@@ -31,7 +31,7 @@ test("runtime FUI inflation bounds output, ratio, malformed headers and remainin
   await assert.rejects(decompressFuiIfNeeded(source, AbortSignal.abort(new Error("cancelled"))), /cancelled/)
 })
 
-test("runtime stream collector cancels failures but only unlocks successfully consumed streams", async (t) => {
+test("runtime stream collector releases failed reads but retains completed body ownership", async () => {
   let cancelled = false
   const stream = new ReadableStream<Uint8Array>({
     pull(controller) { controller.enqueue(new Uint8Array(8)) },
@@ -39,6 +39,7 @@ test("runtime stream collector cancels failures but only unlocks successfully co
   })
   await assert.rejects(readBoundedStream(stream, 10), /stream_bytes/)
   assert.equal(cancelled, true)
+  assert.equal(stream.locked, false)
   await assert.rejects(readBoundedStream(new ReadableStream({ pull(c) { c.enqueue(new Uint8Array()) } }), 10, undefined, 2), /stream_chunks/)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error("load deadline")), 10)
@@ -47,12 +48,8 @@ test("runtime stream collector cancels failures but only unlocks successfully co
   } finally { clearTimeout(timer) }
   await assert.rejects(readBoundedStream(new ReadableStream({ start(c) { c.error(new Error("broken stream")) } }), 10), /broken stream/)
   const complete = new Blob([new Uint8Array([1, 2, 3])]).stream()
-  const reader = complete.getReader()
-  const cancel = t.mock.method(reader, "cancel")
-  t.mock.method(complete, "getReader", () => reader)
   const result = await readBoundedStream(complete, 3)
-  assert.equal(cancel.mock.callCount(), 0, "EOF must not cancel a successfully consumed response")
-  assert.equal(complete.locked, false)
+  assert.equal(complete.locked, true, "EOF must retain body ownership until fetch completion")
   assert.deepEqual(Array.from(result), [1, 2, 3])
 })
 

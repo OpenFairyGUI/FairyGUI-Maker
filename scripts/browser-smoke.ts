@@ -252,6 +252,22 @@ try {
   await page.goto(host.origin, { waitUntil: "domcontentloaded" })
   await page.getByText("1 packages · 1 files · 2 imports", { exact: false }).waitFor()
 
+  await evidence.step("lifecycle-player-fetch", async () => {
+    const probe = await context.newPage()
+    // Exercise the same network interception used by the delivery fault checks.
+    await probe.route("**/api/render-sessions/*/results", (route) => route.continue())
+    try {
+      for (let i = 0; i < 20; i++) {
+        const fetched = probe.waitForResponse((response) => response.url().endsWith(`/api/artifacts/${artifact.artifactId}/files/Smoke.fui`))
+        await probe.goto(`${host!.origin}/artifacts/${artifact.artifactId}/player`, { waitUntil: "domcontentloaded" })
+        // JS can receive every byte while Chromium still reports the request as cancelled.
+        if (!(await (await fetched).body()).equals(binary)) throw new Error("Player fetch did not complete with the published bytes")
+        await probe.getByText("AGENT READY", { exact: true }).waitFor()
+      }
+      return { freshLoads: 20, completedFileRequests: 20 }
+    } finally { await probe.close() }
+  })
+
   await page.goto(`${host.origin}/artifacts/${artifact.artifactId}/player`, { waitUntil: "domcontentloaded" })
   await page.getByText("AGENT READY", { exact: true }).waitFor()
   await waitFor(
