@@ -105,6 +105,7 @@ async function handleCommand(command: ViewerCommand) {
         Object.assign(runtime, view)
         Laya.stage.bgColor = view.background
         resize()
+        await nextRuntimeFrame()
         respond(command.requestId, { view, ...(runtime.current ? { observation: createObservation() } : {}) })
         return
       }

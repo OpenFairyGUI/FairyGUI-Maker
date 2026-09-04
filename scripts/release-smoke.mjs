@@ -6,6 +6,7 @@ import path from "node:path"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { createInterface } from "node:readline"
+import { verifyReleaseInputs } from "./verify-release-inputs.mjs"
 
 const root = path.resolve(import.meta.dirname, "..")
 const tempRoot = await mkdtemp(path.join(tmpdir(), "fairygui-maker-release-"))
@@ -121,25 +122,20 @@ async function verifyArtifactPersistence(installedRoot, origin, headers) {
 
 let host
 try {
-  const metadataErrors = []
-  if (!packageMetadata.license || packageMetadata.license === "UNLICENSED") metadataErrors.push("package.json must declare the approved project license")
-  await access(path.join(root, "LICENSE")).catch(() => { metadataErrors.push("the approved project LICENSE file is missing") })
-  const repositoryUrl = typeof packageMetadata.repository === "string" ? packageMetadata.repository : packageMetadata.repository?.url
-  if (!repositoryUrl) metadataErrors.push("package.json.repository must match the public release repository")
-  if (metadataErrors.length) throw new Error(`Release metadata is incomplete: ${metadataErrors.join("; ")}`)
+  await access(path.join(root, "LICENSE"))
+  await verifyReleaseInputs(root)
   const notices = await readFile(path.join(root, "THIRD_PARTY_NOTICES.md"), "utf8")
-  for (const file of ["laya.core.js", "laya.webgl_2D.js", "fairygui.js"]) {
-    const digest = createHash("sha256").update(await readFile(path.join(root, "public", "viewer-runtime", file))).digest("hex")
-    if (!notices.includes(digest)) throw new Error(`Third-party notice hash is stale for ${file}`)
-  }
   for (const marker of ["SIL OPEN FONT LICENSE Version 1.1", "pako 2.2.0", "Zlib License text"]) {
     if (!notices.includes(marker)) throw new Error(`Third-party notice is missing: ${marker}`)
   }
 
+  console.log("Release smoke: packing candidate")
   await run(npmCommand, ["pack", "--silent", "--pack-destination", tempRoot], { env: npmEnv })
   const tarballs = (await readdir(tempRoot)).filter((file) => file.endsWith(".tgz"))
   if (tarballs.length !== 1) throw new Error(`Expected one package tarball, found ${tarballs.length}`)
   const tarball = path.join(tempRoot, tarballs[0])
+  const tarballSha256 = createHash("sha256").update(await readFile(tarball)).digest("hex")
+  console.log("Release smoke: installing tarball in a fresh consumer")
   await run(npmCommand, ["install", "--prefix", consumer, "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", tarball], { env: npmEnv })
 
   const installedRoot = path.join(consumer, "node_modules", packageMetadata.name)
@@ -150,14 +146,25 @@ try {
     access(path.join(installedRoot, "README.md")),
     access(path.join(installedRoot, "LICENSE")),
     access(path.join(installedRoot, "THIRD_PARTY_NOTICES.md")),
+    access(path.join(installedRoot, "vendor-runtime.lock.json")),
     access(path.join(installedRoot, ".agents", "skills", "use-fairygui-maker", "SKILL.md")),
     access(path.join(installedRoot, ".claude", "skills", "use-fairygui-maker", "SKILL.md")),
   ])
+  const lockText = await readFile(path.join(installedRoot, "vendor-runtime.lock.json"), "utf8")
+  if (lockText !== await readFile(path.join(root, "vendor-runtime.lock.json"), "utf8")) throw new Error("Installed runtime lock differs from the source lock")
+  const installedLock = JSON.parse(lockText)
+  for (const file of installedLock.files) {
+    const bytes = await readFile(path.join(installedRoot, "dist/web/viewer-runtime", path.basename(file.path)))
+    if (bytes.length !== file.byteLength || createHash("sha256").update(bytes).digest("hex") !== file.sha256) {
+      throw new Error(`Installed runtime differs from the source lock: ${file.path}`)
+    }
+  }
   const bundledLicenses = await readFile(path.join(installedRoot, "dist", "web", "THIRD_PARTY_LICENSES.md"), "utf8")
   for (const marker of ["@openfairygui/core", "react -", "class-variance-authority", "lucide-react"]) {
     if (!bundledLicenses.includes(marker)) throw new Error(`Generated bundle licenses are missing: ${marker}`)
   }
   const bin = path.join(consumer, "node_modules", ".bin", process.platform === "win32" ? "fairygui-maker.cmd" : "fairygui-maker")
+  console.log("Release smoke: verifying installed CLI and Host")
   const help = await run(bin, ["--help"], { cwd: consumer })
   if (!help.stdout.includes("fairygui-maker import") || !help.stdout.includes("fairygui-maker reimport") || !help.stdout.includes("view <project-path>") || !help.stdout.includes("--data-dir <path>") || !help.stdout.includes("FAIRYGUI_MAKER_APPROVAL_TOKEN")) throw new Error("Installed CLI help is incomplete")
   const version = await run(bin, ["--version"], { cwd: consumer })
@@ -247,7 +254,7 @@ try {
   }
   await verifyArtifactPersistence(installedRoot, origin, headers)
   if ([token, approvalToken].some((secret) => stdout.includes(secret) || stderr.includes(secret))) throw new Error("Installed Host exposed a configured token in process output")
-  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), version: version.stdout.trim(), host: true, mcp: true, deterministicImport: true, saveGrants: true, runtimeIsolation: true, artifactPersistence: true }) + "\n")
+  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), tarballSha256, runtimeFiles: installedLock.files.length, version: version.stdout.trim(), host: true, mcp: true, deterministicImport: true, saveGrants: true, runtimeIsolation: true, artifactPersistence: true }) + "\n")
 } finally {
   if (host && host.exitCode === null) {
     const exited = new Promise((resolve) => host.once("exit", resolve))

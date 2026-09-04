@@ -5,14 +5,19 @@ FairyGUI Maker redistributes the following frozen browser runtimes for its Viewe
 - LayaAir 3.3.10 — MIT, Copyright (c) 2022 layabox, https://github.com/layabox/LayaAir
 - FairyGUI for Layabox — MIT, Copyright (c) 2015 fairygui.com, https://github.com/fairygui/FairyGUI-layabox
 
-The runtime files were copied without modification from the matching assets in
-`FairyGUI-Editor-Online`. Embedded copyright and license notices are retained.
+The runtime files are copied byte-for-byte from the prebuilt assets in
+[`FairyGUI-Editor-Online` at `7eb13112f97f1ce3881e31490e3c852dc40d6f79`](https://github.com/OpenFairyGUI/FairyGUI-Editor-Online/tree/7eb13112f97f1ce3881e31490e3c852dc40d6f79).
+`vendor-runtime.lock.json` records the exact source paths, sizes and SHA-256 values.
+Maker does not rebuild or patch these files. This pins the distributed binaries;
+it does not claim to reproduce the engine vendors' original compilation toolchains.
+Embedded copyright and license notices are retained. Git checkout conversion is
+disabled for these assets so Windows and Linux distribute the same bytes.
 
 | Distributed file | Bytes | SHA-256 |
 |---|---:|---|
 | `public/viewer-runtime/laya.core.js` | 713422 | `705b87809c65df552789b91a3c0060c61fe8fb7f27b8af153facedbefed1afce` |
 | `public/viewer-runtime/laya.webgl_2D.js` | 184160 | `3af12edc8b1c419453fc1d59609b353db8348cd8262063ae3d3c9e25d4ab3602` |
-| `public/viewer-runtime/fairygui.js` | 698425 | `932974a571598e000bf3a0321e8e882326f6a16aed510e18087529691bec8d48` |
+| `public/viewer-runtime/fairygui.js` | 681357 | `ca6ebabaedba26ade51470d74242c14f0a1c1fb5ff57f5eab84e009941202c69` |
 
 `fairygui.js` also retains two third-party easing notices embedded by the upstream bundle:
 

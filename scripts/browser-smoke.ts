@@ -132,7 +132,9 @@ try {
   const sessionId = initialized.headers.get("mcp-session-id")
   if (!sessionId) throw new Error("MCP session id missing")
 
-  browser = await chromium.launch({ headless: true, channel: browserChannel })
+  // Pin the rasterizer for synthetic CI fixtures, not the user's normal browser.
+  browser = await chromium.launch({ headless: true, channel: browserChannel, args: ["--use-gl=angle", "--use-angle=swiftshader"] })
+  environment.rasterizer = "angle-swiftshader"
   environment.browserVersion = browser.version()
   await evidence.step("evidence-gate-self-test", () => browserEvidenceSmoke(browser!))
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1, locale: "en-US", timezoneId: "UTC", colorScheme: "light", reducedMotion: "reduce" })
@@ -164,6 +166,8 @@ try {
     || JSON.stringify(replanned.buildPlan) !== JSON.stringify(firstPlan.buildPlan)) throw new Error("Workbench replan is not deterministic or revision-checked")
   await page.getByRole("button", { name: "编译 Viewer Preview" }).click()
   await page.getByText("Viewer Preview", { exact: true }).waitFor()
+  // Catalog registration precedes Workbench's initial view/render commands.
+  await page.getByText("AGENT READY", { exact: true }).waitFor()
   const draftId = new URL(page.url()).pathname.split("/").pop()!
   const draftDetail = await fetch(`${host.origin}/api/import-drafts/${draftId}`, { headers }).then((response) => response.json()) as { preview: { projectId: string } }
   const projectId = draftDetail.preview.projectId
@@ -249,6 +253,7 @@ try {
   await page.getByText("1 packages · 1 files · 2 imports", { exact: false }).waitFor()
 
   await page.goto(`${host.origin}/artifacts/${artifact.artifactId}/player`, { waitUntil: "domcontentloaded" })
+  await page.getByText("AGENT READY", { exact: true }).waitFor()
   await waitFor(
     () => callTool(host!.origin, sessionId, 4, "open_artifact_player", { artifactId: artifact.artifactId }).catch(() => ({ value: null } as any)),
     (result) => result.value?.browserRequired === false,

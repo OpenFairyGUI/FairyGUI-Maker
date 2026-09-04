@@ -42,6 +42,8 @@ Viewer 不能作为发布结果的证明；最终 `.fui` 行为应在 Player 中
 
 ## 快速开始
 
+截至 2026-09-04，`0.1.0` 仍是未发布候选版本，npm registry 查询 `fairygui-maker` 返回 404。首次发布前请按[本地开发](#本地开发)从源码启动；以下 npm 命令供发布后使用。发布状态与验收要求见[发布检查清单](./docs/release-checklist.md)。
+
 使用 npm 包只需要 Node.js `>=22.18`：
 
 ```powershell
@@ -238,7 +240,11 @@ pnpm exec playwright install --no-shell chromium
 pnpm verify:release
 ```
 
+门禁先校验 `vendor-runtime.lock.json`、实际 runtime 字节和第三方声明的一致性，`npm pack` 的 `prepack` 也执行该检查。需要联网复核固定上游快照时运行 `pnpm verify:runtime --upstream`；复制来源和复现边界见[第三方声明](./THIRD_PARTY_NOTICES.md)。
+
 每次浏览器测试在 `test-results/browser/run-*/` 留存 reference/actual/diff、阈值、来源/组件/Broker 版本和诊断报告；CI 成败均上传并保留 14 天。未预期 Console/CSP/网络错误阻断测试。Viewer 的真实 FIG 与 Player 的原生图形分别使用固定尺寸、独立零差异阈值，不覆盖系统字体保真。详见[批次 19：证据闭环](./docs/workbench.md#214-视觉与故障证据闭环批次-19)。
+
+测试固定使用 ANGLE/SwiftShader，以统一 Windows/Linux 的图形栅格化；不改变正常 Workbench 浏览器的 GPU 配置，也不放宽像素阈值。发布验收必须记录同一个提交的本地结果和完整 CI 矩阵，不能用不同提交的绿灯拼接通过。
 
 仅当渲染变化符合预期时显式生成新基线；CI 禁止该开关，功能或诊断检查失败不会写回 Golden。更新后审查图片并关闭开关重跑：
 
@@ -273,7 +279,7 @@ pnpm verify:release
 npm publish --access public
 ```
 
-GitHub CI 会在 Windows/Linux 与 Node.js 22/24 上执行构建和单元测试，并在 Linux Chromium 中运行同一套发布门禁。发布工作流只响应人工发布的 `v<package-version>` GitHub Release，并使用 npm Trusted Publishing；npm 会自动生成 provenance。
+GitHub CI 会在 Windows/Linux 与 Node.js 22/24 上执行 runtime 校验、构建和单元测试，并在 Linux Chromium 中运行同一套发布门禁。发布工作流只响应人工发布的 `v<package-version>` GitHub Release；首发采用临时 token，完成配置后采用 npm Trusted Publishing，并请求生成 provenance。
 
 首次发布前需确认 `fairygui-maker` 名称仍然可用。首次 GitHub Release 需要发布者临时配置可发布该包的 granular `NPM_TOKEN` repository secret。首次发布成功后，在 npm package settings 中把 `OpenFairyGUI/FairyGUI-Maker` 和 `release.yml` 配置为允许 `npm publish` 的 trusted publisher，并删除该 secret；后续发布由 OIDC 认证，不再保存长期 npm token。
 
@@ -282,5 +288,6 @@ GitHub CI 会在 Windows/Linux 与 Node.js 22/24 上执行构建和单元测试�
 - [产品定位与技术架构](./docs/architecture.md)
 - [Maker Workbench、Viewer、Player 与 render session 协议](./docs/workbench.md)
 - [第三方运行时与补充声明](./THIRD_PARTY_NOTICES.md)；生产构建还会生成并发行 `dist/web/THIRD_PARTY_LICENSES.md`
+- [发布检查清单](./docs/release-checklist.md)
 - [MIT License](./LICENSE)
 - [OpenFairyGUI](https://github.com/OpenFairyGUI/OpenFairyGUI)

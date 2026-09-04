@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "runtimeProfile": "layaair-3.3.10/fairygui",
+  "source": {
+    "repository": "https://github.com/OpenFairyGUI/FairyGUI-Editor-Online",
+    "commit": "7eb13112f97f1ce3881e31490e3c852dc40d6f79",
+    "method": "copy-prebuilt"
+  },
+  "files": [
+    {
+      "path": "public/viewer-runtime/laya.core.js",
+      "sourcePath": "assets/laya/laya.core.js",
+      "upstream": "https://github.com/layabox/LayaAir",
+      "license": "MIT",
+      "byteLength": 713422,
+      "sha256": "705b87809c65df552789b91a3c0060c61fe8fb7f27b8af153facedbefed1afce"
+    },
+    {
+      "path": "public/viewer-runtime/laya.webgl_2D.js",
+      "sourcePath": "assets/laya/laya.webgl_2D.js",
+      "upstream": "https://github.com/layabox/LayaAir",
+      "license": "MIT",
+      "byteLength": 184160,
+      "sha256": "3af12edc8b1c419453fc1d59609b353db8348cd8262063ae3d3c9e25d4ab3602"
+    },
+    {
+      "path": "public/viewer-runtime/fairygui.js",
+      "sourcePath": "assets/fairygui/fairygui.js",
+      "upstream": "https://github.com/fairygui/FairyGUI-layabox",
+      "license": "MIT",
+      "byteLength": 681357,
+      "sha256": "ca6ebabaedba26ade51470d74242c14f0a1c1fb5ff57f5eab84e009941202c69"
+    }
+  ]
+}

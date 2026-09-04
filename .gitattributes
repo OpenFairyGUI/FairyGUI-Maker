@@ -1,0 +1,2 @@
+# Vendored runtime checksums must be identical on Windows and Linux.
+/public/viewer-runtime/*.js -text

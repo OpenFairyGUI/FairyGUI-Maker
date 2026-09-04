@@ -19,6 +19,7 @@
 		"LICENSE",
 		"docs/",
 		"THIRD_PARTY_NOTICES.md",
+		"vendor-runtime.lock.json",
 		".agents/skills/use-fairygui-maker/",
 		".claude/skills/use-fairygui-maker/"
 	],
@@ -35,11 +36,12 @@
 		"build:web": "vite build",
 		"build:server": "vite build --config vite.server.config.ts",
 		"build": "pnpm typecheck && pnpm build:web && pnpm build:server",
-		"prepack": "pnpm build",
+		"prepack": "pnpm verify:runtime && pnpm build",
 		"pretest": "pnpm build",
 		"test": "node --import tsx --test",
 		"test:browser": "node --import tsx scripts/browser-smoke.ts",
-		"verify:release": "pnpm test && pnpm test:browser && pnpm audit --prod && node scripts/release-smoke.mjs"
+		"verify:runtime": "node scripts/verify-release-inputs.mjs",
+		"verify:release": "pnpm verify:runtime && pnpm test && pnpm test:browser && pnpm audit --prod && node scripts/release-smoke.mjs"
 	},
 	"dependencies": {
 		"@hono/node-server": "2.1.0",
