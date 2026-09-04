@@ -1,5 +1,5 @@
 import { isViewerConnectMessage } from "./viewer-protocol"
-import { readBoundedStream, RUNTIME_LIMITS } from "./runtime/resource-budget"
+import { readBoundedStream, withRuntimeLoad } from "./runtime/resource-budget"
 
 // The URL nonce is a per-document channel binding, never a Host authorization token.
 export function acceptRuntimeConnection(connect: (revision: string, port: MessagePort, imageProbeWorker: string) => Promise<void>) {
@@ -25,10 +25,11 @@ export async function prepareRuntimeFrame(frame: HTMLIFrameElement, signal: Abor
   if (!("credentialless" in frame)) throw new Error("Runtime 隔离需要支持 credentialless iframe 的 Chrome/Edge。")
   frame.setAttribute("credentialless", "")
   const { default: imageProbeWorkerUrl } = await import("./runtime/image-probe.worker?worker&url")
-  const workerSignal = AbortSignal.any([signal, AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
-  const workerResponse = await fetch(imageProbeWorkerUrl, { signal: workerSignal, redirect: "error", credentials: "omit" })
-  if (!workerResponse.ok || !workerResponse.body) throw new Error("Image probe worker is unavailable")
-  const imageProbeWorker = new TextDecoder().decode(await readBoundedStream(workerResponse.body, 256 * 1024, workerSignal))
+  const imageProbeWorker = new TextDecoder().decode(await withRuntimeLoad(signal, async (workerSignal) => {
+    const workerResponse = await fetch(imageProbeWorkerUrl, { signal: workerSignal, redirect: "error", credentials: "omit" })
+    if (!workerResponse.ok || !workerResponse.body) throw new Error("Image probe worker is unavailable")
+    return readBoundedStream(workerResponse.body, 256 * 1024, workerSignal)
+  }))
   signal.throwIfAborted()
   const target = frame.contentWindow
   if (!target) throw new Error("Runtime iframe 尚未就绪。")

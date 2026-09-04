@@ -149,6 +149,20 @@ export function checkRuntimeMetadata(value: unknown, depth = 0, budget = new Obs
   }
 }
 
+export async function withRuntimeLoad<T>(lifetime: AbortSignal, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  lifetime.throwIfAborted()
+  const controller = new AbortController()
+  const abort = () => controller.abort(lifetime.reason)
+  const timer = setTimeout(() => controller.abort(new DOMException("Runtime load timed out", "TimeoutError")), RUNTIME_LIMITS.loadMs)
+  lifetime.addEventListener("abort", abort, { once: true })
+  try { return await read(controller.signal) }
+  finally {
+    // Completed fetches must not be cancelled by a later deadline or session teardown.
+    clearTimeout(timer)
+    lifetime.removeEventListener("abort", abort)
+  }
+}
+
 export async function readBoundedStream(
   stream: ReadableStream<Uint8Array>,
   maxBytes: number,
@@ -175,12 +189,9 @@ export async function readBoundedStream(
     let offset = 0
     for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length }
     return result
-  } catch (error) {
-    void reader.cancel(error).catch(() => {})
-    throw error
   } finally {
     signal.removeEventListener("abort", abort)
-    // EOF needs only unlock; do not cancel a successfully consumed fetch.
+    void reader.cancel().catch(() => {})
     reader.releaseLock()
   }
 }

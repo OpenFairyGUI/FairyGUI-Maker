@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { randomBytes } from "node:crypto"
 import { deflateRawSync } from "node:zlib"
 import test from "node:test"
-import { checkImageDimensions, checkPngDimensions, checkRuntimeMetadata, decompressFuiIfNeeded, ObservationBudget, probeWebpDimensions, readBoundedStream, ResourceBudget, RUNTIME_LIMITS } from "../src/runtime/resource-budget"
+import { checkImageDimensions, checkPngDimensions, checkRuntimeMetadata, decompressFuiIfNeeded, ObservationBudget, probeWebpDimensions, readBoundedStream, ResourceBudget, RUNTIME_LIMITS, withRuntimeLoad } from "../src/runtime/resource-budget"
 
 function fui(payload: Uint8Array, compressed = true) {
   const header = Buffer.alloc(33)
@@ -31,7 +31,7 @@ test("runtime FUI inflation bounds output, ratio, malformed headers and remainin
   await assert.rejects(decompressFuiIfNeeded(source, AbortSignal.abort(new Error("cancelled"))), /cancelled/)
 })
 
-test("runtime stream collector cancels failures but only unlocks successfully consumed streams", async (t) => {
+test("runtime stream collector cancels over-limit, chunk-flood, interrupted and stalled streams", async () => {
   let cancelled = false
   const stream = new ReadableStream<Uint8Array>({
     pull(controller) { controller.enqueue(new Uint8Array(8)) },
@@ -46,14 +46,29 @@ test("runtime stream collector cancels failures but only unlocks successfully co
     await assert.rejects(readBoundedStream(new ReadableStream({ cancel() { cancelled = true } }), 10, controller.signal), /load deadline/)
   } finally { clearTimeout(timer) }
   await assert.rejects(readBoundedStream(new ReadableStream({ start(c) { c.error(new Error("broken stream")) } }), 10), /broken stream/)
-  const complete = new Blob([new Uint8Array([1, 2, 3])]).stream()
-  const reader = complete.getReader()
-  const cancel = t.mock.method(reader, "cancel")
-  t.mock.method(complete, "getReader", () => reader)
-  const result = await readBoundedStream(complete, 3)
-  assert.equal(cancel.mock.callCount(), 0)
-  assert.equal(complete.locked, false)
+  const result = await readBoundedStream(new Blob([new Uint8Array([1, 2, 3])]).stream(), 3)
   assert.deepEqual(Array.from(result), [1, 2, 3])
+})
+
+test("runtime load deadlines cancel active reads but detach from completed fetches", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  const lifetime = new AbortController()
+  let completed!: AbortSignal
+  assert.equal(await withRuntimeLoad(lifetime.signal, async (signal) => { completed = signal; return 3 }), 3)
+  t.mock.timers.tick(RUNTIME_LIMITS.loadMs)
+  lifetime.abort()
+  assert.equal(completed.aborted, false)
+  await assert.rejects(withRuntimeLoad(lifetime.signal, async () => assert.fail("aborted load started")), { name: "AbortError" })
+  for (const timeout of [false, true]) {
+    const active = new AbortController()
+    let cancelled = false
+    const pending = withRuntimeLoad(active.signal, (signal) => readBoundedStream(new ReadableStream({ cancel() { cancelled = true } }), 10, signal))
+    const rejected = assert.rejects(pending, timeout ? { name: "TimeoutError" } : /session closed/)
+    if (timeout) t.mock.timers.tick(RUNTIME_LIMITS.loadMs)
+    else active.abort(new Error("session closed"))
+    await rejected
+    assert.equal(cancelled, true)
+  }
 })
 
 test("runtime image and scene accounting reject oversized inputs before allocating textures/nodes", () => {
