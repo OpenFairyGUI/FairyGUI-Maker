@@ -1,4 +1,6 @@
 import { parseJta, type UamAssetResource, type UamComponentResource, type UamDisplayNode, type UamGearBinding, type UamTextProperties, type UamTransitionItem, type UamTransitionModel } from "@openfairygui/core"
+import { installResourceLoadBudget, loadRuntimeTexture, reserveImage } from "./image-budget"
+import { checkBudget, checkImageDimensions, checkRuntimeMetadata, ObservationBudget, ResourceBudget, RUNTIME_LIMITS } from "./resource-budget"
 import {
   isViewerConnectMessage,
   type ViewerControlKind,
@@ -98,8 +100,12 @@ const runtime = {
   prepared: new Map<string, PreparedAsset>(),
   diagnostics: [] as ViewerDiagnostic[],
   blobUrls: [] as string[],
-  loaderUrls: [] as string[],
+  loaderUrls: new Set<string>(),
+  imageUrls: new Set<string>(),
   ownedTextures: [] as any[],
+  ownedObjects: new Set<any>(),
+  budget: new ResourceBudget(),
+  loading: new AbortController(),
   bitmapFonts: [] as string[],
   tweeners: [] as any[],
   zoom: 1,
@@ -110,6 +116,8 @@ const runtime = {
 
 let bootPromise: Promise<void> | null = null
 let commandQueue = Promise.resolve()
+let connectionSequence = 0
+window.addEventListener("pagehide", () => runtime.loading.abort())
 
 window.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (event.origin !== location.origin || !isViewerConnectMessage(event.data) || event.ports.length !== 1) return
@@ -117,16 +125,22 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
 })
 
 async function connect(sourceRevision: string, port: MessagePort) {
+  const sequence = ++connectionSequence
   try {
     await (bootPromise ??= boot())
-    resetScene()
+    if (sequence !== connectionSequence) { port.close(); return }
     runtime.port?.close()
+    runtime.port = null
+    runtime.loading.abort()
+    await commandQueue
+    if (sequence !== connectionSequence) { port.close(); return }
+    resetScene()
     runtime.port = port
     runtime.sourceRevision = sourceRevision
     runtime.interactionSeq = 0
     commandQueue = Promise.resolve()
     port.onmessage = (event: MessageEvent<ViewerCommand>) => {
-      commandQueue = commandQueue.then(() => handleCommand(event.data))
+      commandQueue = commandQueue.then(() => runtime.port === port ? handleCommand(event.data) : undefined)
     }
     port.start()
     post({ kind: "ready", sourceRevision })
@@ -150,6 +164,7 @@ async function boot() {
   Object.assign(Laya.Config, { FPS: 60, isAntialias: true, useRetinalCanvas: false, isAlpha: false })
   await Laya.init(stageConfig)
   if (!fgui.GRoot.inst.displayObject.parent) Laya.stage.addChild(fgui.GRoot.inst.displayObject)
+  installResourceLoadBudget(runtime.loaderUrls, runtime.imageUrls)
   resize()
   window.addEventListener("resize", resize)
 }
@@ -181,12 +196,15 @@ async function handleCommand(command: ViewerCommand) {
         return
       case "apply-operations": {
         if (!runtime.current) throw new Error("请先渲染一个 FairyGUI 组件。")
-        const observations = command.operations.map(applyOperation)
+        checkRuntimeMetadata(command.operations)
+        const budget = new ObservationBudget()
+        const observations = command.operations.map((operation) => applyOperation(operation, budget))
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-        respond(command.requestId, { observations, observation: createObservation() })
+        respond(command.requestId, { observations, observation: createObservation(budget) })
         return
       }
       case "capture": {
+        checkImageDimensions(Math.max(1, innerWidth), Math.max(1, innerHeight))
         const canvas = Laya.stage.drawToCanvas(Math.max(1, innerWidth), Math.max(1, innerHeight), 0, 0)?.source as HTMLCanvasElement | undefined
         if (!canvas) throw new Error("LayaAir Canvas 尚未创建。")
         const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("Canvas 截图失败。")), "image/png"))
@@ -196,6 +214,7 @@ async function handleCommand(command: ViewerCommand) {
       }
     }
   } catch (error) {
+    if (command?.kind === "render") resetScene()
     respond(command.requestId, undefined, formatError(error))
   }
 }
@@ -230,9 +249,7 @@ async function renderScene(scene: ViewerScene): Promise<ViewerRendered> {
     height: Number(current.height || 0),
     transitions: rootEntry.resource.component.transitions.map(({ name }) => name),
     diagnostics: runtime.diagnostics.map((item) => ({ ...item })),
-    objectTree: snapshotObject(current),
-    controllers: snapshotControllers(),
-    availableTransitions: snapshotTransitions(),
+    ...createObservation(),
   }
 }
 
@@ -240,12 +257,12 @@ function validateScene(scene: ViewerScene) {
   if (scene?.schemaVersion !== 1 || !Array.isArray(scene.components) || !Array.isArray(scene.assets)) throw new Error("Viewer Scene 契约无效。")
   if (scene.sourceRevision !== runtime.sourceRevision) throw new Error("Viewer Scene 与当前工程版本不一致，请刷新工程。")
   if (scene.components.length + scene.assets.length > 5_000) throw new Error("Viewer Scene 资源数量超过上限。")
-  let totalBytes = 0
+  checkRuntimeMetadata(scene)
+  const budget = new ResourceBudget()
   for (const asset of scene.assets) {
     if (!(asset.data instanceof ArrayBuffer)) throw new Error(`Viewer 资产 ${asset.packageId}/${asset.resource.id} 缺少二进制数据。`)
-    totalBytes += asset.data.byteLength
+    budget.encoded(asset.data.byteLength)
   }
-  if (totalBytes > 256 * 1024 * 1024) throw new Error("Viewer Scene 二进制资源超过 256 MiB。")
 }
 
 async function prepareAssets() {
@@ -267,19 +284,25 @@ async function prepareAssets() {
 }
 
 async function loadTexture(data: ArrayBuffer, path: string) {
-  const url = createBlobUrl(data, mimeType(path, data))
-  runtime.loaderUrls.push(url)
-  const texture = await fgui.AssetProxy.inst.load(url, Laya.Loader.IMAGE)
+  const signal = AbortSignal.any([runtime.loading.signal, AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
+  const type = mimeType(path, data)
+  const image = await reserveImage(data, type, runtime.budget, signal)
+  const url = createBlobUrl(image.data, type)
+  runtime.imageUrls.add(url)
+  const texture = await loadRuntimeTexture(url, signal)
   if (!texture) throw new Error(`无法解码 Viewer 图片资源：${path}`)
   return texture
 }
 
 async function loadMovieClip(data: ArrayBuffer, resource: UamAssetResource) {
   const parsed = parseJta(new Uint8Array(data))
-  const textures = await Promise.all(parsed.textures.map((texture, index) => loadTexture(texture.raw.slice().buffer, `${resource.name}#${index}.png`)))
+  checkBudget(parsed.textures.length + parsed.frames.length + runtime.budget.textures, RUNTIME_LIMITS.textures, "textures")
+  const textures: any[] = []
+  for (const [index, texture] of parsed.textures.entries()) textures.push(await loadTexture(texture.raw.slice().buffer, `${resource.name}#${index}.png`))
   return parsed.frames.map((frame, index) => {
     if (frame.textureIndex < 0) return { addDelay: movieFrameDelay(resource, index, parsed.fps) }
     const base = textures[frame.textureIndex]
+    runtime.budget.texture()
     const texture = Laya.Texture.create(
       base,
       0,
@@ -317,6 +340,7 @@ function prepareBitmapFont(key: string, resource: UamAssetResource, data: ArrayB
   for (const glyph of parsed.glyphs) {
     let texture = glyph.img ? runtime.prepared.get(resourceKey(packageId, glyph.img))?.texture : undefined
     if (!texture && mainTexture && glyph.width > 0 && glyph.height > 0) {
+      runtime.budget.texture()
       texture = Laya.Texture.create(mainTexture, glyph.x, glyph.y, glyph.width, glyph.height)
       runtime.ownedTextures.push(texture)
     }
@@ -339,12 +363,15 @@ function prepareBitmapFont(key: string, resource: UamAssetResource, data: ArrayB
 }
 
 async function buildComponent(packageId: string, resourceId: string, path: string, ancestry: Set<string>): Promise<any> {
+  checkBudget(path.length, RUNTIME_LIMITS.stringLength, "object_path")
+  checkBudget(path.split("/").length - 2, RUNTIME_LIMITS.depth, "scene_depth")
+  runtime.loading.signal.throwIfAborted()
   const key = resourceKey(packageId, resourceId)
   const entry = runtime.components.get(key)
   if (!entry) return missingComponent(path, `找不到组件 ${key}`)
   if (ancestry.has(key)) return missingComponent(path, `循环组件引用 ${entry.packageName}/${entry.resource.name}`)
   const nextAncestry = new Set(ancestry).add(key)
-  const object = new fgui.GComponent()
+  const object = newObject(fgui.GComponent)
   object.name = entry.resource.name
   object.setSize(entry.resource.component.size.width, entry.resource.component.size.height)
   object.opaque = entry.resource.component.properties.opaque
@@ -362,7 +389,7 @@ async function buildComponent(packageId: string, resourceId: string, path: strin
   runtime.recordByObject.set(object, record)
 
   if (entry.resource.component.properties.bgColorEnabled) {
-    const background = new fgui.GGraph()
+    const background = newObject(fgui.GGraph)
     background.name = "__background"
     background.setSize(object.width, object.height)
     background.drawRect(0, null, entry.resource.component.properties.bgColor || "#000000")
@@ -389,6 +416,8 @@ async function buildComponent(packageId: string, resourceId: string, path: strin
 }
 
 async function buildNode(record: ComponentRecord, node: UamDisplayNode, path: string, ancestry: Set<string>) {
+  checkBudget(path.length, RUNTIME_LIMITS.stringLength, "object_path")
+  checkBudget(path.split("/").length - 2, RUNTIME_LIMITS.depth, "scene_depth")
   let object: any
   let naturalWidth = 0
   let naturalHeight = 0
@@ -401,11 +430,11 @@ async function buildNode(record: ComponentRecord, node: UamDisplayNode, path: st
     const derived = node as typeof node & { src: string; packageId: string }
     object = derived.src
       ? await buildComponent(derived.packageId || record.packageId, derived.src, path, ancestry)
-      : new fgui.GComponent()
+      : newObject(fgui.GComponent)
     naturalWidth = object.width
     naturalHeight = object.height
   } else if (node.kind === "image") {
-    object = new fgui.GImage()
+    object = newObject(fgui.GImage)
     const prepared = runtime.prepared.get(resourceKey(node.resource.packageId || record.packageId, node.resource.resourceId))
     const resource = prepared?.resource
     if (prepared && resource?.kind === "image") {
@@ -417,7 +446,7 @@ async function buildNode(record: ComponentRecord, node: UamDisplayNode, path: st
       object.image.tileGridIndice = resource.image.tileGridIndice
     } else addDiagnostic("error", "image_missing", path, `图片节点 ${node.name || node.id} 缺少源资源。`)
   } else if (node.kind === "movieClip") {
-    object = new fgui.GMovieClip()
+    object = newObject(fgui.GMovieClip)
     const prepared = runtime.prepared.get(resourceKey(node.resource.packageId || record.packageId, node.resource.resourceId))
     if (prepared?.resource.kind === "movieClip" && object.displayObject instanceof fgui.MovieClip) {
       naturalWidth = prepared.resource.dimensions.width
@@ -427,16 +456,16 @@ async function buildNode(record: ComponentRecord, node: UamDisplayNode, path: st
       object.displayObject.swing = prepared.resource.movieClip.swing
       object.displayObject.frames = prepared.frames
     } else addDiagnostic("error", "movie_clip_missing", path, `MovieClip 节点 ${node.name || node.id} 缺少 JTA 资源。`)
-  } else if (node.kind === "text") object = new fgui.GTextField()
-  else if (node.kind === "richText") object = new fgui.GRichTextField()
-  else if (node.kind === "textInput") object = new fgui.GTextInput()
-  else if (node.kind === "graph") object = new fgui.GGraph()
-  else if (node.kind === "group") object = new fgui.GGroup()
-  else if (node.kind === "list") object = new fgui.GList()
-  else if (node.kind === "tree") object = new fgui.GTree()
+  } else if (node.kind === "text") object = newObject(fgui.GTextField)
+  else if (node.kind === "richText") object = newObject(fgui.GRichTextField)
+  else if (node.kind === "textInput") object = newObject(fgui.GTextInput)
+  else if (node.kind === "graph") object = newObject(fgui.GGraph)
+  else if (node.kind === "group") object = newObject(fgui.GGroup)
+  else if (node.kind === "list") object = newObject(fgui.GList)
+  else if (node.kind === "tree") object = newObject(fgui.GTree)
   else if (node.kind === "loader") object = await buildLoader(record, node, path, ancestry)
   else {
-    object = new fgui.GComponent()
+    object = newObject(fgui.GComponent)
     addDiagnostic("warning", "node_runtime_partial", path, `节点类型 ${node.kind} 暂无对应的 Laya 运行时内容。`)
   }
 
@@ -455,7 +484,7 @@ async function buildLoader(record: ComponentRecord, node: Extract<UamDisplayNode
     const component = runtime.components.get(resourceKey(ref.packageId, ref.resourceId))
     if (component) return buildComponent(ref.packageId, ref.resourceId, path, ancestry)
   }
-  const loader = new fgui.GLoader()
+  const loader = newObject(fgui.GLoader)
   if (!ref) {
     if (node.url) addDiagnostic("warning", "external_loader_unsupported", path, `Loader 外部 URL 不在只读工程依赖中：${node.url}`)
     return loader
@@ -842,23 +871,28 @@ function activateComboBox(control: InteractiveControl, requestedIndex?: number, 
 }
 
 function openComboPopup(control: InteractiveControl) {
+  const count = 2 + control.items.length * 2
+  if (runtime.budget.nodes + count > RUNTIME_LIMITS.nodes) {
+    addDiagnosticOnce("error", "resource_budget_exceeded", control.path, "ComboBox popup exceeds scene_nodes")
+    return
+  }
   const rowHeight = Math.max(24, Math.min(48, control.object.height || 28))
   const visibleCount = Math.max(1, Math.min(control.items.length, control.visibleItemCount || 10))
-  const popup = new fgui.GComponent()
+  const popup = newObject(fgui.GComponent)
   popup.name = "__viewer_combo_popup"
   popup.setSize(Math.max(80, control.object.width), rowHeight * visibleCount)
-  const background = new fgui.GGraph()
+  const background = newObject(fgui.GGraph)
   background.setSize(popup.width, popup.height)
   background.drawRect(1, "#52525b", "#18181b")
   background.touchable = false
   popup.addChild(background)
   for (let index = 0; index < control.items.length; index += 1) {
-    const row = new fgui.GComponent()
+    const row = newObject(fgui.GComponent)
     row.name = `item:${index}`
     row.setXY(0, index * rowHeight)
     row.setSize(popup.width, rowHeight)
     row.opaque = true
-    const label = new fgui.GTextField()
+    const label = newObject(fgui.GTextField)
     label.setSize(row.width, row.height)
     label.fontSize = Math.max(12, Math.min(18, rowHeight - 10))
     label.color = index === control.selectedIndex ? "#60a5fa" : "#f4f4f5"
@@ -881,6 +915,13 @@ function openComboPopup(control: InteractiveControl) {
 
 function closeComboPopup(control: InteractiveControl) {
   if (!control.popup) return
+  for (let index = 0; index < control.popup.numChildren; index++) {
+    const child = control.popup.getChildAt(index)
+    for (let label = 0; label < (child.numChildren ?? 0); label++) runtime.ownedObjects.delete(child.getChildAt(label))
+    runtime.ownedObjects.delete(child)
+  }
+  runtime.budget.nodes -= 2 + (control.popup.numChildren - 1) * 2
+  runtime.ownedObjects.delete(control.popup)
   control.popup.removeFromParent?.()
   control.popup.dispose?.()
   control.popup = null
@@ -1301,7 +1342,7 @@ function transitionPair(values: unknown[], fallbackX: number, fallbackY: number,
   return [numberOr(values[0], fallbackX), numberOr(values[1], fallbackY)]
 }
 
-function applyOperation(operation: ViewerOperation) {
+function applyOperation(operation: ViewerOperation, budget: ObservationBudget) {
   const target = runtime.objects.get(operation.targetId)
   if (!target) throw new Error(`找不到 Viewer 对象 ID：${operation.targetId}`)
   if (operation.op === "set-controller-page") {
@@ -1309,18 +1350,18 @@ function applyOperation(operation: ViewerOperation) {
     if (!record || !setControllerPage(record, operation.controllerName, operation.pageId, true)) {
       throw new Error(`对象 ${operation.targetId} 不存在 Controller page：${operation.controllerName}/${operation.pageId}`)
     }
-    return snapshotObject(target)
+    return snapshotObject(target, budget)
   }
   if (operation.op === "play-transition") {
     const record = runtime.recordByObject.get(target)
     const transition = record?.resource.component.transitions.find(({ name }) => name === operation.transitionName)
     if (!record || !transition) throw new Error(`对象 ${operation.targetId} 不存在 Transition：${operation.transitionName}`)
     playTransition(record, transition, operation.times ?? 1)
-    return snapshotObject(target)
+    return snapshotObject(target, budget)
   }
   if (operation.op === "dispatch-event") {
     dispatchSemanticEvent(operation, target)
-    return snapshotObject(target)
+    return snapshotObject(target, budget)
   }
 
   const control = runtime.controls.get(operation.targetId)
@@ -1355,7 +1396,7 @@ function applyOperation(operation: ViewerOperation) {
     } else if (operation.property in target) target[operation.property] = operation.value
     else throw new Error(`对象 ${operation.targetId} 不支持 ${operation.property}。`)
   }
-  return snapshotObject(target)
+  return snapshotObject(target, budget)
 }
 
 function dispatchSemanticEvent(operation: ViewerDispatchEventOperation, target: any) {
@@ -1440,9 +1481,9 @@ function playSound(url: string, volume: number) {
 
 function missingComponent(path: string, message: string) {
   addDiagnostic("error", "component_missing", path, message)
-  const object = new fgui.GComponent()
+  const object = newObject(fgui.GComponent)
   object.setSize(180, 40)
-  const text = new fgui.GTextField()
+  const text = newObject(fgui.GTextField)
   text.setSize(180, 40)
   text.color = "#ef4444"
   text.text = message
@@ -1456,17 +1497,25 @@ function registerObject(path: string, object: any) {
   runtime.objectPaths.set(object, path)
 }
 
+function newObject(type: new () => any) {
+  runtime.budget.node(1)
+  const object = new type()
+  runtime.ownedObjects.add(object)
+  return object
+}
+
 function objectPath(object: any) {
   return runtime.objectPaths.get(object) ?? "viewer"
 }
 
-function snapshotObject(object: any): ViewerObjectSnapshot {
+function snapshotObject(object: any, budget: ObservationBudget, depth = 1): ViewerObjectSnapshot {
+  budget.node(depth)
   const path = objectPath(object)
   const control = runtime.controls.get(path)
   const snapshot: ViewerObjectSnapshot = {
-    id: path,
-    name: String(object?.name ?? ""),
-    type: String(object?.constructor?.name ?? "GObject"),
+    id: budget.text(path),
+    name: budget.text(object?.name),
+    type: budget.text(object?.constructor?.name ?? "GObject"),
     x: Number(object?.x ?? 0),
     y: Number(object?.y ?? 0),
     width: Number(object?.width ?? 0),
@@ -1480,33 +1529,38 @@ function snapshotObject(object: any): ViewerObjectSnapshot {
     if (["slider", "progressBar", "scrollBar"].includes(control.kind)) snapshot.value = control.value
     if (["comboBox", "list", "tree"].includes(control.kind)) snapshot.selectedIndex = control.selectedIndex
   }
-  if (typeof object?.text === "string") snapshot.text = object.text
-  if (Number(object?.numChildren ?? 0) > 0) snapshot.children = Array.from({ length: object.numChildren }, (_, index) => snapshotObject(object.getChildAt(index)))
+  if (typeof object?.text === "string") snapshot.text = budget.text(object.text)
+  checkBudget(object.numChildren ?? 0, RUNTIME_LIMITS.nodes, "observation_nodes")
+  if (Number(object?.numChildren ?? 0) > 0) snapshot.children = Array.from({ length: object.numChildren }, (_, index) => snapshotObject(object.getChildAt(index), budget, depth + 1))
   return snapshot
 }
 
-function snapshotControllers() {
+function snapshotControllers(budget: ObservationBudget) {
   return [...runtime.records.values()].flatMap((record) => record.resource.component.controllers.map((controller) => {
+    budget.entry()
     const selectedIndex = record.controllers.get(controller.name) ?? controller.selectedIndex
     const page = controller.pages[selectedIndex]
     return {
-      targetId: record.path,
-      name: controller.name,
+      targetId: budget.text(record.path),
+      name: budget.text(controller.name),
       selectedIndex,
-      pageId: page?.id ?? "",
-      pageName: page?.name ?? "",
-      pages: controller.pages.map(({ id, name }) => ({ id, name })),
+      pageId: budget.text(page?.id),
+      pageName: budget.text(page?.name),
+      pages: controller.pages.map(({ id, name }) => { budget.entry(); return { id: budget.text(id), name: budget.text(name) } }),
     }
   }))
 }
 
-function snapshotTransitions(): ViewerObservation["availableTransitions"] {
-  return [...runtime.records.values()].flatMap((record) => record.resource.component.transitions.map(({ name }) => ({ targetId: record.path, name })))
+function snapshotTransitions(budget: ObservationBudget): ViewerObservation["availableTransitions"] {
+  return [...runtime.records.values()].flatMap((record) => record.resource.component.transitions.map(({ name }) => {
+    budget.entry()
+    return { targetId: budget.text(record.path), name: budget.text(name) }
+  }))
 }
 
-function createObservation(): ViewerObservation {
+function createObservation(budget = new ObservationBudget()): ViewerObservation {
   if (!runtime.current) throw new Error("请先渲染一个 FairyGUI 组件。")
-  return { objectTree: snapshotObject(runtime.current), controllers: snapshotControllers(), availableTransitions: snapshotTransitions() }
+  return { objectTree: snapshotObject(runtime.current, budget), controllers: snapshotControllers(budget), availableTransitions: snapshotTransitions(budget) }
 }
 
 function findChildByName(root: any, name: string): any | null {
@@ -1550,10 +1604,15 @@ function resize() {
 }
 
 function resetScene() {
+  runtime.loading.abort()
+  runtime.loading = new AbortController()
   killTweeners()
   for (const control of runtime.controls.values()) closeComboPopup(control)
   fgui.GRoot?.inst?.removeChildren?.(0, -1, false)
-  runtime.current?.dispose?.()
+  for (const object of runtime.ownedObjects) {
+    if (!object.parent && !object.isDisposed) { try { object.dispose() } catch {} }
+  }
+  runtime.ownedObjects.clear()
   runtime.current = null
   runtime.rootRecord = null
   for (const fontName of runtime.bitmapFonts) Laya.Text.unregisterBitmapFont?.(fontName, true)
@@ -1565,7 +1624,8 @@ function resetScene() {
   for (const url of runtime.loaderUrls) {
     try { Laya.loader.clearRes?.(url) } catch {}
   }
-  runtime.loaderUrls = []
+  runtime.loaderUrls.clear()
+  runtime.imageUrls.clear()
   for (const url of runtime.blobUrls) URL.revokeObjectURL(url)
   runtime.blobUrls = []
   runtime.scene = null
@@ -1580,6 +1640,7 @@ function resetScene() {
   runtime.assets.clear()
   runtime.prepared.clear()
   runtime.diagnostics = []
+  runtime.budget = new ResourceBudget()
 }
 
 function killTweeners() {
@@ -1609,6 +1670,7 @@ function addDiagnosticOnce(level: ViewerDiagnostic["level"], code: string, path:
 function createBlobUrl(data: ArrayBuffer, type: string) {
   const url = URL.createObjectURL(new Blob([data], { type }))
   runtime.blobUrls.push(url)
+  runtime.loaderUrls.add(url)
   return url
 }
 
@@ -1720,5 +1782,5 @@ function post(message: ViewerRuntimeMessage) {
 }
 
 function formatError(error: unknown) {
-  return error instanceof Error ? error.message : String(error)
+  return (error instanceof Error ? error.message : String(error)).slice(0, 2_000)
 }

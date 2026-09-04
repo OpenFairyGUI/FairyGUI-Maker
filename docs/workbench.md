@@ -116,9 +116,32 @@ Project Source Client 属于 Workbench Shell 的同源浏览器服务，而不�
 
 取消 Artifact 使用 `DELETE /api/artifact-imports/:importId`；取消 Draft 沿用 `DELETE /api/import-drafts/:draftId?expectedRevision=...`。取消、断流或超时会关闭流并清理临时文件；超时返回 `408`，容量或并发已满返回 `503`。Artifact 完成阶段与写入、取消互斥，Host 同时只 finalize 一个 Artifact，忙碌返回 `409`。Draft 沿用已有变更队列。Host 每分钟及创建新上传前清理过期上传，关闭时中止活跃二进制流；重启清理 Artifact 未完成目录与 Draft 孤立 `.part`。已完成上传的 Draft 仍保留原有七天有效期。
 
-multipart 继续使用原生 `formData()`，但解析前已有固定总量限制，并非全流式解析器；浏览器 SHA-256 也仅逐个缓冲已限制为 128 MiB 的文件。容量配额针对待完成源文件声明，不包括已完成 Artifact/生成工程的长期占用或有界的重试暂存副本。FUI 解压、解码像素预算及证据持久化事务属于后续批次，不把本批次的上传限制当作其保护。
+multipart 继续使用原生 `formData()`，但解析前已有固定总量限制，并非全流式解析器；浏览器 SHA-256 也仅逐个缓冲已限制为 128 MiB 的文件。容量配额针对待完成源文件声明，不包括已完成 Artifact/生成工程的长期占用或有界的重试暂存副本。FUI 解压与解码像素预算由批次 11 单独提供；证据持久化事务仍属后续工作，不把上传限制当作这些边界的保护。
 
 验证入口：`test/uploads.test.ts` 覆盖实际 HTTP、Chunked/伪报长度、超限、摘要冲突、取消、孤立临时文件、容量、TTL、finalize 互斥和并发释放；`pnpm test:browser` 覆盖浏览器摘要上传、FIG Draft、Visual Evidence 与 Viewer/Player（目录选择器结果为测试注入，不代表系统授权弹窗已自动验证）。
+
+### 2.6 Runtime 资源预算（批次 11）
+
+Viewer 与 Player 复用 `src/runtime/resource-budget.ts`，上传成功不代表资源一定能在浏览器中播放。超限返回 `resource_budget_exceeded: <资源名>`；失败的 render 回收当前场景、未挂接对象、纹理缓存与 Blob URL，后续合法 render 可以继续使用同一 iframe。
+
+| 运行时边界 | 固定上限 |
+|---|---|
+| 单个编码文件 / 一次场景或 Artifact 的编码资源 | 128 MiB / 256 MiB |
+| FUI 解压 | 包头与全部包解压结果累计 256 MiB；每包压缩体最多膨胀 100 倍 |
+| 单次 fetch + 解压或图片加载 | 15 秒；流最多 16,384 块，逐块检查实际字节；重连/离开页面中止加载 |
+| 单张图片 / 截图 | 宽高各最多 8,192，面积最多 8,388,608 像素 |
+| 已解码图片的 RGBA 估算 / 纹理句柄 | 累计 128 MiB / 1,024 个（包含 atlas 子纹理、MovieClip 帧、位图字体字形） |
+| 场景 | 最多 5,000 个实际创建对象，组件/显示树深度最多 64；重复引用按展开后的实例计数 |
+| Observation | 一次结果合计最多 5,000 个对象节点、10,000 个条目（含 Controller/Page/Transition）、64 层；单字符串 16,384 个 UTF-16 code unit，所有字符串累计 1,048,576 个 |
+| 源元数据 | 同样限制字符串、数组和总条目；结构深度 128。Player 在原生包解析前检查字符串表，所有包累计最多 10,000 个字符串表条目、5,000 个资源 |
+
+PNG 在任何解码器运行前检查 IHDR；PNG/JPEG 的完整校验复用 Core 并放入可终止 Worker。静态 SVG 复用 Core 安全校验，再固定经过预算检查的栅格尺寸；静态 WebP 检查 RIFF canvas 与实际位流的尺寸（[格式规范](https://developers.google.com/speed/webp/docs/riff_container)）。APNG、动态 WebP 及无法安全预检的图片拒绝播放。图片只从已校验的字节生成 Blob 后顺序解码，Player 不再直接把任意图片 URL 交给解码器。原生外部 Loader/3D URL 被拒绝；底层资源加载器也只接受当前场景登记的 URL，未登记的富文本内嵌图片/模板视为缺失资源，不触发额外下载和解码。
+
+Player 仍使用原生 `UIPackage`，在工厂、组件构造与纹理创建边界计数；不另写一套 FUI 组件解析器，也不改动冻结的 vendor 文件。构造失败会恢复原生 constructing 计数并回收部分实例。Observation 超限明确失败，不截断、更不把不完整树伪装为完整结果；批量 operation 的子结果与末尾 observation 共用同一预算。
+
+这些是输入与资源句柄预算，不是浏览器进程的硬内存沙箱：纹理估算不含驱动/mipmap/字体排版等额外开销；音频不再预解码，PCM 时长预算和组件级按需资源闭包仍未实现。ACK/outbox、Broker 状态统一与 iframe 权限隔离继续留在后续批次。
+
+验证：`test/runtime-budget.test.ts` 覆盖压缩炸弹、绝对/累计输出限制、流中断/超时/块数、图像尺寸、纹理、节点、Observation 与稀疏元数据；`pnpm test:browser` 中的 `scripts/runtime-budget-smoke.ts` 验证真实 Viewer/Player 的超深/展开超量场景、巨型 PNG/SVG、MovieClip 与原生 atlas 子纹理上限、正常 PNG/JPEG/WebP/SVG、Observation 拒绝、重连后的迟到解码回收及 Artifact A→B→正常场景的缓存释放。
 
 ## 3. 核心领域契约
 

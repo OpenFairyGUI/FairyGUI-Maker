@@ -7,6 +7,8 @@ import { NodeIO } from "@openfairygui/core/node"
 import { chromium } from "playwright"
 
 import { startMakerHost } from "../src/server/index"
+import type { ArtifactManifest } from "../src/artifact-protocol"
+import { runtimeBudgetSmoke } from "./runtime-budget-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -88,7 +90,7 @@ try {
   if (!uploaded.ok) throw new Error(await uploaded.text())
   const completed = await fetch(`${host.origin}/api/artifact-imports/${importId}/complete`, { method: "POST", headers })
   if (!completed.ok) throw new Error(await completed.text())
-  const { artifact } = await completed.json() as { artifact: { artifactId: string } }
+  const { artifact } = await completed.json() as { artifact: ArtifactManifest }
 
   const initialized = await fetch(`${host.origin}/mcp`, {
     method: "POST",
@@ -105,7 +107,8 @@ try {
   if (!sessionId) throw new Error("MCP session id missing")
 
   browser = await chromium.launch({ headless: true, channel: browserChannel })
-  const page = await browser.newPage()
+  const context = await browser.newContext()
+  const page = await context.newPage()
   const pageErrors: string[] = []
   page.on("pageerror", (error) => pageErrors.push(error.message))
   await page.goto(`${host.origin}/design-import?token=${token}`, { waitUntil: "domcontentloaded" })
@@ -192,13 +195,14 @@ try {
   })
   assertPng(playerRender.body)
   if (!JSON.stringify(playerRender.value).includes("TITLE001")) throw new Error("Player observation did not include the rendered title")
+  const runtimeBudgets = await runtimeBudgetSmoke(page.context(), host.origin, artifact, publishDir)
   if (pageErrors.length) throw new Error(`Browser page errors: ${pageErrors.join("; ")}`)
 
   await fetch(`${host.origin}/mcp`, {
     method: "DELETE",
     headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
   })
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, runtimeBudgets, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
 } finally {
   await browser?.close()
   await host?.close()

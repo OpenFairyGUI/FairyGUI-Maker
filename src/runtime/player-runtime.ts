@@ -1,4 +1,6 @@
 import type { ArtifactManifest, ArtifactPackage, PlayerRenderSource } from "../artifact-protocol"
+import { installResourceLoadBudget, loadRuntimeTexture, reserveImage } from "./image-budget"
+import { checkBudget, checkImageDimensions, checkRuntimeMetadata, decompressFuiIfNeeded, ObservationBudget, readBoundedStream, ResourceBudget, RUNTIME_LIMITS } from "./resource-budget"
 import {
   isViewerConnectMessage,
   type ViewerCommand,
@@ -22,6 +24,13 @@ const runtime = {
   objects: new Map<string, any>(),
   paths: new WeakMap<object, string>(),
   packageIds: [] as string[],
+  loaderUrls: new Set<string>(),
+  imageUrls: new Set<string>(),
+  blobUrls: [] as string[],
+  ownedTextures: [] as any[],
+  ownedObjects: new Set<any>(),
+  budget: new ResourceBudget(),
+  loading: new AbortController(),
   port: null as MessagePort | null,
   interactionSeq: 0,
   zoom: 1,
@@ -30,6 +39,8 @@ const runtime = {
 
 let bootPromise: Promise<void> | null = null
 let commandQueue = Promise.resolve()
+let connectionSequence = 0
+window.addEventListener("pagehide", () => runtime.loading.abort())
 
 window.addEventListener("message", (event: MessageEvent<unknown>) => {
   const ping = event.data as { type?: string; nonce?: string } | null
@@ -42,16 +53,22 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
 })
 
 async function connect(sourceRevision: string, port: MessagePort) {
+  const sequence = ++connectionSequence
   try {
     await (bootPromise ??= boot())
-    resetArtifact()
+    if (sequence !== connectionSequence) { port.close(); return }
     runtime.port?.close()
+    runtime.port = null
+    runtime.loading.abort()
+    await commandQueue
+    if (sequence !== connectionSequence) { port.close(); return }
+    resetArtifact()
     runtime.port = port
     runtime.sourceRevision = sourceRevision
     runtime.interactionSeq = 0
     commandQueue = Promise.resolve()
     port.onmessage = (event: MessageEvent<ViewerCommand>) => {
-      commandQueue = commandQueue.then(() => handleCommand(event.data))
+      commandQueue = commandQueue.then(() => runtime.port === port ? handleCommand(event.data) : undefined)
     }
     port.start()
     post({ kind: "ready", sourceRevision })
@@ -75,6 +92,8 @@ async function boot() {
   Object.assign(Laya.Config, { FPS: 60, isAntialias: true, useRetinalCanvas: false, isAlpha: false })
   await Laya.init(resolution)
   if (!fgui.GRoot.inst.displayObject.parent) Laya.stage.addChild(fgui.GRoot.inst.displayObject)
+  installResourceLoadBudget(runtime.loaderUrls, runtime.imageUrls)
+  installConstructionBudget()
   bindInteractionEvents()
   resize()
   window.addEventListener("resize", resize)
@@ -107,12 +126,15 @@ async function handleCommand(command: ViewerCommand) {
         return
       case "apply-operations": {
         if (!runtime.current) throw new Error("请先播放一个 FairyGUI 组件。")
-        const observations = command.operations.map(applyOperation)
+        checkRuntimeMetadata(command.operations)
+        const budget = new ObservationBudget()
+        const observations = command.operations.map((operation) => applyOperation(operation, budget))
         await nextFrame()
-        respond(command.requestId, { observations, observation: createObservation() })
+        respond(command.requestId, { observations, observation: createObservation(budget) })
         return
       }
       case "capture": {
+        checkImageDimensions(Math.max(1, innerWidth), Math.max(1, innerHeight))
         const canvas = Laya.stage.drawToCanvas(Math.max(1, innerWidth), Math.max(1, innerHeight), 0, 0)?.source as HTMLCanvasElement | undefined
         if (!canvas) throw new Error("LayaAir Canvas 尚未创建。")
         const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("Canvas 截图失败。")), "image/png"))
@@ -124,6 +146,7 @@ async function handleCommand(command: ViewerCommand) {
         throw new Error("Player runtime 不接受工程态 Viewer Scene。")
     }
   } catch (error) {
+    if (command?.kind === "render-artifact") resetArtifact()
     respond(command.requestId, undefined, formatError(error))
   }
 }
@@ -165,74 +188,119 @@ async function renderArtifact(source: PlayerRenderSource): Promise<ViewerRendere
 async function loadArtifact(artifact: ArtifactManifest) {
   if (artifact.runtimeProfile !== "layaair-3.3.10/fairygui") throw new Error(`Player 不支持 runtime profile：${artifact.runtimeProfile}`)
   resetArtifact()
-  await preloadArtifactFiles(artifact)
+  for (const file of artifact.files) runtime.budget.encoded(file.size)
+  let inflatedBytes = 0
+  let packageItems = 0
+  const metadataBudget = new ObservationBudget()
   for (const pkg of sortPackages(artifact.packages)) {
     const binaryUrl = artifactFileUrl(artifact.artifactId, pkg.binaryPath)
-    const response = await fetch(binaryUrl)
-    if (!response.ok) throw new Error(`读取 FairyGUI 包失败：${pkg.binaryPath} (${response.status})`)
-    const bytes = await decompressFuiIfNeeded(new Uint8Array(await response.arrayBuffer()))
+    const signal = AbortSignal.any([runtime.loading.signal, AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
+    const bytes = await decompressFuiIfNeeded(await fetchArtifactFile(artifact, pkg.binaryPath, signal), signal, RUNTIME_LIMITS.inflatedBytes - inflatedBytes)
+    inflatedBytes += bytes.byteLength
+    packageItems += validatePackageMetadata(bytes, metadataBudget)
+    checkBudget(packageItems, RUNTIME_LIMITS.nodes, "package_items")
     const loaded = fgui.UIPackage.addPackage(binaryUrl.replace(/(?:\.fui|_fui\.bytes)$/i, ""), bytes.buffer)
-    if (loaded.id !== pkg.packageId || loaded.name !== pkg.packageName) throw new Error(`FairyGUI 包身份不匹配：${pkg.binaryPath}`)
     runtime.packageIds.push(loaded.id)
+    if (loaded.id !== pkg.packageId || loaded.name !== pkg.packageName) throw new Error(`FairyGUI 包身份不匹配：${pkg.binaryPath}`)
   }
+  await preloadArtifactFiles(artifact)
   runtime.artifactId = artifact.artifactId
   runtime.manifest = artifact
 }
 
 async function preloadArtifactFiles(artifact: ArtifactManifest) {
-  const assets = artifact.files.filter(({ path }) => !/(?:\.fui|_fui\.bytes)$/i.test(path)).map(({ path, mimeType }) => ({
-    url: artifactFileUrl(artifact.artifactId, path),
-    type: mimeType.startsWith("image/") ? Laya.Loader.IMAGE : mimeType.startsWith("audio/") ? Laya.Loader.SOUND : Laya.Loader.BUFFER,
-  }))
-  if (assets.length) await fgui.AssetProxy.inst.load(assets, null)
+  for (const file of artifact.files) {
+    if (/(?:\.fui|_fui\.bytes)$/i.test(file.path)) continue
+    const url = artifactFileUrl(artifact.artifactId, file.path)
+    runtime.loaderUrls.add(url)
+    // ponytail: PCM/audio duration is not a batch-11 budget; leave decoding to native playback.
+    if (file.mimeType.startsWith("audio/")) continue
+    const signal = AbortSignal.any([runtime.loading.signal, AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
+    const bytes = await fetchArtifactFile(artifact, file.path, signal)
+    if (file.mimeType.startsWith("image/")) {
+      const image = await reserveImage(bytes.buffer, file.mimeType, runtime.budget, signal)
+      const blobUrl = URL.createObjectURL(new Blob([image.data], { type: file.mimeType }))
+      runtime.blobUrls.push(blobUrl)
+      runtime.loaderUrls.add(blobUrl)
+      runtime.imageUrls.add(blobUrl)
+      runtime.imageUrls.add(url)
+      const texture = await loadRuntimeTexture(blobUrl, signal)
+      Laya.loader.cacheRes(url, texture)
+    } else {
+      Laya.loader.cacheRes(url, bytes.buffer)
+    }
+  }
+}
+
+function validatePackageMetadata(bytes: Uint8Array<ArrayBuffer>, budget: ObservationBudget) {
+  const buffer = new fgui.ByteBuffer(bytes.buffer)
+  buffer.pos = 9
+  budget.text(buffer.readUTFString())
+  budget.text(buffer.readUTFString())
+  buffer.skip(20)
+  const start = buffer.pos
+  if (!buffer.seek(start, 4)) throw new Error("FairyGUI string table is missing")
+  const count = buffer.getInt32()
+  checkBudget(count, RUNTIME_LIMITS.observationEntries, "package_strings")
+  for (let index = 0; index < count; index++) { budget.entry(); budget.text(buffer.readUTFString()) }
+  if (buffer.seek(start, 5)) {
+    const count = buffer.getInt32()
+    checkBudget(count, RUNTIME_LIMITS.observationEntries, "package_strings")
+    for (let index = 0; index < count; index++) {
+      budget.entry()
+      buffer.skip(2)
+      const length = buffer.getInt32()
+      checkBudget(length, RUNTIME_LIMITS.stringLength, "package_string")
+      budget.text(buffer.getCustomString(length))
+    }
+  }
+  if (!buffer.seek(start, 1)) throw new Error("FairyGUI item table is missing")
+  const items = buffer.getInt16()
+  checkBudget(items, RUNTIME_LIMITS.nodes, "package_items")
+  return items
+}
+
+async function fetchArtifactFile(artifact: ArtifactManifest, path: string, signal: AbortSignal) {
+  const file = artifact.files.find((file) => file.path === path)
+  if (!file) throw new Error(`Artifact file is not declared: ${path}`)
+  checkBudget(file.size, RUNTIME_LIMITS.fileBytes, "file_bytes")
+  const response = await fetch(artifactFileUrl(artifact.artifactId, path), { signal })
+  if (!response.ok || !response.body) throw new Error(`读取 Artifact 失败：${path} (${response.status})`)
+  const bytes = await readBoundedStream(response.body, file.size, signal)
+  if (bytes.byteLength !== file.size) throw new Error(`Artifact file size mismatch: ${path}`)
+  return bytes
 }
 
 function sortPackages(packages: ArtifactPackage[]) {
   const byId = new Map(packages.map((pkg) => [pkg.packageId, pkg]))
   const sorted: ArtifactPackage[] = []
   const visited = new Set<string>()
-  const visit = (pkg: ArtifactPackage) => {
+  const visiting = new Set<string>()
+  const visit = (pkg: ArtifactPackage, depth = 1) => {
+    checkBudget(depth, RUNTIME_LIMITS.depth, "package_depth")
+    if (visiting.has(pkg.packageId)) throw new Error("Artifact package dependency cycle")
     if (visited.has(pkg.packageId)) return
-    visited.add(pkg.packageId)
+    visiting.add(pkg.packageId)
     for (const dependency of pkg.dependencies) {
       const target = byId.get(dependency)
-      if (target) visit(target)
+      if (target) visit(target, depth + 1)
     }
+    visiting.delete(pkg.packageId)
+    visited.add(pkg.packageId)
     sorted.push(pkg)
   }
-  packages.forEach(visit)
+  packages.forEach((pkg) => visit(pkg))
   return sorted
-}
-
-async function decompressFuiIfNeeded(bytes: Uint8Array) {
-  if (bytes.byteLength < 13) throw new Error("FairyGUI 包头无效。")
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  if (view.getUint32(0, false) !== 0x46475549) throw new Error("FairyGUI 包 magic 无效。")
-  if (bytes[8] !== 1) return bytes
-  let offset = 9
-  for (let index = 0; index < 2; index += 1) {
-    if (offset + 2 > bytes.byteLength) throw new Error("FairyGUI 压缩包头无效。")
-    const length = view.getUint16(offset, false)
-    offset += 2 + length
-  }
-  offset += 20
-  if (offset >= bytes.byteLength) throw new Error("FairyGUI 压缩数据缺失。")
-  const compressed = new Uint8Array(bytes.subarray(offset)).buffer
-  const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"))
-  const inflated = new Uint8Array(await new Response(stream).arrayBuffer())
-  const result = new Uint8Array(offset + inflated.byteLength)
-  result.set(bytes.subarray(0, offset))
-  result[8] = 0
-  result.set(inflated, offset)
-  return result
 }
 
 function validateSource(source: PlayerRenderSource) {
   if (source?.artifact?.schemaVersion !== 1 || !Array.isArray(source.artifact.packages) || !Array.isArray(source.artifact.files)) throw new Error("Player Artifact 契约无效。")
   if (source.artifact.digest !== runtime.sourceRevision) throw new Error("Player Artifact 与当前会话版本不一致。")
+  checkRuntimeMetadata(source)
+  checkBudget(source.artifact.files.length, RUNTIME_LIMITS.nodes, "artifact_files")
 }
 
-function applyOperation(operation: ViewerOperation) {
+function applyOperation(operation: ViewerOperation, budget: ObservationBudget) {
   const target = runtime.objects.get(operation.targetId)
   if (!target) throw new Error(`Player 对象不存在：${operation.targetId}`)
   if (operation.op === "set-property") {
@@ -250,7 +318,7 @@ function applyOperation(operation: ViewerOperation) {
   } else {
     dispatchEvent(target, operation)
   }
-  return snapshotObject(target)
+  return snapshotObject(target, budget)
 }
 
 function setProperty(target: any, property: string, value: string | number | boolean | null) {
@@ -281,16 +349,17 @@ function dispatchEvent(target: any, operation: Extract<ViewerOperation, { op: "d
   } else target.displayObject.event(Laya.Event.CLICK)
 }
 
-function createObservation(): ViewerObservation {
+function createObservation(budget = new ObservationBudget()): ViewerObservation {
   if (!runtime.current) throw new Error("当前没有已播放组件。")
-  return { objectTree: snapshotObject(runtime.current), controllers: snapshotControllers(runtime.current), availableTransitions: snapshotTransitions(runtime.current) }
+  return { objectTree: snapshotObject(runtime.current, budget), controllers: snapshotControllers(runtime.current, budget), availableTransitions: snapshotTransitions(runtime.current, budget) }
 }
 
-function snapshotObject(object: any): ViewerObjectSnapshot {
+function snapshotObject(object: any, budget: ObservationBudget, depth = 1): ViewerObjectSnapshot {
+  budget.node(depth)
   const snapshot: ViewerObjectSnapshot = {
-    id: runtime.paths.get(object) ?? "",
-    name: String(object.name || ""),
-    type: object.constructor?.name || "GObject",
+    id: budget.text(runtime.paths.get(object)),
+    name: budget.text(object.name),
+    type: budget.text(object.constructor?.name || "GObject"),
     x: number(object.x),
     y: number(object.y),
     width: number(object.width),
@@ -303,35 +372,46 @@ function snapshotObject(object: any): ViewerObjectSnapshot {
   if ("selected" in object && typeof object.selected === "boolean") snapshot.selected = object.selected
   if ("value" in object && typeof object.value === "number") snapshot.value = object.value
   if ("selectedIndex" in object && typeof object.selectedIndex === "number") snapshot.selectedIndex = object.selectedIndex
-  if ("text" in object && typeof object.text === "string") snapshot.text = object.text
-  if (object instanceof fgui.GComponent) snapshot.children = Array.from({ length: object.numChildren }, (_, index) => snapshotObject(object.getChildAt(index)))
+  if ("text" in object && typeof object.text === "string") snapshot.text = budget.text(object.text)
+  if (object instanceof fgui.GComponent) {
+    checkBudget(object.numChildren, RUNTIME_LIMITS.nodes, "observation_nodes")
+    snapshot.children = Array.from({ length: object.numChildren }, (_, index) => snapshotObject(object.getChildAt(index), budget, depth + 1))
+  }
   return snapshot
 }
 
-function snapshotControllers(root: any) {
+function snapshotControllers(root: any, budget: ObservationBudget) {
   const snapshots: ViewerObservation["controllers"] = []
   walkObjects(root, (object) => {
     if (!(object instanceof fgui.GComponent)) return
     for (const controller of object.controllers as any[]) {
+      budget.entry()
+      checkBudget(controller.pageCount, RUNTIME_LIMITS.observationEntries, "observation_pages")
       snapshots.push({
-        targetId: runtime.paths.get(object) ?? "",
-        name: controller.name,
+        targetId: budget.text(runtime.paths.get(object)),
+        name: budget.text(controller.name),
         selectedIndex: controller.selectedIndex,
-        pageId: controller.selectedPageId ?? "",
-        pageName: controller.selectedPage ?? "",
-        pages: Array.from({ length: controller.pageCount }, (_, index) => ({ id: String(controller.getPageId(index) ?? ""), name: String(controller.getPageName(index) ?? "") })),
+        pageId: budget.text(controller.selectedPageId),
+        pageName: budget.text(controller.selectedPage),
+        pages: Array.from({ length: controller.pageCount }, (_, index) => {
+          budget.entry()
+          return { id: budget.text(controller.getPageId(index)), name: budget.text(controller.getPageName(index)) }
+        }),
       })
     }
   })
   return snapshots
 }
 
-function snapshotTransitions(root: any): ViewerObservation["availableTransitions"] {
+function snapshotTransitions(root: any, budget: ObservationBudget): ViewerObservation["availableTransitions"] {
   const snapshots: ViewerObservation["availableTransitions"] = []
   walkObjects(root, (object) => {
     if (!(object instanceof fgui.GComponent)) return
     const targetId = runtime.paths.get(object) ?? ""
-    snapshots.push(...transitionNames(object).map((name) => ({ targetId, name })))
+    for (const name of transitionNames(object)) {
+      budget.entry()
+      snapshots.push({ targetId: budget.text(targetId), name: budget.text(name) })
+    }
   })
   return snapshots
 }
@@ -339,7 +419,10 @@ function snapshotTransitions(root: any): ViewerObservation["availableTransitions
 function indexObjects(root: any, rootPath: string) {
   runtime.objects.clear()
   runtime.paths = new WeakMap()
-  const index = (object: any, objectPath: string) => {
+  const index = (object: any, objectPath: string, depth = 1) => {
+    checkBudget(depth, RUNTIME_LIMITS.depth, "scene_depth")
+    checkBudget(runtime.objects.size + 1, RUNTIME_LIMITS.nodes, "scene_nodes")
+    checkBudget(objectPath.length, RUNTIME_LIMITS.stringLength, "object_path")
     runtime.objects.set(objectPath, object)
     runtime.paths.set(object, objectPath)
     if (!(object instanceof fgui.GComponent)) return
@@ -349,7 +432,7 @@ function indexObjects(root: any, rootPath: string) {
       let segment = String(child.id || child.name || `@${childIndex}`).replaceAll("/", "%2F")
       if (used.has(segment)) segment = `${segment}:${childIndex}`
       used.add(segment)
-      index(child, `${objectPath}/${segment}`)
+      index(child, `${objectPath}/${segment}`, depth + 1)
     }
   }
   index(root, rootPath)
@@ -405,13 +488,16 @@ function playTransition(component: any, name?: string) {
   transition.play()
 }
 
-function walkObjects(root: any, visit: (object: any) => void) {
+function walkObjects(root: any, visit: (object: any) => void, depth = 1, budget = new ObservationBudget()) {
+  budget.entry(depth)
   visit(root)
   if (!(root instanceof fgui.GComponent)) return
-  for (let index = 0; index < root.numChildren; index += 1) walkObjects(root.getChildAt(index), visit)
+  for (let index = 0; index < root.numChildren; index += 1) walkObjects(root.getChildAt(index), visit, depth + 1, budget)
 }
 
 function resetArtifact() {
+  runtime.loading.abort()
+  runtime.loading = new AbortController()
   clearCurrent()
   for (const packageId of runtime.packageIds.reverse()) {
     try { fgui.UIPackage.removePackage(packageId) } catch { /* already removed */ }
@@ -419,13 +505,66 @@ function resetArtifact() {
   runtime.packageIds = []
   runtime.artifactId = ""
   runtime.manifest = null
+  for (const texture of runtime.ownedTextures) { try { texture.destroy?.() } catch {} }
+  runtime.ownedTextures = []
+  for (const url of runtime.loaderUrls) { try { Laya.loader.clearRes(url) } catch {} }
+  runtime.loaderUrls.clear()
+  runtime.imageUrls.clear()
+  for (const url of runtime.blobUrls) URL.revokeObjectURL(url)
+  runtime.blobUrls = []
+  runtime.budget = new ResourceBudget()
 }
 
 function clearCurrent() {
   fgui.GRoot.inst?.removeChildren(0, -1, true)
+  for (const object of runtime.ownedObjects) {
+    if (!object.parent && !object.isDisposed) { try { object.dispose() } catch {} }
+  }
+  runtime.ownedObjects.clear()
+  runtime.budget.nodes = 0
   runtime.current = null
   runtime.objects.clear()
   runtime.paths = new WeakMap()
+}
+
+function installConstructionBudget() {
+  // Guard the native allocation seams, not a second parser of FairyGUI component bytecode.
+  const factory = fgui.UIObjectFactory.newObject
+  let factoryDepth = 0
+  let componentDepth = 0
+  fgui.UIObjectFactory.newObject = function (...args: any[]) {
+    if (factoryDepth === 0) runtime.budget.node(Math.max(1, componentDepth + 1))
+    factoryDepth++
+    try {
+      const object = factory.apply(this, args)
+      if (object) runtime.ownedObjects.add(object)
+      return object
+    } finally { factoryDepth-- }
+  }
+  const construct = fgui.GComponent.prototype.constructFromResource2
+  fgui.GComponent.prototype.constructFromResource2 = function (...args: any[]) {
+    componentDepth++
+    try {
+      checkBudget(componentDepth, RUNTIME_LIMITS.depth, "scene_depth")
+      return construct.apply(this, args)
+    } finally { componentDepth-- }
+  }
+  const create = fgui.UIPackage.prototype.internalCreateObject
+  fgui.UIPackage.prototype.internalCreateObject = function (...args: any[]) {
+    const constructing = fgui.UIPackage._constructing
+    try { return create.apply(this, args) }
+    finally { fgui.UIPackage._constructing = constructing }
+  }
+  const texture = Laya.Texture.create
+  Laya.Texture.create = function (...args: any[]) {
+    runtime.budget.texture()
+    const result = texture.apply(this, args)
+    runtime.ownedTextures.push(result)
+    return result
+  }
+  // External Loader URLs would bypass the validated image bytes/cache above.
+  fgui.GLoader.prototype.loadExternal = function () { throw new Error("Player external Loader URLs are outside the runtime resource budget") }
+  fgui.GLoader3D.prototype.loadExternal = function () { throw new Error("Player external 3D resources are outside the runtime resource budget") }
 }
 
 function resize() {
@@ -462,5 +601,5 @@ function number(value: unknown) {
 }
 
 function formatError(error: unknown) {
-  return error instanceof Error ? error.message : String(error)
+  return (error instanceof Error ? error.message : String(error)).slice(0, 2_000)
 }
