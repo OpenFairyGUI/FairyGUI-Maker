@@ -123,7 +123,7 @@ try {
   const context = await browser.newContext()
   const iframeCredentials: Array<Promise<boolean>> = []
   context.on("request", (request) => {
-    if (request.frame().parentFrame()) iframeCredentials.push(request.allHeaders().then((headers) => !headers.cookie && !headers.authorization))
+    if (request.frame().parentFrame()) iframeCredentials.push(request.allHeaders().then((headers) => !headers.cookie && !headers.authorization, () => false))
   })
   context.on("page", (page) => {
     page.on("console", (message) => { if (message.type() === "error") browserDiagnostics.push(message.text().slice(0, 1000)) })
@@ -204,10 +204,18 @@ try {
   const importedResponse = page.waitForResponse((response) => response.request().method() === "POST" && /\/api\/artifact-imports\/[^/]+\/complete$/.test(response.url()))
   await page.getByRole("button", { name: "导入发布目录", exact: true }).click()
   const imported = await importedResponse
-  if (!imported.ok() || (await imported.json()).artifact?.artifactId !== artifact.artifactId) {
+  const importedArtifact = (await imported.json()).artifact as ArtifactManifest
+  if (!imported.ok() || importedArtifact?.artifactId !== artifact.artifactId || importedArtifact.importId === artifact.importId || importedArtifact.name !== "Smoke") {
     throw new Error("Browser Artifact SHA-256 upload did not reproduce the immutable artifact")
   }
   await page.getByRole("button", { name: "导入发布目录", exact: true }).waitFor()
+  // The same content gets a new provenance record, visible after cache invalidation and reload.
+  await page.getByText("2 components · 1 files · 2 imports", { exact: false }).waitFor()
+  await page.getByText("Smoke", { exact: true }).waitFor()
+  await page.reload({ waitUntil: "domcontentloaded" })
+  await page.getByText("2 components · 1 files · 2 imports", { exact: false }).waitFor()
+  await page.goto(host.origin, { waitUntil: "domcontentloaded" })
+  await page.getByText("1 packages · 1 files · 2 imports", { exact: false }).waitFor()
 
   await page.goto(`${host.origin}/artifacts/${artifact.artifactId}/player`, { waitUntil: "domcontentloaded" })
   await waitFor(
@@ -226,6 +234,22 @@ try {
   if (!JSON.stringify(playerRender.value).includes("TITLE001")) throw new Error("Player observation did not include the rendered title")
   const playerState = await brokerStateSmoke(page, "player", playerRender.value.renderSessionId,
     (name, args) => callTool(host!.origin, sessionId, 90, name, args))
+  const stablePlayer = (await callTool(host.origin, sessionId, 91, "open_artifact_player", { artifactId: artifact.artifactId })).value.renderSession
+  const relabel = await context.request.post(`${host.origin}/api/artifact-imports`, { data: { name: "Relabeled Smoke", files: [{ path: "Smoke.fui", size: binary.length, sha256: createHash("sha256").update(binary).digest("hex") }] } })
+  if (relabel.status() !== 201) throw new Error("Artifact relabel import failed")
+  const relabelId = (await relabel.json()).importId
+  if (!(await context.request.put(`${host.origin}/api/artifact-imports/${relabelId}/files?path=Smoke.fui`, { data: binary })).ok()
+    || (await context.request.post(`${host.origin}/api/artifact-imports/${relabelId}/complete`)).status() !== 201) throw new Error("Artifact relabel completion failed")
+  // Workbench queries stay fresh for 2s; a normal focus refetch starts only after that window.
+  await new Promise((resolve) => setTimeout(resolve, 2_100))
+  const metadataRefresh = page.waitForResponse((response) => response.request().method() === "GET" && new URL(response.url()).pathname === `/api/artifacts/${artifact.artifactId}`)
+  await page.bringToFront()
+  await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")))
+  await metadataRefresh
+  await page.getByRole("heading", { name: "Relabeled Smoke", exact: true }).waitFor()
+  await page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+  const relabeledPlayer = (await callTool(host.origin, sessionId, 92, "open_artifact_player", { artifactId: artifact.artifactId })).value.renderSession
+  if (relabeledPlayer?.renderSessionId !== stablePlayer.renderSessionId || relabeledPlayer?.semanticStateVersion !== stablePlayer.semanticStateVersion) throw new Error("Artifact provenance refresh reset the Player session")
   const playerDelivery = await rendererDeliverySmoke(page, "player", playerRender.value.renderSessionId, playerRender.value.value.observation.objectTree.id,
     (name, args) => callTool(host!.origin, sessionId, 70, name, args))
   const runtimeBudgets = await runtimeBudgetSmoke(page.context(), host.origin, artifact, publishDir)
@@ -239,7 +263,7 @@ try {
     method: "DELETE",
     headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
   })
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, projectRevision, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, artifactPersistence: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, projectRevision, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
 } catch (error) {
   process.stderr.write(browserDiagnostics.slice(-30).join("\n") + "\n")
   for (const page of browser?.contexts().flatMap((context) => context.pages()) ?? []) {

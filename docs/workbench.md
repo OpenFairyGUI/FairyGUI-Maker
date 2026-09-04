@@ -60,7 +60,7 @@ FairyGUI 视觉渲染发生在真实浏览器环境中。Workbench 不在 Node �
 
 运行时位于独立 iframe，以隔离 Laya 舞台、资源生命周期和故障。Viewer 不注册 `UIPackage`，也不调用 `publishBrowser`：iframe 每次只接收所选组件的结构化 Scene、递归组件依赖和必要资产字节，不获得工程目录句柄、完整工程或 `.fui`。
 
-Player 使用另一份 iframe runtime。Dashboard 或 Player 页由用户显式选择一个发布目录，浏览器只在本次导入中读取文件并上传给 Host；目录句柄不持久化，Host 也不获得源目录写权限。Host 校验安全相对路径、文件数和容量、`.fui` / `_fui.bytes` magic、包 ID、依赖与组件目录，为每个文件计算 SHA-256，并按整体 digest 固化到本地 Artifact Store。源目录之后发生变化不会修改既有 Artifact。
+Player 使用另一份 iframe runtime。Dashboard 或 Player 页由用户显式选择一个发布目录，浏览器只在本次导入中读取文件并上传给 Host；目录句柄不持久化，Host 也不获得源目录写权限。Host 校验安全相对路径、文件数和容量、`.fui` / `_fui.bytes` magic、包 ID、依赖与组件目录，为每个文件计算 SHA-256，并按整体 digest 固化到本地 Artifact Store。同内容复用字节，每次导入独立记录名称、来源和时间；源目录之后发生变化不会修改既有 Artifact。
 
 Player 的父页面按 `artifactId + digest` 读取 manifest 和资源，校验大小与 SHA-256 后通过 MessageChannel 转移字节；iframe 预加载图集，再以原生 `fgui.UIPackage` 注册包并创建组件，不直接请求 Host 文件 API，也不经过 Viewer 的 UAM renderer。Player 与 Viewer 共用 Host Broker、Renderer 交付循环、MessageChannel envelope、白名单 operation、observation 和 capture 契约。
 
@@ -273,6 +273,37 @@ Viewer 与 Player 均使用 `sandbox="allow-scripts"`，不再授予 `allow-same
 
 验证：`test/runtime-isolation.test.ts` 覆盖匿名静态白名单、API 认证/空来源/跨站拒绝、主动内容响应头、资源预算/摘要/取消。`scripts/runtime-isolation-smoke.ts` 和更新后的预算烟测使用真实 Chromium iframe，验证父 DOM/凭证/目录能力不可达、Host 请求与写请求被阻断、错误/旧 nonce 与兄弟窗口/重放拒绝、直接打开 runtime 仍为沙箱、主动上传仅下载，以及图片 Worker 回收、图集、音频 Blob 和离屏截图。原有 FIG golden、Broker 状态、交付故障、Revision 与 Host Save Grant 回归继续执行。
 
+### 2.12 Artifact 持久化语义（批次 17）
+
+`ArtifactBlob` 只描述内容：`artifactId + digest + runtimeProfile + files + packages`。`ArtifactImportRecord` 独立描述每次导入的 `importId + sequence + name + source + createdAt`，并绑定完整 `artifactId + digest`。同内容的新导入仍产生新记录，不覆盖旧名称、项目或 revision；来源字段是调用方的声明，不是 Host 对发布来源的认证。短 ID 仍为 SHA-256 前 24 位十六进制，但复用前必须比较完整摘要，不同摘要返回 `409 artifact_id_digest_collision`。
+
+磁盘格式与提交点：
+
+```text
+artifacts/<artifactId>/manifest.json     v2: { schemaVersion: 2, blob, initialImport }
+artifacts/<artifactId>/<published-file>  原始内容字节，不因再次导入而改写
+artifact-import-records/<importId>.json  同内容后续导入的独立记录
+```
+
+第一次完成先在私有 Import 目录校验文件、写入并 flush manifest，再通过目录 rename 一起提交内容与首条记录。重复导入先重新验证已有磁盘内容，再复用有界上传的 `.part → flush → rename` 写入新记录，最后才更新内存索引。记录写入失败不会替换已知来源；已提交内容的临时目录清理失败不会把成功改成含糊失败，遗留 Import 在下次启动清理。相同 `importId` 的完成重试返回原记录，重启后仍幂等；新建 Import 才新增记录。损坏或未索引的目标目录返回 `artifact_storage_conflict`，不自动删除或覆盖。
+
+旧 v1 manifest 以只读兼容方式恢复为 Blob 和 `legacy_<artifactId>` 首条记录，不改写旧磁盘文件。之后的新导入记录保存在独立目录；启动时逐项校验记录 ID、字段、序号及完整摘要关联，忽略损坏、重复或孤立记录，不用来源记录复活损坏内容。备份需包含整个 data dir；旧版本不能读取新 v2 格式，降级前应恢复兼容备份。
+
+文件 API 每次都读取并校验实际字节：沿路径拒绝 symlink/junction，拒绝硬链接及非普通文件，平台支持时使用 `O_NOFOLLOW`，比较打开前后的文件身份、大小与时间戳；最多分配声明的单文件大小（上限 128 MiB），读取时支持取消，然后对**即将返回的同一份 Buffer** 重算 SHA-256。FUI 元数据也从已验证字节通过既有 Core `BinaryReader` / 内存文件系统解析，不在校验后重新打开路径。运行期篡改、截断、增长、丢失或替换为链接返回 `409 artifact_file_integrity_mismatch`，不发送文件字节或旧 ETag；成功响应的 ETag 对应实际字节，使用 `Cache-Control: no-store`，保留批次 16 的下载/CSP/nosniff 策略。[Node 文件系统 API](https://nodejs.org/api/fs.html) 中的 `O_NOFOLLOW` 并非 Windows 可用标志，因此路径和句柄复核不能省略。
+
+查询契约：
+
+- `GET /api/artifacts?limit=50`：最多 100 条轻量摘要，提供 `fileCount/packageCount/componentCount/totalBytes/importCount`，不再返回 `files/packages` 大数组；Dashboard、Player 同步使用这些字段并显示最近一次导入。
+- `GET /api/artifacts/:id`：保留 API manifest v1 形状并增加 `importId`，默认投影最近一次来源；加 `?importId=...` 可查询某次历史来源，不改变内容或渲染身份。
+- `GET /api/artifacts/:id/import-records?limit=50&cursor=...`：按服务端递增序号倒序分页，最多 100 条；`nextCursor` 为下一页边界，新导入不移动已读取记录。
+- `GET /api/artifacts/:id/components?limit=100&cursor=0`：不可变组件目录按偏移分页，最多 500 条；返回 `packageId/packageName/componentId/componentName`、`total` 和 `nextCursor`。
+
+Player 连接只绑定 `artifactId + digest`，详情刷新中的来源名称/记录变化不会重建 iframe 或重置当前控件状态；页面重载或内容身份改变才建立新连接。
+
+本批沿用单 Host 独占一个 data dir 的边界，不增加多进程写锁、后台校验服务或第二套 CAS；不能同时启动多个 Host 写同一目录。保证应用提交点与进程重启恢复，不宣称跨平台断电事务（文件 flush 不等于所有平台上的目录 fsync），也不把同一 OS 用户可写的数据目录当作防篡改存储。字节校验是逐请求、单文件有界；Core 解析的额外内存复制与已加载 runtime 快照仍遵循现有资源预算，不提供浏览器已载入内容的磁盘变更推送。
+
+验证：`test/artifacts.test.ts` 覆盖重复来源、完成重试/重启、旧格式只读恢复、完整摘要冲突、提交失败、损坏目标保护、轻量列表和分页、同尺寸/不同尺寸篡改、硬链接/junction、读中修改及独立字节快照。`scripts/browser-smoke.ts` 验证真实上传去重后名称与导入次数的缓存刷新/重载、Dashboard 摘要、来源刷新不重置 Player，以及原生 Player 与其余批次回归。安装包烟测还覆盖实际消费者环境的导入记录、摘要与运行中篡改拒绝。
+
 ## 3. 核心领域契约
 
 接口使用稳定 ID，不使用显示名称、任意文件路径或屏幕坐标作为主键。
@@ -481,6 +512,8 @@ REST 供 Workbench WebUI 和 Renderer Client 使用。当前接口为：
 - `POST /api/artifact-imports/:importId/complete`
 - `GET /api/artifacts`
 - `GET /api/artifacts/:artifactId`
+- `GET /api/artifacts/:artifactId/import-records`
+- `GET /api/artifacts/:artifactId/components`
 - `GET /api/artifacts/:artifactId/files/*`
 
 REST handler 与 MCP tools 调用同一组应用函数，不分别实现发布、引用和渲染语义。

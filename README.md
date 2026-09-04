@@ -154,6 +154,8 @@ Host 同时提供带 bearer token 保护的 `/api/import-drafts` 创建、列表
 
 浏览器上传尚未完成的 Draft 和 Artifact Import 单独采用 30 分钟空闲有效期；每次成功上传文件续期。Host 按实际流量限制请求体，二进制先写 `.part`、校验后原子改名；Artifact manifest 必须为每个文件声明 SHA-256，同尺寸不同内容重试返回 `409`。JSON、视觉证据、并发、容量与取消接口见 [有界上传管线](./docs/workbench.md#25-有界上传管线批次-10)。
 
+Artifact 同内容只存一份字节，每次导入独立保留名称、来源和时间；完成请求跨重启幂等，列表显示最近一次来源和导入次数。文件读取时重新校验实际字节，篡改或链接替换返回 `409`。旧 manifest 只读兼容；备份应包含整个 data dir，且一个 data dir 只能由一个 Host 写入。格式与历史/分页 API 见 [Artifact 持久化语义](./docs/workbench.md#212-artifact-持久化语义批次-17)。
+
 ## CLI 只读预览
 
 Agent、批处理和视觉回归可以显式授权一个工程根目录：

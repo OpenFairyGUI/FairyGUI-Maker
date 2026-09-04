@@ -116,11 +116,12 @@ Maker 只补充面向用户任务的高层工具。Viewer 与 Artifact-first Pla
 
 ## 6. Viewer、Player 与发布产物
 
-一次发布目录导入生成一个内容寻址、不可变的 `artifactId`，并记录 manifest。导入完成和后续每次 Host 启动都会从实际文件重算校验信息，磁盘上的 manifest 不是信任源：
+发布字节组成内容寻址的 `ArtifactBlob`；每次导入产生独立 `ArtifactImportRecord`，同内容不重复存储字节，也不复用旧来源。导入完成、Host 重启和每次文件请求都验证实际内容；短 ID 复用前比较完整摘要。磁盘 v2 envelope 将 Blob 与首条记录原子提交，后续记录单独落盘，旧 v1 只读兼容。API 的 manifest 是 Blob 与某次记录的投影（默认最近一次，可用 `?importId=` 指定）：
 
 ```json
 {
   "schemaVersion": 1,
+  "importId": "import_<uuid>",
   "artifactId": "artifact_<digest-prefix>",
   "name": "发布目录名称",
   "digest": "sha256...",
@@ -132,6 +133,8 @@ Maker 只补充面向用户任务的高层工具。Viewer 与 Artifact-first Pla
   "playerUrl": "http://127.0.0.1:3847/artifacts/artifact_xxx/player"
 }
 ```
+
+Artifact 列表只返回计数摘要，来源历史与组件目录有独立分页接口；文件 API 返回经过校验的同一份字节快照，不暴露先校验后重读的文件句柄。具体提交点、兼容格式、错误与单 Host/断电边界见 [Workbench 批次 17](./workbench.md#212-artifact-持久化语义批次-17)。
 
 Viewer 与 Player 是两条独立渲染链路：
 

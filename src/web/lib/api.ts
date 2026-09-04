@@ -1,7 +1,7 @@
 import { hc } from "hono/client"
 
 import type { AppType } from "../../server/index"
-import type { ArtifactManifest } from "../../artifact-protocol"
+import type { ArtifactManifest, ArtifactSummary } from "../../artifact-protocol"
 import type { ProjectAssetAnalysis } from "../../asset-analysis"
 import { VIEWER_PROTOCOL_VERSION, type ViewerBrokerCommand, type ViewerProjectCatalog, type RenderSessionState, type RenderCommandResult } from "../../viewer-protocol"
 import type { z } from "zod"
@@ -70,7 +70,7 @@ export async function registerProjectAssetAnalysis(projectId: string, analysis: 
 export async function getArtifacts() {
   const response = await fetch("/api/artifacts?limit=100")
   if (!response.ok) throw new Error(`Artifact request failed: ${response.status}`)
-  return await response.json() as { artifacts: ArtifactManifest[] }
+  return await response.json() as { artifacts: ArtifactSummary[] }
 }
 
 export async function getArtifact(artifactId: string) {

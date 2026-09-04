@@ -659,7 +659,7 @@ test("Maker Host imports, validates, serves, and reloads immutable Player artifa
     const manifestPath = path.join(dataDir, "artifacts", artifact.artifactId, "manifest.json")
     const manifestText = await readFile(manifestPath, "utf8")
     const invalidManifest = JSON.parse(manifestText)
-    invalidManifest.digest = "0".repeat(64)
+    invalidManifest.blob.digest = "0".repeat(64)
     await writeFile(manifestPath, JSON.stringify(invalidManifest))
     host = await startMakerHost({ port: 0, token, dataDir })
     assert.equal((await fetch(`${host.origin}/api/artifacts?limit=10`, { headers }).then((response) => response.json())).artifacts.length, 0)

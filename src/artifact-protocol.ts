@@ -23,21 +23,40 @@ export type ArtifactPackage = {
   components: ArtifactComponent[]
 }
 
-export type ArtifactManifest = {
-  schemaVersion: 1
+export type ArtifactBlob = {
   artifactId: string
-  name: string
   digest: string
-  createdAt: string
   runtimeProfile: typeof PLAYER_RUNTIME_PROFILE
+  files: ArtifactFile[]
+  packages: ArtifactPackage[]
+}
+
+export type ArtifactImportRecord = {
+  importId: string
+  artifactId: string
+  digest: string
+  sequence: number
+  name: string
+  createdAt: string
   source: {
     kind: "published-folder" | "browser-publish"
     projectId?: string
     sourceRevision?: string
   }
-  files: ArtifactFile[]
-  packages: ArtifactPackage[]
+}
+
+// API projection: immutable content plus one explicit import's provenance.
+export type ArtifactManifest = ArtifactBlob & Pick<ArtifactImportRecord, "importId" | "name" | "createdAt" | "source"> & {
+  schemaVersion: 1
   playerUrl: string
+}
+
+export type ArtifactSummary = Omit<ArtifactManifest, "files" | "packages"> & {
+  fileCount: number
+  packageCount: number
+  componentCount: number
+  totalBytes: number
+  importCount: number
 }
 
 export type ArtifactImportFile = {

@@ -559,29 +559,35 @@ function registerApi(
       zValidator("query", z.object({ limit: z.coerce.number().int().min(1).max(100).default(50) })),
       (c) => c.json({ artifacts: readState().artifactStore.list(c.req.valid("query").limit) }),
     )
-    .get("/api/artifacts/:artifactId", (c) => {
-      const artifact = readState().artifactStore.get(c.req.param("artifactId"))
+    .get("/api/artifacts/:artifactId", zValidator("query", z.object({ importId: z.string().min(1).max(128).optional() })), (c) => {
+      const artifact = readState().artifactStore.get(c.req.param("artifactId"), c.req.valid("query").importId)
       return artifact ? c.json({ artifact }) : c.json({ error: "Artifact not found" }, 404)
+    })
+    .get("/api/artifacts/:artifactId/import-records", zValidator("query", z.object({ cursor: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), limit: z.coerce.number().int().min(1).max(100).default(50) })), (c) => {
+      const { cursor, limit } = c.req.valid("query")
+      const result = readState().artifactStore.importRecords(c.req.param("artifactId"), cursor, limit)
+      return result ? c.json(result) : c.json({ error: "Artifact not found" }, 404)
+    })
+    .get("/api/artifacts/:artifactId/components", zValidator("query", z.object({ cursor: z.coerce.number().int().min(0).max(50_000).default(0), limit: z.coerce.number().int().min(1).max(500).default(100) })), (c) => {
+      const { cursor, limit } = c.req.valid("query")
+      const result = readState().artifactStore.components(c.req.param("artifactId"), cursor, limit)
+      return result ? c.json(result) : c.json({ error: "Artifact not found" }, 404)
     })
     .get("/api/artifacts/:artifactId/files/*", async (c) => {
       try {
         const filePath = c.req.path.split(`/api/artifacts/${c.req.param("artifactId")}/files/`)[1] ?? ""
-        const opened = await readState().artifactStore.openFile(c.req.param("artifactId"), decodeURIComponent(filePath))
-        if (!opened) return c.json({ error: "Artifact file not found" }, 404)
-        try {
-          const data = await opened.handle.readFile()
-          c.header("Content-Type", "application/octet-stream")
-          c.header("Content-Disposition", "attachment")
-          c.header("Content-Security-Policy", "default-src 'none'; sandbox")
-          c.header("Content-Length", String(data.byteLength))
-          c.header("ETag", `"${opened.metadata.sha256}"`)
-          c.header("Cache-Control", "private, immutable, max-age=31536000")
-          return c.body(data)
-        } finally {
-          await opened.handle.close()
-        }
+        const file = await readState().artifactStore.readFile(c.req.param("artifactId"), decodeURIComponent(filePath), c.req.raw.signal)
+        if (!file) return c.json({ error: "Artifact file not found" }, 404)
+        const { data, metadata } = file
+        c.header("Content-Type", "application/octet-stream")
+        c.header("Content-Disposition", "attachment")
+        c.header("Content-Security-Policy", "default-src 'none'; sandbox")
+        c.header("Content-Length", String(data.byteLength))
+        c.header("ETag", `"${metadata.sha256}"`)
+        c.header("Cache-Control", "no-store")
+        return c.body(data)
       } catch (error) {
-        return c.json({ error: formatPublicError(error) }, 400)
+        return c.json({ error: formatPublicError(error) }, error instanceof UploadError ? error.status : 400)
       }
     })
 }
@@ -763,7 +769,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
         renderBroker,
         (projectId) => projects.get(projectId),
         (artifactId) => artifactStore.get(artifactId),
-        () => artifactStore.list(100),
+        () => artifactStore.list(100).map(({ artifactId }) => artifactStore.get(artifactId)!),
         () => [...projects.values()],
         (projectId) => assetAnalyses.get(projectId),
       )

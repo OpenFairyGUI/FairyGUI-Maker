@@ -1,4 +1,6 @@
-import { access, mkdtemp, readFile, readdir, rm } from "node:fs/promises"
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { createRequire } from "node:module"
+import { pathToFileURL } from "node:url"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { spawn } from "node:child_process"
@@ -84,6 +86,37 @@ async function initializeMcp(origin, token, projectPath) {
     headers: { Authorization: `Bearer ${token}`, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
   })
   return body.result.tools.map((tool) => tool.name)
+}
+
+async function verifyArtifactPersistence(installedRoot, origin, headers) {
+  const resolveInstalled = createRequire(path.join(installedRoot, "package.json")).resolve
+  const { Document } = await import(pathToFileURL(resolveInstalled("@openfairygui/core")).href)
+  const { NodeIO } = await import(pathToFileURL(resolveInstalled("@openfairygui/core/node")).href)
+  const document = new Document()
+  document.createPackage("Smoke").setId("SMOKE001").addResource(document.createComponent("Main").setId("MAIN0001").setExported(true))
+  const binaryPath = path.join(tempRoot, "Smoke.fui")
+  await new NodeIO().writeBinary(document, binaryPath)
+  const bytes = await readFile(binaryPath)
+  const sha256 = createHash("sha256").update(bytes).digest("hex")
+  const artifacts = []
+  for (const name of ["First import", "Second import"]) {
+    const response = await fetch(`${origin}/api/artifact-imports`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ name, files: [{ path: "Smoke.fui", size: bytes.length, sha256 }] }) })
+    if (response.status !== 201) throw new Error("Installed Artifact import failed")
+    const { importId } = await response.json()
+    if (!(await fetch(`${origin}/api/artifact-imports/${importId}/files?path=Smoke.fui`, { method: "PUT", headers, body: bytes })).ok) throw new Error("Installed Artifact upload failed")
+    const completed = await fetch(`${origin}/api/artifact-imports/${importId}/complete`, { method: "POST", headers })
+    if (completed.status !== 201) throw new Error("Installed Artifact completion failed")
+    artifacts.push((await completed.json()).artifact)
+  }
+  if (artifacts[0].artifactId !== artifacts[1].artifactId || artifacts[0].importId === artifacts[1].importId || artifacts[1].name !== "Second import") throw new Error("Installed Artifact provenance was overwritten")
+  const summary = (await (await fetch(`${origin}/api/artifacts`, { headers })).json()).artifacts[0]
+  if (summary.importCount !== 2 || summary.fileCount !== 1 || "files" in summary || "packages" in summary) throw new Error("Installed Artifact list is not a bounded summary")
+  const fileUrl = `${origin}/api/artifacts/${artifacts[0].artifactId}/files/Smoke.fui`
+  const file = await fetch(fileUrl, { headers })
+  if (!file.ok || file.headers.get("etag") !== `"${sha256}"` || !Buffer.from(await file.arrayBuffer()).equals(bytes)) throw new Error("Installed Artifact bytes failed verification")
+  await writeFile(path.join(tempRoot, "data", "artifacts", artifacts[0].artifactId, "Smoke.fui"), Buffer.alloc(bytes.length))
+  const changed = await fetch(fileUrl, { headers })
+  if (changed.status !== 409 || changed.headers.has("etag")) throw new Error("Installed Host served tampered Artifact bytes")
 }
 
 let host
@@ -201,8 +234,9 @@ try {
   if (!toolNames.includes("list_viewer_components") || !toolNames.some((name) => name.startsWith("openfairygui_backend_"))) {
     throw new Error("Installed Host MCP tool surface is incomplete")
   }
+  await verifyArtifactPersistence(installedRoot, origin, headers)
   if ([token, approvalToken].some((secret) => stdout.includes(secret) || stderr.includes(secret))) throw new Error("Installed Host exposed a configured token in process output")
-  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), version: version.stdout.trim(), host: true, mcp: true, saveGrants: true, runtimeIsolation: true }) + "\n")
+  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), version: version.stdout.trim(), host: true, mcp: true, saveGrants: true, runtimeIsolation: true, artifactPersistence: true }) + "\n")
 } finally {
   if (host && host.exitCode === null) {
     const exited = new Promise((resolve) => host.once("exit", resolve))

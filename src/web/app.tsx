@@ -65,6 +65,7 @@ import {
 } from "@/lib/viewer"
 import { analyzeProjectAssets, displayAssetPath, summarizeAssetAnalysis, type AssetIssue, type AssetReference, type AssetResource } from "../asset-analysis"
 import type { ViewerCatalogPackage, ViewerComponent, ViewerOperation, ViewerRendered, RenderSessionState } from "../viewer-protocol"
+import type { ArtifactManifest } from "../artifact-protocol"
 
 const statusQuery = { queryKey: ["host-status"], queryFn: getStatus, refetchInterval: 5_000 }
 const sessionsQuery = { queryKey: ["sessions"], queryFn: getSessions, refetchInterval: 5_000 }
@@ -393,7 +394,7 @@ function ArtifactImportsCard({ artifacts, importing, progress, error, create }: 
               <div key={artifact.artifactId} className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-medium">{artifact.name}</p><Badge variant="secondary">IMMUTABLE</Badge></div>
-                  <p className="mt-1 truncate text-xs text-muted-foreground">{artifact.packages.length} packages · {artifact.files.length} files · {artifact.digest.slice(0, 12)}</p>
+                  <p className="mt-1 truncate text-xs text-muted-foreground">{artifact.packageCount} packages · {artifact.fileCount} files · {artifact.importCount} imports · {artifact.digest.slice(0, 12)}</p>
                 </div>
                 <Button asChild variant="outline"><Link to="/artifacts/$artifactId/player" params={{ artifactId: artifact.artifactId }}>打开 Player</Link></Button>
               </div>
@@ -600,7 +601,7 @@ function PlayerPage() {
       {progress ? <p className="truncate text-xs text-muted-foreground">{progress}</p> : null}
       {artifactImport.error ? <p role="alert" className="text-sm text-destructive">{artifactImport.error.message}</p> : null}
       <Card>
-        <CardHeader className="border-b"><CardTitle>选择 Artifact</CardTitle><CardDescription>每次导入都会生成内容寻址的不可变快照；源目录后续变化不会影响 Player。</CardDescription></CardHeader>
+        <CardHeader className="border-b"><CardTitle>选择 Artifact</CardTitle><CardDescription>相同内容共用快照，每次导入保留独立来源记录；下方显示最近一次导入。</CardDescription></CardHeader>
         <CardContent>
           {artifacts.data?.artifacts.length ? (
             <div className="divide-y">
@@ -608,7 +609,7 @@ function PlayerPage() {
                 <div key={artifact.artifactId} className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-medium">{artifact.name}</p><Badge variant="secondary">{artifact.runtimeProfile}</Badge></div>
-                    <p className="mt-1 truncate text-xs text-muted-foreground">{artifact.packages.reduce((count, pkg) => count + pkg.components.length, 0)} components · {artifact.files.length} files · {formatTime(artifact.createdAt)}</p>
+                    <p className="mt-1 truncate text-xs text-muted-foreground">{artifact.componentCount} components · {artifact.fileCount} files · {artifact.importCount} imports · {formatTime(artifact.createdAt)}</p>
                   </div>
                   <Button asChild variant="outline"><Link to="/artifacts/$artifactId/player" params={{ artifactId: artifact.artifactId }}>打开 Player</Link></Button>
                 </div>
@@ -630,7 +631,7 @@ function ArtifactPlayerPage() {
   return artifact.data ? <ArtifactPlayer artifact={artifact.data.artifact} /> : <ViewerLoading message="正在读取 Artifact…" />
 }
 
-function ArtifactPlayer({ artifact }: { artifact: ArtifactListItem }) {
+function ArtifactPlayer({ artifact }: { artifact: ArtifactManifest }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const resourcePanelRef = useRef<PanelImperativeHandle>(null)
   const [session, setSession] = useState<RenderSessionClient | null>(null)
@@ -689,7 +690,8 @@ function ArtifactPlayer({ artifact }: { artifact: ArtifactListItem }) {
       setSession(null)
       setRenderSessionId("")
     }
-  }, [artifact])
+  // Provenance can change without changing the immutable content or live Player state.
+  }, [artifact.artifactId, artifact.digest])
 
   const packages = useMemo(() => {
     const query = filter.trim().toLocaleLowerCase()
