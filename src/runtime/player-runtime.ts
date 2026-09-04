@@ -1,7 +1,7 @@
 import type { ArtifactManifest, ArtifactPackage, PlayerRenderSource } from "../artifact-protocol"
 import { installResourceLoadBudget, loadRuntimeTexture, reserveImage, setImageProbeWorker } from "./image-budget"
 import { acceptRuntimeConnection } from "../runtime-channel"
-import { disableRuntimeStorage, nextRuntimeFrame } from "./platform"
+import { disableRuntimeStorage, flushRuntimeFrame, nextRuntimeFrame } from "./platform"
 import { checkBudget, checkImageDimensions, checkRuntimeMetadata, decompressFuiIfNeeded, ObservationBudget, ResourceBudget, RUNTIME_LIMITS } from "./resource-budget"
 import {
   type ViewerCommand,
@@ -105,7 +105,6 @@ async function handleCommand(command: ViewerCommand) {
         Object.assign(runtime, view)
         Laya.stage.bgColor = view.background
         resize()
-        await nextRuntimeFrame()
         respond(command.requestId, { view, ...(runtime.current ? { observation: createObservation() } : {}) })
         return
       }
@@ -127,6 +126,7 @@ async function handleCommand(command: ViewerCommand) {
       }
       case "capture": {
         checkImageDimensions(runtime.width, runtime.height)
+        flushRuntimeFrame()
         const runtimeEventSeq = runtime.interactionSeq
         const observation = runtime.current ? createObservation() : undefined
         const canvas = Laya.stage.drawToCanvas(runtime.width, runtime.height, 0, 0)?.source as HTMLCanvasElement | undefined

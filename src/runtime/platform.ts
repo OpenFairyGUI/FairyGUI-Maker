@@ -20,3 +20,13 @@ export function nextRuntimeFrame() {
     const frame = requestAnimationFrame(() => { clearTimeout(timer); resolve() })
   })
 }
+
+export function flushRuntimeFrame() {
+  // drawToCanvas alone can read stale/empty GPU buffers when the animation loop is paused.
+  // Flush one native frame before taking the screenshot's observation/event watermark.
+  const enabled = Laya.stage.renderingEnabled
+  try {
+    Laya.stage.renderingEnabled = true
+    Laya.stage.render(performance.now())
+  } finally { Laya.stage.renderingEnabled = enabled }
+}

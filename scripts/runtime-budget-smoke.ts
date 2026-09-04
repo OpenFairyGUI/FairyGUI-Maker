@@ -32,7 +32,10 @@ function makeDocument(shape: "normal" | "deep" | "wide") {
     pkg.addResource(child)
     for (let i = 0; i < 80; i++) child.addChild(document.createGGraph("leaf").setId(`leaf${i}`).setSize(1, 1))
     for (let i = 0; i < 70; i++) root.addChild(document.createGComponent("instance").setId(`instance${i}`).setSrc(child.getId()))
-  } else root.addChild(document.createGTextField("title").setId("TITLE001").setText("Budget smoke").setSize(100, 30))
+  } else {
+    root.addChild(document.createGTextField("title").setId("TITLE001").setText("Budget smoke").setSize(100, 30))
+    root.addChild(document.createGGraph("marker").setId("MARKER01").setXY(10, 60).setSize(20, 20).setGraphType(1).setFillColor("#e879f9"))
+  }
   return document
 }
 
@@ -89,6 +92,34 @@ async function assertClean(page: Frame) {
   assert.equal(await page.evaluate("Promise.all(window.budgetAllBlobs.map(url => fetch(url).then(() => false, () => true))).then(results => results.every(Boolean))"), true, "Blob URL was not revoked")
 }
 
+async function assertOffscreenCapture(frame: Frame) {
+  await frame.page().locator("#runtime-harness").evaluate((element) => { element.style.top = "5000px" })
+  // No animation tick may rescue stale transform state in the explicit capture path.
+  await frame.evaluate("Laya.Render.paused = true; Laya.stage.renderingEnabled = false")
+  try {
+    for (const width of [614, 482]) {
+      accepted(await request(frame, { kind: "set-view", view: { width, height: 446 } }))
+      const result = await frame.page().evaluate(async () => {
+        const captured = await (window as any).budgetRequest({ kind: "capture", requestId: "offscreen-capture" })
+        if (!captured.ok) throw new Error(captured.error)
+        const bitmap = await createImageBitmap(new Blob([captured.value.data], { type: "image/png" }))
+        try {
+          const canvas = document.createElement("canvas"); canvas.width = bitmap.width; canvas.height = bitmap.height
+          const ctx = canvas.getContext("2d")!; ctx.drawImage(bitmap, 0, 0)
+          const root = captured.value.observation.objectTree
+          return { width: bitmap.width, height: bitmap.height, x: root.x, y: root.y,
+            pixel: Array.from(ctx.getImageData(root.x + 20, root.y + 70, 1, 1).data) }
+        } finally { bitmap.close() }
+      })
+      assert.deepEqual(result, { width, height: 446, x: (width - 100) / 2, y: 173, pixel: [232, 121, 249, 255] }, "offscreen capture disagrees with the resized object position")
+      assert.equal(await frame.evaluate("Laya.stage.renderingEnabled"), false, "capture resumed background rendering")
+    }
+  } finally {
+    await frame.evaluate("Laya.Render.paused = false; Laya.stage.renderingEnabled = true")
+    await frame.page().locator("#runtime-harness").evaluate((element) => { element.style.top = "0" })
+  }
+}
+
 export async function runtimeBudgetSmoke(context: BrowserContext, origin: string, artifact: ArtifactManifest, publishDir: string) {
   const normal = makeDocument("normal")
   const deep = makeDocument("deep")
@@ -141,7 +172,7 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     await viewerPage.locator("#runtime-harness").evaluate((frame) => { frame.style.top = "5000px" })
     accepted(await request(viewer, { kind: "render", scene: base }))
     accepted(await request(viewer, { kind: "capture" }))
-    await viewerPage.locator("#runtime-harness").evaluate((frame) => { frame.style.top = "0" })
+    await assertOffscreenCapture(viewer)
     const repeatedOperations = Array.from({ length: 2500 }, () => ({ op: "set-property", targetId: "/SMOKE001/MAIN0001", property: "visible", value: true }))
     rejected(await request(viewer, { kind: "apply-operations", operations: repeatedOperations }), /observation_nodes/)
     await viewer.evaluate('fgui.GRoot.inst.getChildAt(0).name = "x".repeat(16385)')
@@ -198,7 +229,7 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     await playerPage.locator("#runtime-harness").evaluate((frame) => { frame.style.top = "5000px" })
     accepted(await render("normal"))
     accepted(await request(player, { kind: "capture" }))
-    await playerPage.locator("#runtime-harness").evaluate((frame) => { frame.style.top = "0" })
+    await assertOffscreenCapture(player)
     rejected(await render("bomb"), /resource_budget_exceeded: stream_bytes/)
     rejected(await render("deep"), /scene_depth/)
     rejected(await render("wide"), /scene_nodes/)
@@ -225,6 +256,6 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     accepted(await render("normal"))
     accepted(await request(player, { kind: "observe" }))
     assert.deepEqual(errors, [], "budget failures escaped the command error boundary")
-    return { fuiBomb: true, giantImages: true, textures: true, sceneNodes: true, sceneDepth: true, observation: true, recoveryAndCleanup: true, offscreenCapture: true, nonceHandshake: true, audioBlob: true }
+    return { fuiBomb: true, giantImages: true, textures: true, sceneNodes: true, sceneDepth: true, observation: true, recoveryAndCleanup: true, offscreenCapture: true, offscreenResizedPixels: true, nonceHandshake: true, audioBlob: true }
   } finally { await viewerPage.close(); await playerPage.close() }
 }

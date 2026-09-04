@@ -100,7 +100,10 @@ export async function rendererDeliverySmoke(
   assert.equal((await page.request.post(`${endpoint}/interactions`, { data: { ...interaction, data: { selected: false } } })).status(), 409)
 
   // A closed/uncertain session must not look AGENT READY. Reconnection creates fresh state.
+  // Separate the 35s long-poll transport deadline from the UI's response to a terminal error.
+  const closedPoll = page.waitForResponse((response) => response.url().startsWith(`${endpoint}/commands?`) && response.status() === 404, { timeout: 40_000 })
   assert.equal((await page.request.delete(endpoint)).status(), 204)
+  await closedPoll
   await page.getByRole("alert").filter({ hasText: "Renderer 交付已停止" }).waitFor({ timeout: 5_000 }).catch(async (error) => {
     throw new Error(`${String(error)}\nWorkbench: ${await page.locator("body").innerText()}`)
   })

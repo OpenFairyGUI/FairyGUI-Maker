@@ -305,9 +305,20 @@ test("HTTP upload endpoints reject chunked overflow and conflicting retries with
     const oversized = await fetch(`${host.origin}/api/artifact-imports`, {
       method: "POST", headers: { ...headers, "Content-Type": "application/json" },
       body: stream(Array.from({ length: Math.ceil(MAX_JSON_BODY_BYTES / chunk.length) + 1 }, () => chunk)), duplex: "half",
-    } as RequestInit)
-    assert.equal(oversized.status, 413)
-    assert.equal((await fetch(`${host.origin}/api/status`, { headers })).status, 200)
+    } as RequestInit).catch((error: unknown) => {
+      // Closing an unfinished upload can reset TCP before Windows receives the 413.
+      assert.equal((error as { cause?: { code?: string } }).cause?.code, "ECONNRESET")
+      return null
+    })
+    if (oversized) {
+      assert.equal(oversized.status, 413)
+      await oversized.arrayBuffer()
+    }
+    assert.deepEqual(await readdir(path.join(dataDir, "imports")), [])
+    assert.deepEqual(await readdir(path.join(dataDir, "artifacts")), [])
+    const status = await fetch(`${host.origin}/api/status`, { headers })
+    assert.equal(status.status, 200)
+    await status.arrayBuffer()
   } finally {
     await host.close()
     await rm(dataDir, { recursive: true, force: true })

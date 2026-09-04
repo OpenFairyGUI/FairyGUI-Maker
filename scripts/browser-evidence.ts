@@ -191,7 +191,7 @@ export async function saveVisualGolden(page: Page, directory: string, name: stri
   const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex")
   await writeFile(path.join(target, "report.json"), JSON.stringify({ schemaVersion: 1, status: baselineMissing ? "candidate" : mismatch ? "failed" : "passed", baselineMissing, ...identity,
     sourceRevision: result.sourceRevision, renderSessionId: result.renderSessionId, semanticStateVersion: result.semanticStateVersion, viewStateVersion: result.viewStateVersion,
-    view: result.value.view, referenceSha256: sha256(reference), actualSha256: sha256(actual), metrics,
+    view: result.value.view, observation: result.value.observation, referenceSha256: sha256(reference), actualSha256: sha256(actual), metrics,
   }, null, 2) + "\n")
   if (mismatch && !update) throw mismatch
   return { metrics, golden, actual }
