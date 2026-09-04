@@ -62,7 +62,7 @@ FairyGUI 视觉渲染发生在真实浏览器环境中。Workbench 不在 Node �
 
 Player 使用另一份 iframe runtime。Dashboard 或 Player 页由用户显式选择一个发布目录，浏览器只在本次导入中读取文件并上传给 Host；目录句柄不持久化，Host 也不获得源目录写权限。Host 校验安全相对路径、文件数和容量、`.fui` / `_fui.bytes` magic、包 ID、依赖与组件目录，为每个文件计算 SHA-256，并按整体 digest 固化到本地 Artifact Store。源目录之后发生变化不会修改既有 Artifact。
 
-Player 按 `artifactId + digest` 读取 manifest，预加载图集和声音，再以原生 `fgui.UIPackage` 注册包并创建组件；不经过 Viewer 的 UAM renderer。Player 与 Viewer 只共用 Host Broker、MessageChannel envelope、白名单 operation、observation 和 capture 契约。
+Player 按 `artifactId + digest` 读取 manifest，预加载图集，再以原生 `fgui.UIPackage` 注册包并创建组件；不经过 Viewer 的 UAM renderer。Player 与 Viewer 共用 Host Broker、Renderer 交付循环、MessageChannel envelope、白名单 operation、observation 和 capture 契约。
 
 Agent 不直接操作 iframe 或 Canvas。它只向 Host 提交语义命令，并读取结构化观察结果。
 
@@ -139,9 +139,32 @@ PNG 在任何解码器运行前检查 IHDR；PNG/JPEG 的完整校验复用 Core
 
 Player 仍使用原生 `UIPackage`，在工厂、组件构造与纹理创建边界计数；不另写一套 FUI 组件解析器，也不改动冻结的 vendor 文件。构造失败会恢复原生 constructing 计数并回收部分实例。Observation 超限明确失败，不截断、更不把不完整树伪装为完整结果；批量 operation 的子结果与末尾 observation 共用同一预算。
 
-这些是输入与资源句柄预算，不是浏览器进程的硬内存沙箱：纹理估算不含驱动/mipmap/字体排版等额外开销；音频不再预解码，PCM 时长预算和组件级按需资源闭包仍未实现。ACK/outbox、Broker 状态统一与 iframe 权限隔离继续留在后续批次。
+这些是输入与资源句柄预算，不是浏览器进程的硬内存沙箱：纹理估算不含驱动/mipmap/字体排版等额外开销；音频不再预解码，PCM 时长预算和组件级按需资源闭包仍未实现。ACK/outbox 由批次 12 提供；Broker 状态统一与 iframe 权限隔离继续留在后续批次。
 
 验证：`test/runtime-budget.test.ts` 覆盖压缩炸弹、绝对/累计输出限制、流中断/超时/块数、图像尺寸、纹理、节点、Observation 与稀疏元数据；`pnpm test:browser` 中的 `scripts/runtime-budget-smoke.ts` 验证真实 Viewer/Player 的超深/展开超量场景、巨型 PNG/SVG、MovieClip 与原生 atlas 子纹理上限、正常 PNG/JPEG/WebP/SVG、Observation 拒绝、重连后的迟到解码回收及 Artifact A→B→正常场景的缓存释放。
+
+### 2.7 Renderer 可靠交付（批次 12）
+
+Viewer/Player 的 Host 通信统一到 `src/web/lib/renderer-delivery.ts`，各自只提供 iframe 命令执行函数，不合并两种 runtime。每次只执行一条 Broker 命令，并保留该次成功或失败结果的原始 JSON，直到收到匹配 `commandSeq + requestId` 的 ACK；网络故障只重新 POST 同一结果，不重新操作 iframe。ACK 后重新领取命令，不继续使用可能已过期的旧批次。
+
+Host 为结果保留规范化 JSON 的 SHA-256 receipt：对象字段顺序不影响摘要，数组顺序仍有意义。同一会话、序号、request ID 和结果可重复提交，返回 `200 { accepted: true, commandSeq, requestId }`，不再次 resolve/reject 或推进版本；不同结果、错误身份、乱序或过期 receipt 返回 `409 result_conflict`。成功和失败结果都遵守此规则。命令 request ID 的 fingerprint 也使用相同规范化规则。
+
+Interaction 在注册请求前就接入 outbox，严格按序发送，队头收到 `200 { accepted: true, runtimeEventSeq, session }` 才移除。Host 对相同序号和相同 payload 幂等接受，不同 payload 返回 `409 interaction_conflict`，缺失前序返回 `409 interaction_sequence_gap`；`GET /api/render-sessions/:id` 的 `session.lastAcceptedRuntimeEventSeq` 可查询当前已接受位置。不会跳号或伪造丢失事件来修复 gap。
+
+| 交付边界 | 行为 / 上限 |
+|---|---|
+| 客户端结果缓存 | 同时仅 1 个已执行结果；含失败结果，ACK 后释放 |
+| Interaction outbox | 当前页面内存最多 256 个事件、合计 1 MiB UTF-8 JSON；单事件最多 64 KiB |
+| Host interaction 校验 | target ID 128 字符；data 最多 32 字段、key 128 字符、单字符串 16,384 code unit；事件 envelope 64 KiB |
+| Host receipt | 每会话结果、interaction 各最近 256 个摘要，不重复保存截图；淘汰项的重放明确冲突 |
+| 重试 | 网络/响应体中断、408、429、5xx 按 250 ms→2 s 退避；连续失败达到 60 s 后停止（请求自身时限可能增加最多一个请求周期） |
+| HTTP 时限 | 长轮询 35 s（Host 等待最多 25 s），POST/注册 10 s；其他 4xx、错误 ACK、gap/队列超限立即停止 |
+| 命令超时 | 沿用入队起 30 s；未收到结果时执行状态未知，关闭整个会话并拒绝剩余 pending，不复用可能已变化的运行态 |
+| 关闭 / TTL | 页面卸载、切换或 stop 中止 poll/POST/退避，移除 interaction handler，并以 keepalive DELETE 关闭 Host 会话；关闭请求失败由 5 分钟不活跃 TTL 兜底，每分钟及访问时检查 |
+
+严重断线、Host 重启、会话替换、gap 或超限都会移除 AGENT READY，显示原因与“重新连接”。重新连接会重新加载页面、重置 iframe 并注册新会话；浏览器后退缓存（bfcache）恢复已关闭的页面时也会重新加载。Agent 必须重新获取 session ID，不自动重放旧会话操作。正常短暂断网可以在同一页面恢复交付，但本批次不承诺跨页面刷新/浏览器崩溃/Host 重启的 exactly-once，不保存持久 outbox。Workbench 本地修改统一进入 Broker 和双状态版本属于批次 13，尚未纳入本次。
+
+验证：`test/renderer-delivery.test.ts` 覆盖结果送达前故障、Host ACK 丢失、失败结果、注册期间事件、队头重试、关闭/迟到结果、容量/字节超限、错误 ACK、规范化重放/冲突、receipt 淘汰、命令超时和 TTL。`pnpm test:browser` 中的 `scripts/renderer-delivery-smoke.ts` 在真实 Viewer 与原生 Player 上注入 HTTP 故障，断言三次结果 POST 只执行一次 iframe 更新、两条事件按序续传、Host 重复/冲突响应及错误提示→重新连接；交互事件 envelope 从真实 MessagePort 测试注入，不把它当作所有鼠标控件行为的验收。
 
 ## 3. 核心领域契约
 
@@ -189,6 +212,7 @@ type RenderSession = {
   stateVersion: number
   commandSeq: number
   interactionSeq: number
+  lastAcceptedRuntimeEventSeq: number
 }
 
 type RenderOperation =
@@ -224,9 +248,9 @@ type UpdateRenderSessionInput = {
 
 1. Viewer 已有 Dashboard 工程绑定；Player 已有不可变 Artifact。
 2. Agent 或用户打开稳定的 Viewer / Player URL；页面分别读取当前工程或 Artifact manifest。
-3. 页面通过 `/api/renderers` 注册 `mode + sourceRevision + protocolVersion`，Host 此时创建 `ready` render session；同一来源的新 renderer 会替换旧会话。
-4. 页面与对应 iframe 完成 MessageChannel 握手，并按 `commandSeq` 长轮询 Host 命令。
-5. Host 下发语义命令；iframe 执行后返回结果、observation 或 PNG，页面提交 ACK。
+3. 页面与对应 iframe 完成 MessageChannel 握手，并开始缓冲 interaction。
+4. 页面通过 `/api/renderers` 注册 `mode + sourceRevision + protocolVersion`，Host 此时创建 `ready` render session；同一来源的新 renderer 会替换旧会话，然后页面按 `commandSeq` 长轮询。
+5. Host 下发语义命令；iframe 执行后返回结果、observation 或 PNG，页面缓存并提交结果，Host 返回幂等 ACK。
 6. 人工交互按 `runtimeEventSeq` 回传并推进 `stateVersion`；超时、版本冲突或 runtime 错误会得到明确失败。
 
 第一版使用 HTTP 长轮询和结果回传：没有命令时请求最多挂起一段时间，有命令立即返回。只有实际交互延迟或并发证明长轮询不足时，才改为 WebSocket。
@@ -322,6 +346,7 @@ REST 供 Workbench WebUI 和 Renderer Client 使用。当前接口为：
 - `PUT /api/projects/:projectId/asset-analysis`
 - `POST /api/renderers`
 - `GET /api/render-sessions/:renderSessionId`
+- `DELETE /api/render-sessions/:renderSessionId`
 - `GET /api/render-sessions/:renderSessionId/commands?after={commandSeq}`
 - `POST /api/render-sessions/:renderSessionId/results`
 - `POST /api/render-sessions/:renderSessionId/interactions`

@@ -2,6 +2,7 @@ import type { UamAssetResource, UamComponentResource } from "@openfairygui/core"
 import type { PlayerRenderSource } from "./artifact-protocol"
 
 export const VIEWER_PROTOCOL_VERSION = 4
+export const MAX_RENDERER_INTERACTION_BYTES = 64 * 1024
 
 export type ViewerComponent = {
   id: string

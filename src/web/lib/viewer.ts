@@ -15,12 +15,8 @@ import {
   type ViewerRuntimeMessage,
   type ViewerScene,
 } from "../../viewer-protocol"
-import {
-  readViewerCommands,
-  registerViewerRenderer,
-  submitViewerCommandResult,
-  submitViewerInteraction,
-} from "./api"
+import { registerViewerRenderer } from "./api"
+import { startRendererDelivery } from "./renderer-delivery"
 import {
   getProjectBinding,
   queryProjectBindingPermission,
@@ -369,48 +365,19 @@ export async function connectViewerFrame(
   }
 }
 
-export async function startViewerRenderer(projectId: string, bundle: ViewerProjectBundle, frame: ViewerFrameSession) {
-  const { session } = await registerViewerRenderer({
-    projectId,
-    sourceRevision: bundle.sourceRevision,
-    protocolVersion: VIEWER_PROTOCOL_VERSION,
-    catalog: bundle.catalog,
-  })
-  const controller = new AbortController()
-  let interactionQueue = Promise.resolve()
-  frame.setInteractionHandler((event) => {
-    interactionQueue = interactionQueue
-      .then(() => submitViewerInteraction(session.renderSessionId, event))
-      .catch(() => undefined)
-  })
-  void runRendererLoop(session.renderSessionId, bundle, frame, controller.signal)
-  return {
-    renderSessionId: session.renderSessionId,
-    stop: () => {
-      controller.abort()
-      frame.setInteractionHandler(null)
-    },
-  }
-}
-
-async function runRendererLoop(renderSessionId: string, bundle: ViewerProjectBundle, frame: ViewerFrameSession, signal: AbortSignal) {
-  let after = 0
-  while (!signal.aborted) {
-    try {
-      const { commands } = await readViewerCommands(renderSessionId, after, signal)
-      for (const command of commands) {
-        if (signal.aborted) return
-        const result = await executeBrokerCommand(bundle, frame, command)
-          .then((value) => ({ ok: true as const, value }))
-          .catch((error) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }))
-        await submitViewerCommandResult(renderSessionId, { commandSeq: command.commandSeq, requestId: command.requestId, ...result })
-        after = command.commandSeq
-      }
-    } catch (error) {
-      if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return
-      await new Promise((resolve) => window.setTimeout(resolve, 1_000))
-    }
-  }
+export async function startViewerRenderer(projectId: string, bundle: ViewerProjectBundle, frame: ViewerFrameSession, onError: (error: Error) => void, signal: AbortSignal) {
+  return startRendererDelivery(
+    (signal) => registerViewerRenderer({
+      projectId,
+      sourceRevision: bundle.sourceRevision,
+      protocolVersion: VIEWER_PROTOCOL_VERSION,
+      catalog: bundle.catalog,
+    }, signal),
+    frame,
+    (command) => executeBrokerCommand(bundle, frame, command),
+    onError,
+    signal,
+  )
 }
 
 async function executeBrokerCommand(bundle: ViewerProjectBundle, frame: ViewerFrameSession, command: ViewerBrokerCommand) {

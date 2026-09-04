@@ -385,6 +385,10 @@ function registerApi(
       const session = readState().renderBroker.getSession(c.req.param("renderSessionId"))
       return session ? c.json({ session }) : c.json({ error: "Render session not found" }, 404)
     })
+    .delete("/api/render-sessions/:renderSessionId", (c) => {
+      readState().renderBroker.disconnectRenderer(c.req.param("renderSessionId"))
+      return c.body(null, 204)
+    })
     .get(
       "/api/render-sessions/:renderSessionId/commands",
       zValidator("query", z.object({ after: z.coerce.number().int().nonnegative().default(0) })),
@@ -400,9 +404,16 @@ function registerApi(
     .post(
       "/api/render-sessions/:renderSessionId/results",
       zValidator("json", rendererResultSchema),
-      (c) => readState().renderBroker.submitResult(c.req.param("renderSessionId"), c.req.valid("json"))
-        ? c.json({ accepted: true })
-        : c.json({ error: "Render command not found" }, 404),
+      (c) => {
+        const input = c.req.valid("json")
+        try {
+          return readState().renderBroker.submitResult(c.req.param("renderSessionId"), input)
+            ? c.json({ accepted: true, commandSeq: input.commandSeq, requestId: input.requestId })
+            : c.json({ error: "Render session not found" }, 404)
+        } catch (error) {
+          return c.json({ error: formatPublicError(error) }, 409)
+        }
+      },
     )
     .post(
       "/api/render-sessions/:renderSessionId/interactions",
@@ -410,7 +421,7 @@ function registerApi(
       (c) => {
         try {
           const session = readState().renderBroker.recordInteraction(c.req.param("renderSessionId"), c.req.valid("json"))
-          return session ? c.json({ accepted: true, session }) : c.json({ error: "Render session not found" }, 404)
+          return session ? c.json({ accepted: true, runtimeEventSeq: c.req.valid("json").runtimeEventSeq, session }) : c.json({ error: "Render session not found" }, 404)
         } catch (error) {
           return c.json({ error: error instanceof Error ? error.message : String(error) }, 409)
         }
@@ -711,6 +722,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   allowedHosts = new Set([`${host}:${address.port}`, `localhost:${address.port}`])
   allowedOrigins = new Set([origin, `http://localhost:${address.port}`])
   const uploadCleanup = setInterval(() => {
+    renderBroker.pruneExpiredSessions()
     void Promise.allSettled([artifactStore.pruneExpiredImports(), importDraftStore.pruneExpiredUploads()])
   }, 60_000)
   uploadCleanup.unref()

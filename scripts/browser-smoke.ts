@@ -9,6 +9,7 @@ import { chromium } from "playwright"
 import { startMakerHost } from "../src/server/index"
 import type { ArtifactManifest } from "../src/artifact-protocol"
 import { runtimeBudgetSmoke } from "./runtime-budget-smoke"
+import { rendererDeliverySmoke } from "./renderer-delivery-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -157,6 +158,8 @@ try {
   await page.getByAltText("Viewer Capture").waitFor()
   await page.getByRole("button", { name: "Pixel Diff" }).click()
   await page.getByAltText("Pixel Diff").waitFor()
+  const viewerDelivery = await rendererDeliverySmoke(page, "viewer", viewerRender.value.renderSessionId, viewerRender.value.value.observation.objectTree.id,
+    (name, args) => callTool(host!.origin, sessionId, 60, name, args))
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByTestId("visual-report").waitFor()
 
@@ -195,6 +198,8 @@ try {
   })
   assertPng(playerRender.body)
   if (!JSON.stringify(playerRender.value).includes("TITLE001")) throw new Error("Player observation did not include the rendered title")
+  const playerDelivery = await rendererDeliverySmoke(page, "player", playerRender.value.renderSessionId, playerRender.value.value.observation.objectTree.id,
+    (name, args) => callTool(host!.origin, sessionId, 70, name, args))
   const runtimeBudgets = await runtimeBudgetSmoke(page.context(), host.origin, artifact, publishDir)
   if (pageErrors.length) throw new Error(`Browser page errors: ${pageErrors.join("; ")}`)
 
@@ -202,7 +207,7 @@ try {
     method: "DELETE",
     headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
   })
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, runtimeBudgets, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerDelivery, playerDelivery, runtimeBudgets, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
 } finally {
   await browser?.close()
   await host?.close()

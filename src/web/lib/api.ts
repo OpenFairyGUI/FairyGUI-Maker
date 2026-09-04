@@ -3,7 +3,7 @@ import { hc } from "hono/client"
 import type { AppType } from "../../server/index"
 import type { ArtifactManifest } from "../../artifact-protocol"
 import type { ProjectAssetAnalysis } from "../../asset-analysis"
-import { VIEWER_PROTOCOL_VERSION, type ViewerBrokerCommand, type ViewerInteractionEvent, type ViewerProjectCatalog } from "../../viewer-protocol"
+import { VIEWER_PROTOCOL_VERSION, type ViewerBrokerCommand, type ViewerProjectCatalog } from "../../viewer-protocol"
 
 const client = hc<AppType>("/")
 
@@ -71,11 +71,12 @@ export async function registerViewerRenderer(input: {
   sourceRevision: string
   protocolVersion: typeof VIEWER_PROTOCOL_VERSION
   catalog: ViewerProjectCatalog
-}) {
+}, signal?: AbortSignal) {
   const response = await fetch("/api/renderers", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
   })
   if (!response.ok) throw new Error(`Renderer registration failed: ${response.status}`)
   return await response.json() as {
@@ -83,11 +84,12 @@ export async function registerViewerRenderer(input: {
   }
 }
 
-export async function registerPlayerRenderer(input: { artifactId: string; sourceRevision: string; protocolVersion: typeof VIEWER_PROTOCOL_VERSION }) {
+export async function registerPlayerRenderer(input: { artifactId: string; sourceRevision: string; protocolVersion: typeof VIEWER_PROTOCOL_VERSION }, signal?: AbortSignal) {
   const response = await fetch("/api/renderers", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mode: "player", ...input }),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
   })
   if (!response.ok) throw new Error(`Player renderer registration failed: ${response.status}`)
   return await response.json() as {
@@ -96,32 +98,45 @@ export async function registerPlayerRenderer(input: { artifactId: string; source
 }
 
 export async function readViewerCommands(renderSessionId: string, after: number, signal: AbortSignal) {
-  const response = await fetch(`/api/render-sessions/${encodeURIComponent(renderSessionId)}/commands?after=${after}`, { signal })
-  if (response.status === 404) throw new DOMException("Viewer renderer session closed.", "AbortError")
-  if (!response.ok) throw new Error(`Renderer command request failed: ${response.status}`)
-  return await response.json() as { commands: ViewerBrokerCommand[] }
+  const response = await fetch(`/api/render-sessions/${encodeURIComponent(renderSessionId)}/commands?after=${after}`, { signal: AbortSignal.any([signal, AbortSignal.timeout(35_000)]) })
+  return await rendererJson(response) as { commands: ViewerBrokerCommand[] }
 }
 
-export async function submitViewerCommandResult(renderSessionId: string, input: {
-  commandSeq: number
-  requestId: string
-  ok: boolean
-  value?: Record<string, unknown>
-  error?: string
-}) {
+export async function submitViewerCommandResult(renderSessionId: string, body: string, signal: AbortSignal) {
   const response = await fetch(`/api/render-sessions/${encodeURIComponent(renderSessionId)}/results`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body,
+    signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
   })
-  if (!response.ok) throw new Error(`Renderer result submission failed: ${response.status}`)
+  return await rendererJson(response) as { accepted: true; commandSeq: number; requestId: string }
 }
 
-export async function submitViewerInteraction(renderSessionId: string, input: ViewerInteractionEvent) {
+export async function submitViewerInteraction(renderSessionId: string, body: string, signal: AbortSignal) {
   const response = await fetch(`/api/render-sessions/${encodeURIComponent(renderSessionId)}/interactions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body,
+    signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
   })
-  if (!response.ok) throw new Error(`Renderer interaction submission failed: ${response.status}`)
+  return await rendererJson(response) as { accepted: true; runtimeEventSeq: number }
+}
+
+export async function closeRendererSession(renderSessionId: string) {
+  const response = await fetch(`/api/render-sessions/${encodeURIComponent(renderSessionId)}`, {
+    method: "DELETE", keepalive: true, signal: AbortSignal.timeout(5_000),
+  })
+  if (!response.ok && response.status !== 404) throw new Error(`Renderer close failed: ${response.status}`)
+}
+
+export class RendererRequestError extends Error {
+  constructor(message: string, readonly status: number) { super(message) }
+}
+
+async function rendererJson(response: Response) {
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: string } | null
+    throw new RendererRequestError(body?.error ?? `Renderer request failed: ${response.status}`, response.status)
+  }
+  return response.json()
 }

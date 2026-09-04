@@ -10,12 +10,8 @@ import {
   type ViewerRendered,
   type ViewerRuntimeMessage,
 } from "../../viewer-protocol"
-import {
-  readViewerCommands,
-  registerPlayerRenderer,
-  submitViewerCommandResult,
-  submitViewerInteraction,
-} from "./api"
+import { registerPlayerRenderer } from "./api"
+import { startRendererDelivery } from "./renderer-delivery"
 
 export type PlayerFrameSession = {
   render(packageId: string, componentId: string): Promise<ViewerRendered>
@@ -112,35 +108,14 @@ async function waitForPlayerRuntime(frame: HTMLIFrameElement) {
   })
 }
 
-export async function startPlayerRenderer(artifact: ArtifactManifest, frame: PlayerFrameSession) {
-  const { session } = await registerPlayerRenderer({ artifactId: artifact.artifactId, sourceRevision: artifact.digest, protocolVersion: VIEWER_PROTOCOL_VERSION })
-  const controller = new AbortController()
-  let interactionQueue = Promise.resolve()
-  frame.setInteractionHandler((event) => {
-    interactionQueue = interactionQueue.then(() => submitViewerInteraction(session.renderSessionId, event)).catch(() => undefined)
-  })
-  void runRendererLoop(session.renderSessionId, artifact, frame, controller.signal)
-  return { renderSessionId: session.renderSessionId, stop: () => { controller.abort(); frame.setInteractionHandler(null) } }
-}
-
-async function runRendererLoop(renderSessionId: string, artifact: ArtifactManifest, frame: PlayerFrameSession, signal: AbortSignal) {
-  let after = 0
-  while (!signal.aborted) {
-    try {
-      const { commands } = await readViewerCommands(renderSessionId, after, signal)
-      for (const command of commands) {
-        if (signal.aborted) return
-        const result = await executeBrokerCommand(artifact, frame, command)
-          .then((value) => ({ ok: true as const, value }))
-          .catch((error) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }))
-        await submitViewerCommandResult(renderSessionId, { commandSeq: command.commandSeq, requestId: command.requestId, ...result })
-        after = command.commandSeq
-      }
-    } catch (error) {
-      if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return
-      await new Promise((resolve) => window.setTimeout(resolve, 1_000))
-    }
-  }
+export async function startPlayerRenderer(artifact: ArtifactManifest, frame: PlayerFrameSession, onError: (error: Error) => void, signal: AbortSignal) {
+  return startRendererDelivery(
+    (signal) => registerPlayerRenderer({ artifactId: artifact.artifactId, sourceRevision: artifact.digest, protocolVersion: VIEWER_PROTOCOL_VERSION }, signal),
+    frame,
+    (command) => executeBrokerCommand(artifact, frame, command),
+    onError,
+    signal,
+  )
 }
 
 async function executeBrokerCommand(artifact: ArtifactManifest, frame: PlayerFrameSession, command: ViewerBrokerCommand) {

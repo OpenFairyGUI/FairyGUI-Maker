@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { z } from "zod"
 
 import {
   VIEWER_PROTOCOL_VERSION,
+  MAX_RENDERER_INTERACTION_BYTES,
   type ViewerBrokerCommand,
   type ViewerInteractionEvent,
   type ViewerObservation,
@@ -13,6 +14,7 @@ import type { ArtifactManifest } from "../artifact-protocol"
 import { assetResourceKey, summarizeAssetAnalysis, type ProjectAssetAnalysis } from "../asset-analysis"
 
 const MAX_RENDER_REQUESTS_PER_SESSION = 256
+const RENDER_SESSION_TTL_MS = 5 * 60_000
 
 const viewerSetPropertySchema = z.object({
   op: z.literal("set-property"),
@@ -55,8 +57,9 @@ export const rendererInteractionSchema = z.object({
   runtimeEventSeq: z.number().int().positive(),
   targetId: z.string().min(1).max(128),
   event: z.enum(["click", "input", "change", "scroll"]),
-  data: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
-})
+  data: z.record(z.string().max(128), z.union([z.string().max(16_384), z.number().finite(), z.boolean(), z.null()]))
+    .refine((data) => Object.keys(data).length <= 32, "Too many interaction fields").optional(),
+}).strict().refine((input) => Buffer.byteLength(JSON.stringify(input)) <= MAX_RENDERER_INTERACTION_BYTES, "Interaction exceeds 64 KiB")
 
 const viewerProjectCatalogSchema = z.object({
   schemaVersion: z.literal(1),
@@ -128,6 +131,8 @@ type RenderSession = {
   commands: ViewerBrokerCommand[]
   pending: Map<string, PendingCommand>
   requests: Map<string, { fingerprint: string; promise: Promise<CommandResult> }>
+  resultReceipts: Map<number, { requestId: string; digest: string }>
+  interactionReceipts: Map<number, string>
   waiters: Set<() => void>
   interactions: Array<ViewerInteractionEvent & { interactionSeq: number; stateVersion: number; at: number }>
   observation: ViewerObservation | null
@@ -170,6 +175,8 @@ export class ViewerRenderBroker {
       commands: [],
       pending: new Map(),
       requests: new Map(),
+      resultReceipts: new Map(),
+      interactionReceipts: new Map(),
       waiters: new Set(),
       interactions: [],
       observation: null,
@@ -197,6 +204,7 @@ export class ViewerRenderBroker {
         const timeout = setTimeout(done, 25_000)
         session.waiters.add(done)
         signal.addEventListener("abort", done, { once: true })
+        if (signal.aborted) done()
       })
       if (this.currentSession(renderSessionId) !== session || String(session.status) === "closed") return null
       commands = read()
@@ -207,9 +215,22 @@ export class ViewerRenderBroker {
 
   submitResult(renderSessionId: string, input: z.infer<typeof rendererResultSchema>) {
     const session = this.currentSession(renderSessionId)
-    const command = session?.commands[0]
-    const pending = session?.pending.get(input.requestId)
-    if (!session || !command || command.commandSeq !== input.commandSeq || command.requestId !== input.requestId || !pending) return false
+    if (!session) return false
+    const digest = wireFingerprint(input)
+    const receipt = session.resultReceipts.get(input.commandSeq)
+    if (receipt) {
+      if (receipt.requestId !== input.requestId || receipt.digest !== digest) throw new Error("result_conflict: command already acknowledged with a different result")
+      session.rendererLastSeen = Date.now()
+      return true
+    }
+    const command = session.commands[0]
+    const pending = session.pending.get(input.requestId)
+    if (!command || command.commandSeq !== input.commandSeq || command.requestId !== input.requestId || !pending) {
+      throw new Error("result_conflict: command is stale or out of order")
+    }
+    // Receipts retain only hashes, never another copy of screenshot/observation payloads.
+    session.resultReceipts.set(input.commandSeq, { requestId: input.requestId, digest })
+    if (session.resultReceipts.size > MAX_RENDER_REQUESTS_PER_SESSION) session.resultReceipts.delete(session.resultReceipts.keys().next().value!)
     clearTimeout(pending.timeout)
     session.pending.delete(input.requestId)
     session.commands = session.commands.filter(({ commandSeq }) => commandSeq > input.commandSeq)
@@ -302,15 +323,31 @@ export class ViewerRenderBroker {
   recordInteraction(renderSessionId: string, input: z.infer<typeof rendererInteractionSchema>) {
     const session = this.currentSession(renderSessionId)
     if (!session || session.status === "closed") return null
-    if (input.runtimeEventSeq <= session.runtimeEventSeq) return this.publicSession(session)
+    const digest = wireFingerprint(input)
+    if (input.runtimeEventSeq <= session.runtimeEventSeq) {
+      if (session.interactionReceipts.get(input.runtimeEventSeq) !== digest) throw new Error("interaction_conflict: event differs or its receipt has expired")
+      session.rendererLastSeen = Date.now()
+      return this.publicSession(session)
+    }
     if (input.runtimeEventSeq !== session.runtimeEventSeq + 1) throw new Error(`interaction_sequence_gap: expected ${session.runtimeEventSeq + 1}, received ${input.runtimeEventSeq}`)
     session.runtimeEventSeq = input.runtimeEventSeq
     session.interactionSeq += 1
     session.stateVersion += 1
     session.rendererLastSeen = Date.now()
+    session.interactionReceipts.set(input.runtimeEventSeq, digest)
+    if (session.interactionReceipts.size > MAX_RENDER_REQUESTS_PER_SESSION) session.interactionReceipts.delete(session.interactionReceipts.keys().next().value!)
     session.interactions.push({ ...input, interactionSeq: session.interactionSeq, stateVersion: session.stateVersion, at: Date.now() })
     if (session.interactions.length > 100) session.interactions.splice(0, session.interactions.length - 100)
     return this.publicSession(session)
+  }
+
+  disconnectRenderer(renderSessionId: string) {
+    const session = this.sessions.get(renderSessionId)
+    if (session) this.removeSession(session, "Renderer disconnected. Reopen Viewer or Player to start a new session.")
+  }
+
+  pruneExpiredSessions() {
+    for (const id of this.sessions.keys()) this.currentSession(id)
   }
 
   close() {
@@ -322,7 +359,7 @@ export class ViewerRenderBroker {
   }
 
   private enqueue(session: RenderSession, kind: ViewerBrokerCommand["kind"], payload: Record<string, unknown>, requestedId: string = randomUUID()) {
-    const fingerprint = `${kind}:${JSON.stringify(payload)}`
+    const fingerprint = wireFingerprint({ kind, payload })
     const existing = session.requests.get(requestedId)
     if (existing) {
       if (existing.fingerprint !== fingerprint) throw new Error("request_id_conflict: requestId was already used for a different Viewer command")
@@ -338,10 +375,8 @@ export class ViewerRenderBroker {
     session.commands.push(command)
     const promise = new Promise<CommandResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        session.pending.delete(command.requestId)
-        session.commands = session.commands.filter(({ requestId }) => requestId !== command.requestId)
-        session.status = "failed"
-        reject(new Error("Viewer renderer did not answer within 30 seconds."))
+        // An unacknowledged command may already have mutated the iframe. Never reuse this uncertain session.
+        this.removeSession(session, "render_command_timeout: Viewer renderer did not answer within 30 seconds; execution status is unknown. Reopen Viewer or Player.")
       }, 30_000)
       session.pending.set(command.requestId, { resolve, reject, timeout })
     })
@@ -367,6 +402,7 @@ export class ViewerRenderBroker {
       stateVersion: session.stateVersion,
       commandSeq: session.commandSeq,
       interactionSeq: session.interactionSeq,
+      lastAcceptedRuntimeEventSeq: session.runtimeEventSeq,
       latestInteraction: session.interactions.at(-1) ?? null,
       observation: session.observation,
     }
@@ -379,6 +415,10 @@ export class ViewerRenderBroker {
   private currentSession(renderSessionId: string) {
     const session = this.sessions.get(renderSessionId)
     if (!session) return undefined
+    if (Date.now() - session.rendererLastSeen > RENDER_SESSION_TTL_MS) {
+      this.removeSession(session, "Renderer session expired. Reopen Viewer or Player.")
+      return undefined
+    }
     if (this.sourceRevision(session.mode, session.sourceId) !== session.sourceRevision) {
       this.removeSession(session, "The render source revision changed.")
       return undefined
@@ -401,10 +441,20 @@ export class ViewerRenderBroker {
     }
     session.pending.clear()
     session.requests.clear()
+    session.resultReceipts.clear()
+    session.interactionReceipts.clear()
     session.commands = []
     for (const wake of session.waiters) wake()
     session.waiters.clear()
   }
+}
+
+function wireFingerprint(value: unknown) {
+  return createHash("sha256").update(JSON.stringify(value, (_key, item) => (
+    item && typeof item === "object" && !Array.isArray(item)
+      ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, item[key]]))
+      : item
+  ))).digest("hex")
 }
 
 export function registerViewerMcpTools(

@@ -616,22 +616,36 @@ function ArtifactPlayer({ artifact }: { artifact: ArtifactListItem }) {
     let disposed = false
     let active: PlayerFrameSession | null = null
     let stopRenderer: (() => void) | null = null
+    const lifetime = new AbortController()
     const connect = async () => {
       try {
         setRuntimeError("")
         active = await connectPlayerFrame(frame, artifact, setRendered)
         if (disposed) { active.destroy(); return }
         setSession(active)
-        const renderer = await startPlayerRenderer(artifact, active)
+        const renderer = await startPlayerRenderer(artifact, active, (error) => {
+          if (disposed) return
+          active?.destroy()
+          setSession(null)
+          setRenderSessionId("")
+          setRuntimeError(error.message)
+        }, lifetime.signal)
         stopRenderer = renderer.stop
+        if (disposed) { renderer.stop(); return }
         setRenderSessionId(renderer.renderSessionId)
       } catch (error) {
-        if (!disposed) setRuntimeError(error instanceof Error ? error.message : String(error))
+        if (!disposed) {
+          active?.destroy()
+          setSession(null)
+          setRenderSessionId("")
+          setRuntimeError(error instanceof Error ? error.message : String(error))
+        }
       }
     }
     void connect()
     return () => {
       disposed = true
+      lifetime.abort()
       stopRenderer?.()
       active?.destroy()
       setSession(null)
@@ -711,7 +725,7 @@ function ArtifactPlayer({ artifact }: { artifact: ArtifactListItem }) {
           <ResizablePanel id="player-canvas" minSize={360} className="min-w-0"><div className="relative h-full min-h-0 bg-[#202226]">
             <iframe ref={iframeRef} src="/player-runtime.html" title="FairyGUI LayaAir Player Runtime" sandbox="allow-scripts allow-same-origin" className="absolute inset-0 size-full border-0" />
             {!session && !runtimeError ? <div className="absolute inset-0 grid place-items-center bg-background/80 backdrop-blur-sm"><ViewerLoading message="正在启动原生 UIPackage runtime…" /></div> : null}
-            {runtimeError ? <div className="absolute inset-0 grid place-items-center bg-background/90 p-8 text-center"><div className="max-w-lg"><ServerCog className="mx-auto mb-4 size-9 text-destructive" /><p className="font-medium">Player 无法启动</p><p className="mt-2 text-sm text-muted-foreground">{runtimeError}</p><Button asChild className="mt-4"><Link to="/player">返回 Player</Link></Button></div></div> : null}
+            {runtimeError ? <div role="alert" className="absolute inset-0 grid place-items-center bg-background/90 p-8 text-center"><div className="max-w-lg"><ServerCog className="mx-auto mb-4 size-9 text-destructive" /><p className="font-medium">Player 已停止</p><p className="mt-2 text-sm text-muted-foreground">{runtimeError}</p><div className="mt-4 flex justify-center gap-2"><Button variant="outline" onClick={() => window.location.reload()}>重新连接</Button><Button asChild><Link to="/player">返回 Player</Link></Button></div></div></div> : null}
             {rendered && session && !runtimeError ? <div className="pointer-events-none absolute bottom-3 right-3 rounded-md border bg-background/85 px-2.5 py-1.5 text-[11px] text-muted-foreground shadow-sm backdrop-blur">{rendered.packageName}/{rendered.componentName} · {rendered.width}×{rendered.height}</div> : null}
           </div></ResizablePanel>
         </ResizablePanelGroup>
@@ -937,6 +951,7 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
     let disposed = false
     let active: ViewerFrameSession | null = null
     let stopRenderer: (() => void) | null = null
+    const lifetime = new AbortController()
     const connect = async () => {
       try {
         setRuntimeError("")
@@ -946,11 +961,23 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
           return
         }
         setSession(active)
-        const renderer = await startViewerRenderer(project.projectId, bundle.data, active)
+        const renderer = await startViewerRenderer(project.projectId, bundle.data, active, (error) => {
+          if (disposed) return
+          active?.destroy()
+          setSession(null)
+          setRenderSessionId("")
+          setRuntimeError(error.message)
+        }, lifetime.signal)
         stopRenderer = renderer.stop
+        if (disposed) { renderer.stop(); return }
         setRenderSessionId(renderer.renderSessionId)
       } catch (error) {
-        if (!disposed) setRuntimeError(error instanceof Error ? error.message : String(error))
+        if (!disposed) {
+          active?.destroy()
+          setSession(null)
+          setRenderSessionId("")
+          setRuntimeError(error instanceof Error ? error.message : String(error))
+        }
       }
     }
     if (frame.contentDocument?.readyState === "complete") void connect()
@@ -958,6 +985,7 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
     return () => {
       disposed = true
       frame.removeEventListener("load", connect)
+      lifetime.abort()
       stopRenderer?.()
       active?.destroy()
       setSession(null)
@@ -1085,13 +1113,13 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
                   </div>
                 )}
                 {(bundle.isError || runtimeError) && (
-                  <div className="absolute inset-0 grid place-items-center bg-background/90 p-8 text-center">
+                  <div role="alert" className="absolute inset-0 grid place-items-center bg-background/90 p-8 text-center">
                     <div className="max-w-lg">
                       <ServerCog className="mx-auto mb-4 size-9 text-destructive" />
-                      <p className="font-medium">Viewer 无法启动</p>
+                      <p className="font-medium">Viewer 已停止</p>
                       <p className="mt-2 text-sm text-muted-foreground">{runtimeError || (bundle.error instanceof Error ? bundle.error.message : "未知错误")}</p>
                       <div className="mt-4 flex justify-center gap-2">
-                        <Button variant="outline" onClick={() => void bundle.refetch()}>重试</Button>
+                        <Button variant="outline" onClick={() => runtimeError ? window.location.reload() : void bundle.refetch()}>{runtimeError ? "重新连接" : "重试"}</Button>
                         <Button asChild><Link to="/">返回 Dashboard</Link></Button>
                       </div>
                     </div>
