@@ -77,6 +77,8 @@ Node Host 是项目记录、import draft、render session 和发布产物的所�
 
 Viewer 工程绑定固定为只读。浏览器按需读取当前工程，用 OpenFairyGUI UAM 构建所选组件的 `ViewerScene` 依赖闭包，再传给隔离 iframe 直接构造 FairyGUI 对象；这个过程不调用发布流程、不生成 `.fui`、不写回项目目录，也不生成持久 artifact。完整模式下单独存在的 OpenFairyGUI backend session 才能在 revision 检查和明确 save 后写工程。Agent 对 Viewer 的数据驱动只修改 render session 临时状态。
 
+批次 14 将浏览器和 CLI 的快照规则收敛到 `src/project-snapshot.ts`：复用 Core ProjectReader 确定依赖，默认排除隐藏/敏感/构建路径，读取前限制容量，读取后复核字节和目录索引，以内容摘要固定 UAM 与源文件集合。浏览器使用 `POST /api/projects/:id/refresh` 做身份与旧 sourceRevision CAS，再注册新 Renderer；项目移除清理 Host 记录、快照、分析及旧会话，Workbench 清理对应 IndexedDB handle，不触碰源文件。详细限制和非目标见 [Workbench 批次 14](./workbench.md#29-revision-与快照隐私批次-14)。
+
 ## 5. MCP 能力设计
 
 现有 OpenFairyGUI backend 工具继续负责底层会话能力：

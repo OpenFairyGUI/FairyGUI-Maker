@@ -186,6 +186,36 @@ Visual Evidence 的 report/draft 元数据保存 `renderState` 双版本，重�
 
 验证：`test/broker-state.test.ts` 覆盖队头 CAS、别名、双版本独立性、幂等参数、捕获后交互和失败失效；`scripts/broker-state-smoke.ts` 验证 Viewer/Player 实际视图、409 提示、viewport/PNG 尺寸，以及 Player Controller/Transition 与组件选择的双向同步。原有交付故障、资源预算和 FIG 视觉基线烟测继续执行。
 
+### 2.9 Revision 与快照隐私（批次 14）
+
+浏览器和 CLI 共用 `src/project-snapshot.ts`。目录遍历只收集受预算约束的元数据；Core ProjectReader 从唯一 `.fairy` 读取五种标准 settings JSON、`assets`/`assets_*` 的 package/component XML 和已声明资源字节。另收集文本/XML/BMF v3 位图字体 page、Spine `.atlas` page、DragonBones `_tex.json` 的 `imagePath` 及显式 `atlasNames` 依赖。不是整个目录的上传，也不是仅选中组件的闭包：Asset Manager 仍需要整个工程资源目录。
+
+默认忽略任意点开头路径（含 `.env*`、`.git`、`.svn`、`.openfairygui`、`.fairygui-maker`），以及 `node_modules/dist/build/out/coverage/library/temp/obj/bin` 和 `.pem/.key/.p12/.pfx`。未声明的源码、部署 JSON 等不会读取或出现在 Source API。拒绝根目录越界、符号链接/特殊文件和不安全路径；不提供 `include-extra` 或绕过隐藏文件策略的开关。字体/骨骼旁文件纳入快照不代表 Viewer 已支持其全部渲染语义。
+
+| 扫描边界 | 固定上限 |
+|---|---|
+| 每轮枚举条目 / 可见文件 / 目录（含根） / 深度 | 10,000 / 5,000 / 1,000 / 32 |
+| 单个文件 / `.fairy/.xml/.json/.atlas/.fnt` | 128 MiB / 8 MiB |
+| 一次依赖快照字节 | 512 MiB |
+| 时间与取消 | 60 秒协作式 deadline；Dashboard、Viewer、Asset Manager 显示进度并可取消扫描 |
+
+适配器在分配文件缓冲区前检查大小；内容读入后再逐文件重读比对，并复核目录索引，变化则失败、不发布新 revision。`sourceRevision = SHA256(JSON.stringify(sorted([relativePath, SHA256(bytes)])))`，排序采用路径 code-unit 顺序。UAM 再从冻结的同一依赖集合构建，避免摘要、模型和 Source API 混用不同版本。metadata-only revision 已移除；同大小、同 mtime 的内容修改也会变更摘要，无关文件内容修改不影响摘要。它不是操作系统原子快照/文件锁，也不是解析器 CPU/RSS 的硬沙箱；原生文件读取和同步解析在下一个检查点响应取消。
+
+浏览器 Viewer 与 Asset Manager 都先读取 Host 当前记录，再读取并复核目录，最后调用：
+
+```text
+POST /api/projects/:projectId/refresh
+{ bindingId, fairyguiProjectId, expectedSourceRevision, nextSourceRevision }
+```
+
+Host 同步校验身份和旧 revision：冲突 `409`，不自动重放；相同内容无操作，不增版本。内容变化时更新 sourceRevision、revision + 1、清空 AssetAnalysis，并立即关闭旧 Renderer、拒绝 pending 命令和唤醒长轮询。刷新成功后 Viewer 重建 iframe、注册新会话，不沿用旧事件序号。注册 `POST /api/projects` 只允许完全相同输入的幂等重试，不再作为更新捷径；不可变 Host 快照拒绝浏览器 refresh/覆盖。Host Source API 支持 `sourceRevision` 查询守卫，Viewer 总是携带它。Host 无法自行重算浏览器未上传的字节，因此浏览器摘要仍是已认证客户端的声明，不是签名证明。
+
+`DELETE /api/projects/:id?bindingId=...&expectedRevision=...` 移除注册、内存快照、分析与 Renderer，冲突返回 `409`。Dashboard 确认后执行删除，再清理本浏览器相同 bindingId 的 IndexedDB handle；重复删除 `404` 可继续本地清理。其他浏览器的 IndexedDB 不能远程删除。源工程、Draft 和 Artifact 文件均不删除；仍存在的 Import Draft 再次打开时可以重建其派生 Preview。Host 项目注册不跨重启持久化。
+
+“清理失效授权”是显式操作：仅删除当前 Host 未注册、保存超过 24 小时的本浏览器记录，兼容清理没有 savedAt 的旧 v1 记录；近期保存保留，避免与其他页面正在进行的注册冲突。保存时间是同一 IDB store 的可选字段，无新索引，不做整库迁移。移除 handle 不等于撤销浏览器的系统权限。网络结果不确定的注册保留本地 handle，待确认或显式清理，不先丢失授权。
+
+验证：`test/project-snapshot.test.ts` 覆盖依赖、敏感文件、同大小/mtime 修改、复读冲突、路径、符号链接、扫描预算与读取前大小检查；`test/project-revision.test.ts` 覆盖 CAS 并发、no-op、缓存/会话即时失效、删除、Host 只读及 Source API 隐私。`scripts/project-revision-smoke.ts` 使用真实 OPFS/IndexedDB、Workbench 和 runtime 验证刷新后的新文本、Asset Manager 跨页失效、取消与授权清理；仅注入目录选择器结果，不声称验证了系统弹窗或系统权限撤销。证据落盘事务、iframe 权限隔离仍是后续批次。
+
 ## 3. 核心领域契约
 
 接口使用稳定 ID，不使用显示名称、任意文件路径或屏幕坐标作为主键。
@@ -205,7 +235,7 @@ type RegisteredProject = {
   fairyPath: string
   revision: number
   sourceRevision: string
-  sourceOwner: 'browser'
+  sourceOwner: 'browser' | 'host'
   access: 'read-only'
   status: 'ready' | 'permission-required' | 'stale' | 'failed'
   viewerUrl: string
@@ -366,6 +396,10 @@ REST 供 Workbench WebUI 和 Renderer Client 使用。当前接口为：
 - `POST /api/projects`
 - `GET /api/projects`
 - `GET /api/projects/:projectId`
+- `POST /api/projects/:projectId/refresh`
+- `DELETE /api/projects/:projectId?bindingId={bindingId}&expectedRevision={revision}`
+- `GET /api/projects/:projectId/source-index?sourceRevision={sourceRevision}`
+- `GET /api/projects/:projectId/source-file?path={relativePath}&sourceRevision={sourceRevision}`
 - `GET /api/projects/:projectId/asset-analysis`
 - `PUT /api/projects/:projectId/asset-analysis`
 - `POST /api/renderers`

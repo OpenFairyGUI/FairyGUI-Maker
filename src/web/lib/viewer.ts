@@ -1,6 +1,7 @@
 import type { Document, UamAssetResource, UamComponentResource, UamProject, UamResource } from "@openfairygui/core"
 import type { FileSystem } from "@openfairygui/core/project-io"
 import { collectUamResourceReferences } from "../../asset-analysis"
+import { snapshotFileSystem, type ProjectScanOptions } from "../../project-snapshot"
 import {
   VIEWER_PROTOCOL_VERSION,
   type ViewerBrokerCommand,
@@ -17,13 +18,13 @@ import {
   type ViewerViewState,
   type ViewerScene,
 } from "../../viewer-protocol"
-import { registerViewerRenderer } from "./api"
+import { getProject, refreshProject, registerViewerRenderer } from "./api"
 import { startRendererDelivery } from "./renderer-delivery"
 import { createRenderSessionClient, type RenderSessionClient } from "./render-session"
 import {
   getProjectBinding,
   queryProjectBindingPermission,
-  refreshProjectSourceRevision,
+  readBrowserProjectSnapshot,
 } from "./project-source"
 
 export type ViewerProjectRef = {
@@ -42,28 +43,31 @@ export type ViewerProjectBundle = {
   diagnostics: ViewerDiagnostic[]
 }
 
-export async function readViewerProject(project: ViewerProjectRef): Promise<ViewerProjectBundle> {
-  const [{ createFileSystemAccessFileSystem }, { ProjectReader }, core] = await Promise.all([
-    import("@openfairygui/core/web"),
+export async function readViewerProject(project: ViewerProjectRef, options: ProjectScanOptions = {}): Promise<ViewerProjectBundle> {
+  const { project: current } = await getProject(project.projectId, options.signal)
+  if (current.bindingId !== project.bindingId || current.fairyguiProjectId !== project.fairyguiProjectId || current.fairyPath !== project.fairyPath || current.sourceOwner !== project.sourceOwner) {
+    throw new Error("工程绑定已改变，请从 Dashboard 重新打开。")
+  }
+  const [{ ProjectReader }, core] = await Promise.all([
     import("@openfairygui/core/project-io"),
     import("@openfairygui/core"),
   ])
-  let sourceRevision = project.sourceRevision
-  let fileSystem: FileSystem
-  let browserSource: Awaited<ReturnType<typeof getProjectBinding>> = null
+  let sourceRevision = current.sourceRevision
+  let document: Document
   if (project.sourceOwner === "host") {
-    fileSystem = await createHostProjectFileSystem(project.projectId)
+    document = await new ProjectReader(await createHostProjectFileSystem(project.projectId, sourceRevision, options.signal)).read(project.fairyPath, { hydrateResourceBytes: true })
   } else {
-    browserSource = await getProjectBinding(project.bindingId)
+    const browserSource = await getProjectBinding(project.bindingId)
     if (!browserSource) throw new Error("当前浏览器中找不到该工程的文件夹授权，请从 Dashboard 重新创建绑定。")
     const permission = await queryProjectBindingPermission(project.bindingId)
     if (permission !== "granted" && permission !== "unavailable") {
       throw new Error("需要重新授权读取 FairyGUI 工程文件夹。")
     }
-    sourceRevision = await refreshProjectSourceRevision(browserSource)
-    fileSystem = createFileSystemAccessFileSystem(browserSource.directory as unknown as Parameters<typeof createFileSystemAccessFileSystem>[0])
+    const snapshot = await readBrowserProjectSnapshot(browserSource.directory, options)
+    if (snapshot.fairyPath !== current.fairyPath || snapshot.fairyguiProjectId !== current.fairyguiProjectId) throw new Error("目录中的工程身份已改变，请重新绑定。")
+    sourceRevision = snapshot.sourceRevision
+    document = snapshot.document
   }
-  const document = await new ProjectReader(fileSystem).read(project.fairyPath, { hydrateResourceBytes: true })
   const root = document.getRoot()
   if (root.getProjectId() !== project.fairyguiProjectId) {
     throw new Error("文件夹中的 FairyGUI 工程 ID 与 Dashboard 绑定不一致，请重新创建项目绑定。")
@@ -77,8 +81,10 @@ export async function readViewerProject(project: ViewerProjectRef): Promise<View
     path: issue.path,
     message: issue.message,
   }))
-  if (browserSource && sourceRevision !== await refreshProjectSourceRevision(browserSource)) {
-    throw new Error("FairyGUI 工程在 Viewer 读取过程中发生了变化，请刷新后重试。")
+  options.signal?.throwIfAborted()
+  if (project.sourceOwner === "browser") {
+    // Publish only after the frozen bytes and UAM are ready; a concurrent refresh must fail CAS, never overwrite it.
+    await refreshProject(project.projectId, { bindingId: current.bindingId, fairyguiProjectId: current.fairyguiProjectId, expectedSourceRevision: current.sourceRevision, nextSourceRevision: sourceRevision }, options.signal)
   }
 
   return {
@@ -99,65 +105,26 @@ export async function readViewerProject(project: ViewerProjectRef): Promise<View
   }
 }
 
-async function createHostProjectFileSystem(projectId: string): Promise<FileSystem> {
-  const indexResponse = await fetch(`/api/projects/${encodeURIComponent(projectId)}/source-index`)
+async function createHostProjectFileSystem(projectId: string, sourceRevision: string, signal?: AbortSignal): Promise<FileSystem> {
+  const base = `/api/projects/${encodeURIComponent(projectId)}`
+  const indexResponse = await fetch(`${base}/source-index?sourceRevision=${sourceRevision}`, { signal })
   if (!indexResponse.ok) throw new Error("Host 中找不到 CLI 授权的工程快照。")
   const { files } = await indexResponse.json() as { files: Array<{ path: string; size: number }> }
   const filePaths = new Set(files.map(({ path }) => path))
   const cache = new Map<string, Promise<Uint8Array>>()
   const readRaw = (filePath: string) => {
-    const safePath = normalizeProjectPath(filePath)
+    const safePath = filePath
     if (!filePaths.has(safePath)) return Promise.reject(new Error(`工程文件不存在：${safePath}`))
     const existing = cache.get(safePath)
     if (existing) return existing
-    const pending = fetch(`/api/projects/${encodeURIComponent(projectId)}/source-file?path=${encodeURIComponent(safePath)}`).then(async (response) => {
+    const pending = fetch(`${base}/source-file?path=${encodeURIComponent(safePath)}&sourceRevision=${sourceRevision}`, { signal }).then(async (response) => {
       if (!response.ok) throw new Error(`工程文件读取失败：${safePath}`)
       return new Uint8Array(await response.arrayBuffer())
     })
     cache.set(safePath, pending)
     return pending
   }
-  const readonly = async () => { throw new Error("CLI 工程快照为只读。") }
-  return {
-    async readFile(filePath) { return new TextDecoder().decode(await readRaw(filePath)) },
-    readFileRaw: readRaw,
-    writeFile: readonly,
-    writeFileRaw: readonly,
-    mkdir: readonly,
-    async readdir(directory) {
-      const safeDirectory = directory === "" || directory === "." ? "" : normalizeProjectPath(directory)
-      const prefix = safeDirectory ? `${safeDirectory}/` : ""
-      return [...new Set([...filePaths].flatMap((filePath) => {
-        if (!filePath.startsWith(prefix)) return []
-        const remainder = filePath.slice(prefix.length)
-        const slash = remainder.indexOf("/")
-        return slash === -1 ? [] : [remainder.slice(0, slash)]
-      }))]
-    },
-    async exists(filePath) {
-      const safePath = normalizeProjectPath(filePath)
-      return filePaths.has(safePath) || [...filePaths].some((candidate) => candidate.startsWith(`${safePath}/`))
-    },
-    join: (...paths) => normalizeProjectPath(paths.filter(Boolean).join("/")),
-    dirname(filePath) {
-      const safePath = normalizeProjectPath(filePath)
-      return safePath.includes("/") ? safePath.slice(0, safePath.lastIndexOf("/")) : "."
-    },
-  }
-}
-
-function normalizeProjectPath(value: string) {
-  const segments: string[] = []
-  for (const segment of value.replaceAll("\\", "/").split("/")) {
-    if (!segment || segment === ".") continue
-    if (segment === "..") {
-      if (!segments.pop()) throw new Error("工程路径越界。")
-    } else {
-      segments.push(segment)
-    }
-  }
-  if (segments.length === 0) throw new Error("工程路径为空。")
-  return segments.join("/")
+  return snapshotFileSystem(filePaths, readRaw)
 }
 
 export function compileViewerScene(bundle: ViewerProjectBundle, packageId: string, componentId: string): ViewerScene {

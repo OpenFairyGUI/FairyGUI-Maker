@@ -443,6 +443,12 @@ export class ViewerRenderBroker {
     if (session) this.removeSession(session, "Renderer disconnected. Reopen Viewer or Player to start a new session.")
   }
 
+  invalidateProject(projectId: string) {
+    const id = this.sessionBySource.get(`viewer:${projectId}`)
+    const session = id ? this.sessions.get(id) : undefined
+    if (session) this.removeSession(session, "Project source changed or was removed. Reopen Viewer for the current revision.")
+  }
+
   pruneExpiredSessions() {
     for (const id of this.sessions.keys()) this.currentSession(id)
   }

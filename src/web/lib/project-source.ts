@@ -1,3 +1,5 @@
+import { captureProjectSnapshot, projectPath, type ProjectScanOptions } from "../../project-snapshot"
+
 export type ProjectBindingPermission = PermissionState | "missing" | "unavailable" | "host"
 
 export type AuthorizedProjectSource = {
@@ -24,13 +26,14 @@ type PermissionDirectoryHandle = FileSystemDirectoryHandle & {
 
 type PersistedProjectBinding = Omit<AuthorizedProjectSource, "directory"> & {
   directory: FileSystemDirectoryHandle
+  savedAt?: number
 }
 
 const DATABASE_NAME = "fairygui-maker"
 const DATABASE_VERSION = 1
 const BINDING_STORE = "project-bindings"
 
-export async function authorizeProjectDirectory(): Promise<AuthorizedProjectSource | null> {
+export async function authorizeProjectDirectory(options: ProjectScanOptions = {}): Promise<AuthorizedProjectSource | null> {
   const picker = (window as DirectoryPickerWindow).showDirectoryPicker
   if (!picker) throw new Error("当前浏览器不支持文件夹授权，请使用最新版 Chrome 或 Edge。")
 
@@ -42,20 +45,7 @@ export async function authorizeProjectDirectory(): Promise<AuthorizedProjectSour
     throw error
   }
 
-  const files = await collectProjectFiles(directory)
-  const fairyFiles = files.filter(({ path }) => path.toLowerCase().endsWith(".fairy"))
-  if (fairyFiles.length === 0) throw new Error("所选文件夹中没有 .fairy 工程文件。")
-  if (fairyFiles.length > 1) {
-    throw new Error(`所选文件夹包含多个 .fairy 工程：${fairyFiles.slice(0, 3).map(({ path }) => path).join("、")}`)
-  }
-
-  const [{ file, path: fairyPath }] = fairyFiles
-  const document = new DOMParser().parseFromString(await file.text(), "application/xml")
-  if (document.querySelector("parsererror") || document.documentElement.localName !== "projectDescription") {
-    throw new Error(`${fairyPath} 不是有效的 FairyGUI 工程文件。`)
-  }
-  const fairyguiProjectId = document.documentElement.getAttribute("id")?.trim()
-  if (!fairyguiProjectId) throw new Error(`${fairyPath} 缺少 projectDescription id。`)
+  const { fairyPath, fairyguiProjectId, sourceRevision } = await readBrowserProjectSnapshot(directory, options)
 
   return {
     bindingId: crypto.randomUUID(),
@@ -64,7 +54,7 @@ export async function authorizeProjectDirectory(): Promise<AuthorizedProjectSour
     fairyguiProjectId,
     fairyPath,
     name: fairyPath.split("/").at(-1)!.replace(/\.fairy$/i, ""),
-    sourceRevision: await fingerprintProjectFiles(files),
+    sourceRevision,
   }
 }
 
@@ -81,8 +71,30 @@ export async function getProjectBinding(bindingId: string): Promise<AuthorizedPr
   }
 }
 
-export async function refreshProjectSourceRevision(source: AuthorizedProjectSource) {
-  return await fingerprintProjectFiles(await collectProjectFiles(source.directory))
+export function readBrowserProjectSnapshot(root: FileSystemDirectoryHandle, options: ProjectScanOptions = {}) {
+  const directoryAt = async (path: string) => {
+    let directory = root
+    for (const part of projectPath(path).split("/").filter(Boolean)) directory = await directory.getDirectoryHandle(part)
+    return directory
+  }
+  return captureProjectSnapshot({
+    async *entries(path) {
+      for await (const [name, handle] of (await directoryAt(path) as IterableDirectoryHandle).entries()) yield { name, kind: handle.kind }
+    },
+    async readFile(path, maxBytes, signal) {
+      signal.throwIfAborted()
+      const parts = path.split("/")
+      const name = parts.pop()!
+      const handle = await (await directoryAt(parts.join("/"))).getFileHandle(name)
+      const file = await handle.getFile()
+      signal.throwIfAborted()
+      if (file.size > maxBytes) throw new Error("project_snapshot_byte_budget_exceeded")
+      const data = new Uint8Array(await file.arrayBuffer())
+      signal.throwIfAborted()
+      if (data.byteLength !== file.size || data.byteLength > maxBytes) throw new Error("project_source_changed_during_read")
+      return data
+    },
+  }, options)
 }
 
 export async function saveProjectBinding(source: AuthorizedProjectSource) {
@@ -90,7 +102,7 @@ export async function saveProjectBinding(source: AuthorizedProjectSource) {
   try {
     await new Promise<void>((resolve, reject) => {
       const transaction = database.transaction(BINDING_STORE, "readwrite")
-      transaction.objectStore(BINDING_STORE).put(source satisfies PersistedProjectBinding)
+      transaction.objectStore(BINDING_STORE).put({ ...source, savedAt: Date.now() } satisfies PersistedProjectBinding)
       transaction.oncomplete = () => resolve()
       transaction.onerror = () => reject(transaction.error ?? new Error("工程绑定保存失败。"))
       transaction.onabort = () => reject(transaction.error ?? new Error("工程绑定保存已中止。"))
@@ -108,10 +120,32 @@ export async function deleteProjectBinding(bindingId: string) {
       transaction.objectStore(BINDING_STORE).delete(bindingId)
       transaction.oncomplete = () => resolve()
       transaction.onerror = () => reject(transaction.error ?? new Error("工程绑定清理失败。"))
+      transaction.onabort = () => reject(transaction.error ?? new Error("工程绑定清理已中止。"))
     })
   } finally {
     database.close()
   }
+}
+
+/** Explicit cleanup only; retain fresh saves so another tab can finish Host registration. Legacy v1 records have no savedAt. */
+export async function cleanupProjectBindings(registeredBindingIds: Set<string>) {
+  const database = await openDatabase()
+  try {
+    return await new Promise<number>((resolve, reject) => {
+      let removed = 0
+      const transaction = database.transaction(BINDING_STORE, "readwrite")
+      const request = transaction.objectStore(BINDING_STORE).openCursor()
+      request.onsuccess = () => {
+        const cursor = request.result
+        if (!cursor) return
+        const binding = cursor.value as PersistedProjectBinding
+        if (!registeredBindingIds.has(binding.bindingId) && (binding.savedAt ?? 0) < Date.now() - 86_400_000) { cursor.delete(); removed++ }
+        cursor.continue()
+      }
+      transaction.oncomplete = () => resolve(removed)
+      transaction.onerror = transaction.onabort = () => reject(transaction.error ?? new Error("失效授权清理失败。"))
+    })
+  } finally { database.close() }
 }
 
 export async function queryProjectBindingPermission(bindingId: string): Promise<ProjectBindingPermission> {
@@ -133,38 +167,6 @@ export async function queryProjectBindingPermission(bindingId: string): Promise<
   } finally {
     database.close()
   }
-}
-
-async function scanDirectory(
-  directory: FileSystemDirectoryHandle,
-  parentPath: string,
-  files: Array<{ file: File; path: string }>,
-) {
-  for await (const [name, handle] of (directory as IterableDirectoryHandle).entries()) {
-    const path = parentPath ? `${parentPath}/${name}` : name
-    if (handle.kind === "file") {
-      files.push({ file: await (handle as FileSystemFileHandle).getFile(), path })
-    } else {
-      await scanDirectory(handle as FileSystemDirectoryHandle, path, files)
-    }
-  }
-}
-
-async function collectProjectFiles(directory: FileSystemDirectoryHandle) {
-  const files: Array<{ file: File; path: string }> = []
-  await scanDirectory(directory, "", files)
-  return files
-}
-
-async function fingerprintProjectFiles(files: Array<{ file: File; path: string }>) {
-  // ponytail: metadata fingerprint avoids reading every asset; use content digests if same-size timestamp spoofing matters.
-  const fingerprint = files
-    .map(({ file, path }) => `${path}\0${file.size}\0${file.lastModified}`)
-    .sort()
-    .join("\n")
-  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(fingerprint)))]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("")
 }
 
 function openDatabase(): Promise<IDBDatabase> {

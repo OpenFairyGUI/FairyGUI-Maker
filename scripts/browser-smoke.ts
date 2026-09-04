@@ -11,6 +11,7 @@ import type { ArtifactManifest } from "../src/artifact-protocol"
 import { runtimeBudgetSmoke } from "./runtime-budget-smoke"
 import { rendererDeliverySmoke } from "./renderer-delivery-smoke"
 import { brokerStateSmoke } from "./broker-state-smoke"
+import { projectRevisionSmoke } from "./project-revision-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -214,13 +215,19 @@ try {
   const playerDelivery = await rendererDeliverySmoke(page, "player", playerRender.value.renderSessionId, playerRender.value.value.observation.objectTree.id,
     (name, args) => callTool(host!.origin, sessionId, 70, name, args))
   const runtimeBudgets = await runtimeBudgetSmoke(page.context(), host.origin, artifact, publishDir)
+  const projectRevision = await projectRevisionSmoke(context, host.origin)
   if (pageErrors.length) throw new Error(`Browser page errors: ${pageErrors.join("; ")}`)
 
   await fetch(`${host.origin}/mcp`, {
     method: "DELETE",
     headers: { ...headers, "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
   })
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, artifactUpload: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, runtimeBudgets, projectRevision, screenshots: 3, artifactId: artifact.artifactId }) + "\n")
+} catch (error) {
+  for (const page of browser?.contexts().flatMap((context) => context.pages()) ?? []) {
+    process.stderr.write(`${page.url()}\n${await page.locator("body").innerText().catch(() => "Page unavailable")}\n`)
+  }
+  throw error
 } finally {
   await browser?.close()
   await host?.close()

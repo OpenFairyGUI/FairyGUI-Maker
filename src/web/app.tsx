@@ -46,12 +46,13 @@ import {
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { DesignImportPage, ImportDraftPage, type VisualCaptureInfo } from "@/design-import"
-import { createProject, getArtifact, getArtifacts, getProject, getProjects, getSessions, getStatus, registerProjectAssetAnalysis, type RegisteredProjectData } from "@/lib/api"
+import { createProject, deleteProject, getArtifact, getArtifacts, getProject, getProjects, getSessions, getStatus, registerProjectAssetAnalysis, type RegisteredProjectData } from "@/lib/api"
 import { importPublishedFolder } from "@/lib/artifacts"
 import { startPlayerRenderer } from "@/lib/player"
 import { watchRenderViewport, type RenderSessionClient } from "@/lib/render-session"
 import {
   authorizeProjectDirectory,
+  cleanupProjectBindings,
   deleteProjectBinding,
   queryProjectBindingPermission,
   saveProjectBinding,
@@ -169,21 +170,38 @@ function DashboardPage() {
   const sessions = useQuery(sessionsQuery)
   const projects = useQuery(projectsQuery)
   const artifacts = useQuery(artifactsQuery)
+  const scanAbort = useRef<AbortController | null>(null)
+  const [projectProgress, setProjectProgress] = useState("")
+  useEffect(() => () => scanAbort.current?.abort(), [])
   const projectCreation = useMutation({
     mutationFn: async () => {
-      const source = await authorizeProjectDirectory()
+      const controller = new AbortController()
+      scanAbort.current = controller
+      const source = await authorizeProjectDirectory({ signal: controller.signal, onProgress: setProjectProgress })
       if (!source) return null
+      controller.signal.throwIfAborted()
       await saveProjectBinding(source)
-      try {
-        const { directory: _directory, ...input } = source
-        return await createProject(input)
-      } catch (error) {
-        await deleteProjectBinding(source.bindingId).catch(() => undefined)
-        throw error
-      }
+      // Keep the local handle on an uncertain POST outcome; explicit cleanup can remove an orphan later.
+      const { directory: _directory, ...input } = source
+      return await createProject(input)
     },
     onSuccess: async (result) => {
       if (result) await queryClient.invalidateQueries({ queryKey: projectsQuery.queryKey })
+    },
+    onSettled: () => { scanAbort.current = null; setProjectProgress("") },
+  })
+  const projectRemoval = useMutation({
+    mutationFn: async (project: ProjectListItem) => {
+      await deleteProject(project)
+      if (project.sourceOwner === "browser") await deleteProjectBinding(project.bindingId)
+      for (const key of ["projects", "viewer-project", "asset-analysis"]) queryClient.removeQueries({ queryKey: [key, project.projectId] })
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: projectsQuery.queryKey }),
+  })
+  const bindingCleanup = useMutation({
+    mutationFn: async () => {
+      const current = await getProjects()
+      return cleanupProjectBindings(new Set(current.projects.map(({ bindingId }) => bindingId)))
     },
   })
   const [artifactProgress, setArtifactProgress] = useState("")
@@ -229,8 +247,15 @@ function DashboardPage() {
       <ProjectBindingsCard
         projects={projects.data?.projects ?? []}
         creating={projectCreation.isPending}
-        error={projectCreation.error}
+        error={projectCreation.error ?? projectRemoval.error ?? bindingCleanup.error}
         create={() => projectCreation.mutate()}
+        progress={projectProgress}
+        cancel={() => scanAbort.current?.abort()}
+        removing={projectRemoval.isPending}
+        remove={(project) => { if (window.confirm(`移除「${project.name}」的注册、快照与本浏览器授权？不会删除源工程文件。`)) projectRemoval.mutate(project) }}
+        cleanup={() => { if (window.confirm("清理本浏览器中超过 24 小时且未在当前 Host 注册的授权？不会删除源文件，也不会撤销浏览器的系统权限。")) bindingCleanup.mutate() }}
+        cleaning={bindingCleanup.isPending}
+        cleanupCount={bindingCleanup.data}
       />
 
       <ArtifactImportsCard
@@ -274,18 +299,26 @@ function DashboardPage() {
 
 type ProjectListItem = Awaited<ReturnType<typeof projectsQuery.queryFn>>["projects"][number]
 
-function ProjectBindingsCard({ projects, creating, error, create }: {
+function ProjectBindingsCard({ projects, creating, error, create, progress, cancel, removing, remove, cleanup, cleaning, cleanupCount }: {
   projects: ProjectListItem[]
   creating: boolean
   error: Error | null
   create: () => void
+  progress: string
+  cancel: () => void
+  removing: boolean
+  remove: (project: ProjectListItem) => void
+  cleanup: () => void
+  cleaning: boolean
+  cleanupCount?: number
 }) {
   return (
     <Card>
       <CardHeader className="border-b">
         <CardTitle>FairyGUI 工程</CardTitle>
         <CardDescription>浏览器授权保存在 IndexedDB；CLI 授权只注册用户明确指定的只读工程快照。</CardDescription>
-        <CardAction>
+        <CardAction className="flex gap-2">
+          <Button variant="outline" onClick={cleanup} disabled={creating || removing || cleaning}>清理失效授权</Button>
           <Button onClick={create} disabled={creating}>
             <FolderPlus className={creating ? "animate-pulse" : ""} />{creating ? "正在读取…" : "授权并创建项目"}
           </Button>
@@ -293,6 +326,8 @@ function ProjectBindingsCard({ projects, creating, error, create }: {
       </CardHeader>
       <CardContent>
         {error ? <p role="alert" className="mb-4 text-sm text-destructive">{formatError(error)}</p> : null}
+        {creating ? <p role="status" className="mb-4 text-sm">{progress || "等待文件夹授权…"} <Button size="sm" variant="outline" onClick={cancel}>取消扫描</Button></p> : null}
+        {cleanupCount !== undefined ? <p role="status" className="mb-4 text-sm text-muted-foreground">已清理 {cleanupCount} 条未注册授权。</p> : null}
         {projects.length ? (
           <div className="divide-y">
             {projects.map((project) => (
@@ -308,6 +343,7 @@ function ProjectBindingsCard({ projects, creating, error, create }: {
                 <Button asChild variant="outline">
                   <Link to="/projects/$projectId/viewer" params={{ projectId: project.projectId }}>打开 Viewer</Link>
                 </Button>
+                <Button variant="outline" onClick={() => remove(project)} disabled={removing || creating}>移除项目</Button>
               </div>
             ))}
           </div>
@@ -742,25 +778,19 @@ function ProjectAssetManagerPage() {
 }
 
 function ProjectAssetManager({ project }: { project: RegisteredProjectData }) {
+  const queryClient = useQueryClient()
+  const [scanProgress, setScanProgress] = useState("")
+  const [scanCancelled, setScanCancelled] = useState(false)
   const [selectedKey, setSelectedKey] = useState("")
   const [filter, setFilter] = useState("")
   const [health, setHealth] = useState<"all" | AssetIssue["kind"]>("all")
   const analysis = useQuery({
     queryKey: ["asset-analysis", project.projectId, project.sourceRevision],
-    queryFn: async () => {
-      const bundle = await readViewerProject(project)
-      if (bundle.sourceRevision !== project.sourceRevision) {
-        const refreshed = await createProject({
-          bindingId: project.bindingId,
-          fairyguiProjectId: project.fairyguiProjectId,
-          name: project.name,
-          directoryName: project.directoryName,
-          fairyPath: project.fairyPath,
-          sourceRevision: bundle.sourceRevision,
-        })
-        if (refreshed.project.projectId !== project.projectId) throw new Error("工程绑定在分析过程中发生了变化，请重新打开 Asset Manager。")
-      }
+    queryFn: async ({ signal }) => {
+      setScanCancelled(false)
+      const bundle = await readViewerProject(project, { signal, onProgress: setScanProgress })
       const result = await analyzeProjectAssets(bundle.project, { projectId: project.projectId, sourceRevision: bundle.sourceRevision })
+      signal.throwIfAborted()
       await registerProjectAssetAnalysis(project.projectId, result)
       return result
     },
@@ -784,7 +814,9 @@ function ProjectAssetManager({ project }: { project: RegisteredProjectData }) {
     )) ?? []
   }, [analysis.data, filter, health, issueKeys])
 
-  if (analysis.isPending) return <ViewerLoading message="正在读取工程并计算资源哈希与引用…" />
+  if (analysis.isFetching) return <div><ViewerLoading message={scanProgress || "正在读取工程并计算资源哈希与引用…"} /><Button variant="outline" onClick={() => { setScanCancelled(true); void queryClient.cancelQueries({ queryKey: ["asset-analysis", project.projectId] }) }}>取消扫描</Button></div>
+  if (scanCancelled) return <div role="status">扫描已取消。<Button onClick={() => void analysis.refetch()}>重新扫描</Button></div>
+  if (analysis.isPending) return <Button onClick={() => void analysis.refetch()}>开始扫描</Button>
   if (analysis.isError) {
     return (
       <Card className="border-destructive/40"><CardContent className="flex min-h-64 flex-col items-center justify-center gap-4 text-center"><ServerCog className="size-9 text-destructive" /><div><p className="font-medium">Asset Manager 无法完成扫描</p><p className="mt-2 max-w-xl text-sm text-muted-foreground">{analysis.error instanceof Error ? analysis.error.message : "未知错误"}</p></div><div className="flex gap-2"><Button variant="outline" onClick={() => void analysis.refetch()}>重试</Button><Button asChild><Link to="/asset-manager">返回工程列表</Link></Button></div></CardContent></Card>
@@ -905,6 +937,9 @@ function formatAssetBytes(value: number | null) {
 }
 
 function ProjectViewer({ project, compact = false, onCapture }: { project: RegisteredProjectData; compact?: boolean; onCapture?: (blob: Blob, info: VisualCaptureInfo) => Promise<void> }) {
+  const queryClient = useQueryClient()
+  const [scanProgress, setScanProgress] = useState("")
+  const [scanCancelled, setScanCancelled] = useState(false)
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const resourcePanelRef = useRef<PanelImperativeHandle>(null)
   const [session, setSession] = useState<RenderSessionClient | null>(null)
@@ -923,14 +958,14 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
   const [collapsedPackages, setCollapsedPackages] = useState(() => new Set<string>())
   const bundle = useQuery({
     queryKey: ["viewer-project", project.projectId],
-    queryFn: () => readViewerProject(project),
+    queryFn: ({ signal }) => { setScanCancelled(false); return readViewerProject(project, { signal, onProgress: setScanProgress }) },
     retry: false,
     staleTime: Infinity,
   })
 
   useEffect(() => {
     const frame = iframeRef.current
-    if (!frame || !bundle.data) return
+    if (!frame || !bundle.data || bundle.isFetching || bundle.isError || scanCancelled) return
     let disposed = false
     let stopRenderer: (() => void) | null = null
     const lifetime = new AbortController()
@@ -961,7 +996,8 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
         }
       }
     }
-    if (frame.contentDocument?.readyState === "complete") void connect()
+    // A newly keyed iframe starts at about:blank; wait for the actual runtime document before handshaking.
+    if (frame.contentDocument?.readyState === "complete" && frame.contentDocument.URL === frame.src) void connect()
     else frame.addEventListener("load", connect, { once: true })
     return () => {
       disposed = true
@@ -970,8 +1006,9 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
       stopRenderer?.()
       setSession(null)
       setRenderSessionId("")
+      setBrokerState(null)
     }
-  }, [bundle.data, project.projectId])
+  }, [bundle.data, bundle.dataUpdatedAt, bundle.isFetching, bundle.isError, scanCancelled, project.projectId])
 
   const filteredPackages = useMemo(() => {
     const query = filter.trim().toLocaleLowerCase()
@@ -1030,6 +1067,7 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
             <Button variant="outline" size="sm" onClick={() => void bundle.refetch()} disabled={bundle.isFetching}>
               <RefreshCw className={bundle.isFetching ? "animate-spin" : ""} />刷新工程
             </Button>
+            {bundle.isFetching ? <Button variant="outline" size="sm" onClick={() => { setScanCancelled(true); void queryClient.cancelQueries({ queryKey: ["viewer-project", project.projectId] }) }}>取消扫描</Button> : null}
             <Badge variant="outline">{renderSessionId ? "AGENT READY" : "AGENT WAITING"}</Badge>
             <Button variant="outline" size="sm" onClick={() => void session?.setView({ zoom: Math.max(0.25, zoom - 0.1) }).catch(commandFailed)} disabled={!session} aria-label="缩小"><ZoomOut /></Button>
             <span className="min-w-14 text-center text-xs text-muted-foreground">{Math.round(zoom * 100)}%</span>
@@ -1069,10 +1107,10 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
             <ResizableHandle withHandle />
             <ResizablePanel id="viewer-canvas" minSize={360} className="min-w-0">
               <div className="relative h-full min-h-0 bg-[#202226]">
-                <iframe ref={iframeRef} src="/viewer-runtime.html" title="FairyGUI LayaAir Viewer Runtime" sandbox="allow-scripts allow-same-origin" className="absolute inset-0 size-full border-0" />
-                {(bundle.isPending || (bundle.data && !session && !runtimeError)) && (
+                <iframe key={`${bundle.dataUpdatedAt}:${bundle.isFetching}`} ref={iframeRef} src="/viewer-runtime.html" title="FairyGUI LayaAir Viewer Runtime" sandbox="allow-scripts allow-same-origin" className="absolute inset-0 size-full border-0" />
+                {(bundle.isFetching || (bundle.data && !session && !runtimeError && !bundle.isError && !scanCancelled)) && (
                   <div className="absolute inset-0 grid place-items-center bg-background/80 backdrop-blur-sm">
-                    <ViewerLoading message={bundle.isPending ? "正在读取当前工程模型…" : "正在启动 LayaAir 3.3.10…"} />
+                    <ViewerLoading message={bundle.isFetching ? scanProgress || "正在读取当前工程模型…" : "正在启动 LayaAir 3.3.10…"} />
                   </div>
                 )}
                 {(bundle.isError || runtimeError) && (
@@ -1088,6 +1126,7 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
                     </div>
                   </div>
                 )}
+                {scanCancelled && !bundle.isFetching && <div role="status" className="absolute inset-0 grid place-items-center bg-background/90 p-8 text-center">扫描已取消，请点击“刷新工程”重新读取。</div>}
                 {rendered && session && !runtimeError && (
                   <div className="pointer-events-none absolute bottom-3 right-3 rounded-md border bg-background/85 px-2.5 py-1.5 text-[11px] text-muted-foreground shadow-sm backdrop-blur">{rendered.packageName}/{rendered.componentName} · {rendered.width}×{rendered.height}</div>
                 )}

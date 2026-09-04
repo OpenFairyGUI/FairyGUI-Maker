@@ -42,13 +42,24 @@ export async function createProject(input: CreateProjectInput) {
   return response.json()
 }
 
-export async function getProject(projectId: string) {
-  const response = await client.api.projects[":projectId"].$get({ param: { projectId } })
+export async function getProject(projectId: string, signal?: AbortSignal) {
+  const response = await client.api.projects[":projectId"].$get({ param: { projectId } }, { init: { signal } })
   if (!response.ok) throw new Error(`Project request failed: ${response.status}`)
   return response.json()
 }
 
 export type RegisteredProjectData = Awaited<ReturnType<typeof getProject>>["project"]
+
+export async function refreshProject(projectId: string, input: { bindingId: string; fairyguiProjectId: string; expectedSourceRevision: string; nextSourceRevision: string }, signal?: AbortSignal) {
+  const response = await client.api.projects[":projectId"].refresh.$post({ param: { projectId }, json: input }, { init: { signal } })
+  if (!response.ok) throw new Error(`工程刷新失败 (${response.status})：绑定或 revision 已改变，请重新读取工程后重试。`)
+  return response.json()
+}
+
+export async function deleteProject(project: Pick<RegisteredProjectData, "projectId" | "bindingId" | "revision">) {
+  const response = await client.api.projects[":projectId"].$delete({ param: { projectId: project.projectId }, query: { bindingId: project.bindingId, expectedRevision: String(project.revision) } })
+  if (!response.ok && response.status !== 404) throw new Error(`工程移除失败 (${response.status})，请刷新列表后重试。`)
+}
 
 export async function registerProjectAssetAnalysis(projectId: string, analysis: ProjectAssetAnalysis) {
   const response = await client.api.projects[":projectId"]["asset-analysis"].$put({ param: { projectId }, json: analysis })

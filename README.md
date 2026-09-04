@@ -159,6 +159,8 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 
 交互模式则由用户在 Dashboard 中通过系统目录选择器授权只读访问；目录句柄保存在同源浏览器的 IndexedDB 中，不传给 Agent 或 runtime iframe。
 
+浏览器与 CLI 统一按实际工程依赖读取快照，不读取目录中的无关文件；隐藏路径（含 `.env`、`.git`、Maker state）、私钥与常见构建目录默认排除。`sourceRevision` 使用排序后的文件内容 SHA-256，而非大小/修改时间。浏览器 Viewer 刷新与 Asset Manager 重扫先校验 Host 旧 revision，成功后失效旧 Renderer 与分析；CLI 快照仍需重启 Host 更新。Dashboard 可移除项目和清理过期未注册授权，均不删除源文件。扫描预算与完整接口见 [Revision 与快照隐私](./docs/workbench.md#29-revision-与快照隐私批次-14)。
+
 ## Workbench 入口
 
 | 路径 | 用途 |

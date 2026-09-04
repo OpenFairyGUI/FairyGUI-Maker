@@ -311,35 +311,68 @@ function registerApi(
       return c.json({ projects: [...projects.values()] })
     })
     .post("/api/projects", zValidator("json", projectRegistrationSchema), (c) => {
-      const { origin, projects, assetAnalyses } = readState()
+      const { origin, projects } = readState()
       const input = c.req.valid("json")
       const existing = [...projects.values()].find((project) => project.bindingId === input.bindingId)
-      if (existing && existing.fairyguiProjectId !== input.fairyguiProjectId) {
-        return c.json({ error: "bindingId already belongs to another FairyGUI project" }, 409)
+      if (existing) {
+        if (existing.sourceOwner !== "browser") return c.json({ error: "Host snapshots cannot be replaced by browser bindings" }, 403)
+        if (Object.entries(input).some(([key, value]) => existing[key as keyof RegisteredProject] !== value)) {
+          return c.json({ error: "Binding already registered. Use the revision-checked project refresh endpoint." }, 409)
+        }
+        return c.json({ project: existing }, 200)
       }
 
       const now = new Date().toISOString()
-      const projectId = existing?.projectId ?? `project_${randomUUID()}`
+      const projectId = `project_${randomUUID()}`
       const project: RegisteredProject = {
-        ...existing,
         ...input,
         projectId,
-        revision: existing && existing.sourceRevision !== input.sourceRevision ? existing.revision + 1 : existing?.revision ?? 1,
+        revision: 1,
         sourceOwner: "browser",
         access: "read-only",
         status: "ready",
         viewerUrl: `${origin}/projects/${projectId}/viewer`,
         assetManagerUrl: `${origin}/projects/${projectId}/assets`,
-        createdAt: existing?.createdAt ?? now,
+        createdAt: now,
         updatedAt: now,
       }
-      if (existing && existing.sourceRevision !== input.sourceRevision) assetAnalyses.delete(projectId)
       projects.set(projectId, project)
-      return c.json({ project }, existing ? 200 : 201)
+      return c.json({ project }, 201)
     })
     .get("/api/projects/:projectId", (c) => {
       const project = readState().projects.get(c.req.param("projectId"))
       return project ? c.json({ project }) : c.json({ error: "Project not found" }, 404)
+    })
+    .post("/api/projects/:projectId/refresh", zValidator("json", z.object({
+      bindingId: z.uuid(), fairyguiProjectId: z.string().min(1).max(128),
+      expectedSourceRevision: z.string().regex(/^[a-f0-9]{64}$/), nextSourceRevision: z.string().regex(/^[a-f0-9]{64}$/),
+    }).strict()), (c) => {
+      const { projects, assetAnalyses, renderBroker } = readState()
+      const projectId = c.req.param("projectId"), input = c.req.valid("json")
+      const current = projects.get(projectId)
+      if (!current) return c.json({ error: "Project not found" }, 404)
+      if (current.sourceOwner !== "browser") return c.json({ error: "Host snapshots are immutable; reopen through the CLI to read new content" }, 403)
+      if (current.bindingId !== input.bindingId || current.fairyguiProjectId !== input.fairyguiProjectId || current.sourceRevision !== input.expectedSourceRevision) {
+        return c.json({ error: "Project binding or revision changed. Read the current project and retry." }, 409)
+      }
+      if (current.sourceRevision === input.nextSourceRevision) return c.json({ project: current })
+      const project = { ...current, sourceRevision: input.nextSourceRevision, revision: current.revision + 1, updatedAt: new Date().toISOString() }
+      projects.set(projectId, project)
+      assetAnalyses.delete(projectId)
+      renderBroker.invalidateProject(projectId)
+      return c.json({ project })
+    })
+    .delete("/api/projects/:projectId", zValidator("query", z.object({ bindingId: z.uuid(), expectedRevision: z.coerce.number().int().positive() }).strict()), (c) => {
+      const { projects, projectSources, assetAnalyses, renderBroker } = readState()
+      const projectId = c.req.param("projectId"), input = c.req.valid("query")
+      const project = projects.get(projectId)
+      if (!project) return c.json({ error: "Project not found" }, 404)
+      if (project.bindingId !== input.bindingId || project.revision !== input.expectedRevision) return c.json({ error: "Project binding or revision changed. Reload before removing." }, 409)
+      projects.delete(projectId)
+      projectSources.delete(projectId)
+      assetAnalyses.delete(projectId)
+      renderBroker.invalidateProject(projectId)
+      return c.json({ removed: true })
     })
     .get("/api/projects/:projectId/asset-analysis", (c) => {
       const analysis = readState().assetAnalyses.get(c.req.param("projectId"))
@@ -359,16 +392,20 @@ function registerApi(
     })
     .get("/api/projects/:projectId/source-index", (c) => {
       const source = readState().projectSources.get(c.req.param("projectId"))
+      if (source && c.req.query("sourceRevision") && c.req.query("sourceRevision") !== source.sourceRevision) return c.json({ error: "Project source revision changed" }, 409)
       return source
-        ? c.json({ files: source.listFiles() })
+        ? c.json({ sourceRevision: source.sourceRevision, files: source.listFiles() })
         : c.json({ error: "Host project source not found" }, 404)
     })
     .get(
       "/api/projects/:projectId/source-file",
-      zValidator("query", z.object({ path: z.string().min(1).max(1_024) })),
+      zValidator("query", z.object({ path: z.string().min(1).max(1_024), sourceRevision: z.string().regex(/^[a-f0-9]{64}$/).optional() })),
       (c) => {
         try {
-          const data = readState().projectSources.get(c.req.param("projectId"))?.readFile(c.req.valid("query").path)
+          const source = readState().projectSources.get(c.req.param("projectId"))
+          const query = c.req.valid("query")
+          if (source && query.sourceRevision && query.sourceRevision !== source.sourceRevision) return c.json({ error: "Project source revision changed" }, 409)
+          const data = source?.readFile(query.path)
           if (!data) return c.json({ error: "Host project file not found" }, 404)
           c.header("Content-Type", "application/octet-stream")
           c.header("Content-Length", String(data.byteLength))
@@ -585,6 +622,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     projects.delete(projectId)
     projectSources.delete(projectId)
     assetAnalyses.delete(projectId)
+    renderBroker.invalidateProject(projectId)
   }
 
   app.use("*", async (c, next) => {
