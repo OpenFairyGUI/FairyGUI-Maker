@@ -35,7 +35,7 @@ export type SaveApproval = {
   consumedAt?: string
 }
 
-function denied(code: string, message: string, approval?: SaveApproval) {
+export function hostBackendFailure(code: string, message: string, approval?: SaveApproval) {
   return {
     ok: false as const,
     meta: {
@@ -103,13 +103,13 @@ export class HostSaveGrants {
 
   execute(operation: SaveOperation, input: unknown) {
     const parsed = saveInputs[operation].safeParse(input)
-    if (!parsed.success) return denied("save_input_invalid", "Host saves require an explicit nonnegative expectedRevision and bounded save options. Read getSession and retry with supported arguments.")
+    if (!parsed.success) return hostBackendFailure("save_input_invalid", "Host saves require an explicit nonnegative expectedRevision and bounded save options. Read getSession and retry with supported arguments.")
     const { sessionId, expectedRevision: revision } = parsed.data
     const snapshot = this.runtime.getSession({ sessionId })
     if (!snapshot.ok) return snapshot
-    if (snapshot.data.canonicalProjectPath.length > 4_096) return denied("save_target_invalid", "The session target exceeds the Host approval path limit.")
-    if (this.closing.has(sessionId)) return denied("save_session_closing", "The session is closing; no save can be approved.")
-    if (snapshot.data.revision !== revision) return denied("save_revision_stale", "The session revision changed. Read getSession and re-plan before requesting approval.")
+    if (snapshot.data.canonicalProjectPath.length > 4_096) return hostBackendFailure("save_target_invalid", "The session target exceeds the Host approval path limit.")
+    if (this.closing.has(sessionId)) return hostBackendFailure("save_session_closing", "The session is closing; no save can be approved.")
+    if (snapshot.data.revision !== revision) return hostBackendFailure("save_revision_stale", "The session revision changed. Read getSession and re-plan before requesting approval.")
     this.prune()
     const details = {
       sessionId, revision, operation, canonicalProjectPath: snapshot.data.canonicalProjectPath,
@@ -132,7 +132,7 @@ export class HostSaveGrants {
       if (this.requests.size >= MAX_SAVE_APPROVALS) {
         const terminal = [...this.requests.values()].find((candidate) => !active(candidate))
         if (terminal) this.requests.delete(terminal.approvalRequestId)
-        else return denied("save_approval_limit", "Too many pending save approvals. Resolve them in Workbench or wait for expiry.")
+        else return hostBackendFailure("save_approval_limit", "Too many pending save approvals. Resolve them in Workbench or wait for expiry.")
       }
       request = {
         ...details, operationDigest, approvalRequestId: randomUUID(), status: "pending",
@@ -140,7 +140,7 @@ export class HostSaveGrants {
       }
       this.requests.set(request.approvalRequestId, request)
     }
-    return denied("save_approval_required", "No files were written. Ask the Host owner to approve this exact request in Workbench using their separate approval token, then retry the same tool arguments once. Never obtain or supply the owner's approval token yourself.", request)
+    return hostBackendFailure("save_approval_required", "No files were written. Ask the Host owner to approve this exact request in Workbench using their separate approval token, then retry the same tool arguments once. Never obtain or supply the owner's approval token yourself.", request)
   }
 
   close() {

@@ -27,7 +27,7 @@ import { planProjectReimport } from "../design-import/node"
 import { ArtifactStore } from "./artifacts"
 import { registerImportDraftApi } from "./import-drafts"
 import { createHostProjectSnapshot, type HostProjectSnapshot } from "./project-snapshot"
-import { HostSaveGrants } from "./save-grants"
+import { HostSaveGrants, hostBackendFailure } from "./save-grants"
 import { uploadLimits } from "./upload-limits"
 import { UploadError } from "../upload"
 import {
@@ -44,14 +44,17 @@ const { version: PACKAGE_VERSION } = require("../../package.json") as { version:
 const COOKIE_NAME = "fairygui_maker_token"
 const WEB_DIST = fileURLToPath(new URL("../../dist/web", import.meta.url))
 const MAX_MCP_SESSIONS = 32
+export const MCP_SESSION_IDLE_TTL_MS = 30 * 60_000
 const HOST_INSTRUCTIONS = "FairyGUI authoring, Viewer, and Player service. Use backend sessions for revision-checked project edits. Save and materialize require expectedRevision and a one-time Host Save Grant. On save_approval_required, ask the user to confirm the exact request in Workbench, then retry unchanged arguments; never obtain or supply their separate approval token. Use stable IDs returned by list/inspect tools; Viewer and Player operations affect render-session memory only."
 const VIEW_ONLY_INSTRUCTIONS = "Read-only FairyGUI Viewer and Player service. Use stable IDs returned by list tools. Viewer operations never write project files; backend authoring and save tools are unavailable in this mode."
 const logger = pino({ level: process.env.FAIRYGUI_MAKER_LOG_LEVEL ?? "info" })
 const TRACKED_METHODS = new Set([
+  "getCapabilities",
   "openSession",
   "openProjectSession",
   "getSession",
   "getProjectOutline",
+  "validateSession",
   "applyTransaction",
   "saveSession",
   "materializeSession",
@@ -82,9 +85,12 @@ type McpSession = {
   createdAt: string
   lastActivityAt: string
   lastError: string | null
+  activeRequests: number
   transport: WebStandardStreamableHTTPServerTransport
   server: McpServer
 }
+
+type BackendActivity = { method: string; sessionId: string | null; at: string; errorCode: string | null }
 
 export type RegisteredProject = {
   projectId: string
@@ -216,14 +222,18 @@ function publicBackendSession(session: BackendSession) {
   }
 }
 
-function trackBackendResult(sessions: Map<string, BackendSession>, method: string, input: any, result: any) {
+function trackBackendResult(sessions: Map<string, BackendSession>, activity: BackendActivity[], method: string, input: any, result: any) {
   const sessionId = result?.data?.sessionId ?? input?.sessionId
+  const now = new Date().toISOString()
+  const errorCode = result?.ok === false ? String(result.error?.code ?? "backend_error").slice(0, 128) : null
+  activity.push({ method, sessionId: sessionId ?? null, at: now, errorCode })
+  if (activity.length > 100) activity.shift()
   if (method === "closeSession" && result?.ok && sessionId) {
     sessions.delete(sessionId)
     return
   }
-  if (!sessionId) return
-  const now = new Date().toISOString()
+  // Failed calls with invented IDs are activity, not new long-lived project sessions.
+  if (!sessionId || (!sessions.has(sessionId) && !result?.ok)) return
   const current: BackendSession = sessions.get(sessionId) ?? {
     id: sessionId,
     projectName: "In-memory project",
@@ -239,11 +249,11 @@ function trackBackendResult(sessions: Map<string, BackendSession>, method: strin
     lockHeld: snapshot?.lockHeld ?? current.lockHeld,
     lastActivityAt: now,
     lastMethod: method,
-    lastError: result?.ok ? null : String(result?.error?.code ?? "backend_error"),
+    lastError: errorCode,
   })
 }
 
-function createTrackedRuntime(runtime: OpenFairyGuiBackendRuntime, sessions: Map<string, BackendSession>, saveGrants: HostSaveGrants) {
+function createTrackedRuntime(runtime: OpenFairyGuiBackendRuntime, sessions: Map<string, BackendSession>, activity: BackendActivity[], saveGrants: HostSaveGrants) {
   return new Proxy(runtime, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver)
@@ -253,19 +263,20 @@ function createTrackedRuntime(runtime: OpenFairyGuiBackendRuntime, sessions: Map
         const closingId = property === "closeSession" ? args[0]?.sessionId as string : undefined
         if (closingId) saveGrants.beginClose(closingId)
         const finish = (result: any) => {
-          trackBackendResult(sessions, property, args[0], result)
+          trackBackendResult(sessions, activity, property, args[0], result)
           if (result?.ok && (property === "openSession" || property === "openProjectSession")) saveGrants.invalidateSession(result.data.sessionId)
           return result
         }
+        const fail = () => finish(hostBackendFailure("backend_unhandled_error", "Backend tool execution failed."))
         try {
           const result = property === "saveSession" || property === "materializeSession"
             ? saveGrants.execute(property, args[0]) : value.apply(target, args)
-          if (result && typeof result.then === "function") return result.then(finish).finally(() => { if (closingId) saveGrants.endClose(closingId) })
+          if (result && typeof result.then === "function") return result.then(finish, fail).finally(() => { if (closingId) saveGrants.endClose(closingId) })
           if (closingId) saveGrants.endClose(closingId)
           return finish(result)
-        } catch (error) {
+        } catch {
           if (closingId) saveGrants.endClose(closingId)
-          throw error
+          return fail()
         }
       }
     },
@@ -279,6 +290,7 @@ function registerApi(
     startedAt: string
     mcpSessions: Map<string, McpSession>
     backendSessions: Map<string, BackendSession>
+    backendActivity: BackendActivity[]
     projects: Map<string, RegisteredProject>
     projectSources: Map<string, HostProjectSnapshot>
     assetAnalyses: Map<string, ProjectAssetAnalysis>
@@ -317,10 +329,11 @@ function registerApi(
       })
     })
     .get("/api/sessions", (c) => {
-      const { mcpSessions, backendSessions } = readState()
+      const { mcpSessions, backendSessions, backendActivity } = readState()
       return c.json({
-        mcp: [...mcpSessions.values()].map(({ id, createdAt, lastActivityAt, lastError }) => ({ id, createdAt, lastActivityAt, lastError })),
+        mcp: [...mcpSessions.values()].map(({ id, createdAt, lastActivityAt, lastError, activeRequests }) => ({ id, createdAt, lastActivityAt, lastError, activeRequests })),
         projects: [...backendSessions.values()].map(publicBackendSession),
+        activity: [...backendActivity].reverse(),
       })
     })
     .get("/api/save-approvals", (c) => {
@@ -612,6 +625,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   if (tokensMatch(approvalToken, token)) throw new Error("FAIRYGUI_MAKER_APPROVAL_TOKEN must differ from FAIRYGUI_MAKER_TOKEN")
   const startedAt = new Date().toISOString()
   const backendSessions = new Map<string, BackendSession>()
+  const backendActivity: BackendActivity[] = []
   const mcpSessions = new Map<string, McpSession>()
   const projects = new Map<string, RegisteredProject>()
   const projectSources = new Map<string, HostProjectSnapshot>()
@@ -626,7 +640,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   const allowedProjectRoot = await realpath(options.projectPath ?? process.cwd())
   const backend = options.runtime ?? createNodeBackendRuntime({ allowedProjectRoots: [allowedProjectRoot] })
   const saveGrants = new HostSaveGrants(backend)
-  const runtime = createTrackedRuntime(backend, backendSessions, saveGrants)
+  const runtime = createTrackedRuntime(backend, backendSessions, backendActivity, saveGrants)
   const viewOnly = projectSource !== null
   const app = new Hono()
   let origin = ""
@@ -634,6 +648,33 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   let allowedOrigins = new Set<string>()
   let closing = false
   let pendingMcpSessions = 0
+
+  const pruneMcpSessions = async () => {
+    const now = Date.now()
+    await Promise.allSettled([...mcpSessions.values()].filter((record) => (
+      record.activeRequests === 0 && now - Date.parse(record.lastActivityAt) >= MCP_SESSION_IDLE_TTL_MS
+    )).map((record) => {
+      // Release capacity before awaiting close; a new request cannot revive an expired session.
+      if (record.id) mcpSessions.delete(record.id)
+      return record.server.close()
+    }))
+  }
+  const handleMcpRequest = async (record: McpSession, request: Request) => {
+    record.activeRequests += 1
+    record.lastActivityAt = new Date().toISOString()
+    try {
+      // JSON response mode resolves only after the tool call completes; idle SSE GETs do not pin capacity.
+      const response = await record.transport.handleRequest(request)
+      record.lastError = response.ok ? null : `mcp_http_${response.status}`
+      return response
+    } catch (error) {
+      record.lastError = "mcp_request_failed"
+      throw error
+    } finally {
+      record.activeRequests -= 1
+      record.lastActivityAt = new Date().toISOString()
+    }
+  }
 
   const previewProjectId = (draftId: string) => `project_${draftId.slice("draft_".length)}`
   const ensureDraftPreview = async (draftId: string) => {
@@ -724,37 +765,32 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   app.use("*", uploadLimits())
 
   app.all("/mcp", async (c) => {
+    await pruneMcpSessions()
     const sessionId = c.req.header("mcp-session-id")
     if (sessionId) {
       const record = mcpSessions.get(sessionId)
       if (!record) {
-        return c.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, 404)
+        return c.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found", data: { code: "mcp_session_not_found" } }, id: null }, 404)
       }
-      record.lastActivityAt = new Date().toISOString()
-      try {
-        return await record.transport.handleRequest(c.req.raw)
-      } catch (error) {
-        record.lastError = error instanceof Error ? error.message : String(error)
-        throw error
-      }
+      return handleMcpRequest(record, c.req.raw)
     }
     if (c.req.method !== "POST") {
-      return c.json({ jsonrpc: "2.0", error: { code: -32000, message: "Missing MCP session ID" }, id: null }, 400)
+      return c.json({ jsonrpc: "2.0", error: { code: -32000, message: "Missing MCP session ID", data: { code: "mcp_session_id_required" } }, id: null }, 400)
     }
     if (mcpSessions.size + pendingMcpSessions >= MAX_MCP_SESSIONS) {
-      return c.json({ jsonrpc: "2.0", error: { code: -32000, message: "MCP session limit reached" }, id: null }, 503)
+      return c.json({ jsonrpc: "2.0", error: { code: -32000, message: "MCP session limit reached", data: { code: "mcp_session_limit" } }, id: null }, 503)
     }
 
     pendingMcpSessions += 1
+    let record: McpSession | undefined
     try {
       const now = new Date().toISOString()
-      let record!: McpSession
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: randomUUID,
         enableJsonResponse: true,
         onsessioninitialized(id) {
-          record.id = id
-          mcpSessions.set(id, record)
+          record!.id = id
+          mcpSessions.set(id, record!)
         },
       })
       const server = viewOnly
@@ -773,17 +809,20 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
         () => [...projects.values()],
         (projectId) => assetAnalyses.get(projectId),
       )
-      record = { id: null, createdAt: now, lastActivityAt: now, lastError: null, transport, server }
-      transport.onerror = (error) => {
-        record.lastError = error.message
+      record = { id: null, createdAt: now, lastActivityAt: now, lastError: null, activeRequests: 0, transport, server }
+      transport.onerror = () => {
+        record!.lastError = "mcp_transport_error"
       }
       transport.onclose = () => {
-        if (record.id) mcpSessions.delete(record.id)
+        if (record?.id) mcpSessions.delete(record.id)
       }
       await server.connect(transport)
-      const response = await transport.handleRequest(c.req.raw)
-      if (!transport.sessionId) await server.close()
+      const response = await handleMcpRequest(record, c.req.raw)
+      if (!transport.sessionId || !response.ok) await server.close()
       return response
+    } catch (error) {
+      if (record) await record.server.close().catch(() => undefined)
+      throw error
     } finally {
       pendingMcpSessions -= 1
     }
@@ -794,6 +833,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     startedAt,
     mcpSessions,
     backendSessions,
+    backendActivity,
     projects,
     projectSources,
     assetAnalyses,
@@ -842,7 +882,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   const uploadCleanup = setInterval(() => {
     renderBroker.pruneExpiredSessions()
     saveGrants.prune()
-    void Promise.allSettled([artifactStore.pruneExpiredImports(), importDraftStore.pruneExpiredUploads()])
+    void Promise.allSettled([pruneMcpSessions(), artifactStore.pruneExpiredImports(), importDraftStore.pruneExpiredUploads()])
   }, 60_000)
   uploadCleanup.unref()
 

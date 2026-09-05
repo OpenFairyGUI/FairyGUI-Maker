@@ -86,6 +86,16 @@ Workbench 保留 `/viewer`、`/player`、`/asset-manager` 作为人工选择入�
 
 ### 2.4 Dashboard 工程授权与绑定
 
+Host 的 MCP 会话上限为 32，空闲 30 分钟后由每分钟清理或下一次 MCP 请求回收。
+正在处理的调用不会因空闲 TTL 被关闭；调用结束时重新开始计时。只保持 SSE GET 连接不算活跃调用。
+过期 ID 返回 HTTP 404 / `error.data.code: mcp_session_not_found`，客户端应重新 initialize，
+不能自动重放可能已执行的写操作；容量满返回 503 / `mcp_session_limit`。
+回收 MCP 连接不关闭共享 Backend 工程会话，也不丢弃尚未保存的编辑。
+
+`GET /api/sessions` 返回 MCP `activeRequests`、工程 `lastError` 及最近 100 次 Backend `activity`。
+同步抛错、Promise reject、无 session ID 的失败都会留下方法、时间、session ID 和稳定错误码，
+不记录参数、异常详情或凭据。未知异常沿用 `backend_unhandled_error`；不存在的 session ID 不会创建占位工程会话。
+
 文件夹授权只发生在 Dashboard 的“创建/打开 FairyGUI 工程”动作中：
 
 1. 用户点击按钮，Dashboard 调用 `showDirectoryPicker({ mode: 'read' })`。
