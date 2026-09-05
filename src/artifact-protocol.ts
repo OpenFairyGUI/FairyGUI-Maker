@@ -3,6 +3,9 @@ export const MAX_ARTIFACT_FILES = 5_000
 export const MAX_ARTIFACT_FILE_BYTES = 128 * 1024 * 1024
 export const MAX_ARTIFACT_TOTAL_BYTES = 512 * 1024 * 1024
 
+// Host checks bytes/package metadata, not who published them or which project produced them.
+export const ARTIFACT_VERIFICATION = Object.freeze({ content: "host-validated", source: "client-declared" } as const)
+
 export type ArtifactFile = {
   path: string
   size: number
@@ -48,6 +51,7 @@ export type ArtifactImportRecord = {
 // API projection: immutable content plus one explicit import's provenance.
 export type ArtifactManifest = ArtifactBlob & Pick<ArtifactImportRecord, "importId" | "name" | "createdAt" | "source"> & {
   schemaVersion: 1
+  verification: typeof ARTIFACT_VERIFICATION
   playerUrl: string
 }
 

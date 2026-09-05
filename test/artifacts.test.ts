@@ -6,7 +6,7 @@ import path from "node:path"
 import test from "node:test"
 import { Document } from "@openfairygui/core"
 import { NodeIO } from "@openfairygui/core/node"
-import type { ArtifactBlob, ArtifactManifest } from "../src/artifact-protocol"
+import { ARTIFACT_VERIFICATION, type ArtifactBlob, type ArtifactManifest } from "../src/artifact-protocol"
 import { ArtifactStore } from "../src/server/artifacts"
 import { readArtifactFile } from "../src/server/artifact-files"
 import { startMakerHost } from "../src/server/index"
@@ -46,6 +46,15 @@ test("Artifact HTTP keeps distinct import records, bounded summaries/catalog pag
       return (await completed.json()).artifact as ArtifactManifest
     }
     const first = await importArtifact("First source", "project-a")
+    assert.deepEqual(first.verification, ARTIFACT_VERIFICATION)
+    for (const injected of [
+      { verification: { content: "host-validated", source: "host-verified" } },
+      { source: { kind: "browser-publish", trust: "host-verified" } },
+    ]) {
+      const rejected = await fetch(`${host.origin}/api/artifact-imports`, { method: "POST", headers,
+        body: JSON.stringify({ name: "Forged proof", source: { kind: "browser-publish" }, files: [...files].map(([path, data]) => ({ path, size: data.length, sha256: digest(data) })), ...injected }) })
+      assert.equal(rejected.status, 400)
+    }
     const blobPath = path.join(root, "artifacts", first.artifactId, "manifest.json")
     const originalBlob = await readFile(blobPath, "utf8")
     const second = await importArtifact("Second source", "project-b")
@@ -74,6 +83,7 @@ test("Artifact HTTP keeps distinct import records, bounded summaries/catalog pag
       assert.equal(list[0].name, second.name)
       assert.equal(list[0].importId, second.importId)
       assert.equal(list[0].importCount, 2)
+      assert.deepEqual(list[0].verification, ARTIFACT_VERIFICATION)
       assert.equal(list[0].fileCount, 2)
       assert.equal(list[0].componentCount, 3)
       assert.equal(list[0].packageCount, 1)
@@ -84,6 +94,7 @@ test("Artifact HTTP keeps distinct import records, bounded summaries/catalog pag
       const records = await get(`/api/artifacts/${first.artifactId}/import-records?limit=1`)
       assert.equal(records.total, 2)
       assert.equal(records.records[0].importId, second.importId)
+      assert.deepEqual(records.records[0].verification, ARTIFACT_VERIFICATION)
       const previous = await get(`/api/artifacts/${first.artifactId}/import-records?limit=1&cursor=${records.nextCursor}`)
       assert.equal(previous.records[0].importId, first.importId)
       assert.equal(previous.nextCursor, null)
@@ -99,6 +110,7 @@ test("Artifact HTTP keeps distinct import records, bounded summaries/catalog pag
       const replay = (await retry.json()).artifact
       assert.equal(replay.name, first.name, "retry must return its own provenance, not the latest import")
       assert.equal(replay.createdAt, first.createdAt)
+      assert.deepEqual(replay.verification, ARTIFACT_VERIFICATION)
       assert.equal(replay.playerUrl, `${host.origin}/artifacts/${first.artifactId}/player`)
       assert.equal((await get(`/api/artifacts/${first.artifactId}/import-records`)).total, 2)
       for (const suffix of ["components?limit=501", "components?cursor=-1", "import-records?limit=101", "import-records?cursor=-1"]) assert.equal((await fetch(`${host.origin}/api/artifacts/${first.artifactId}/${suffix}`, { headers: currentHeaders })).status, 400)
@@ -138,7 +150,7 @@ test("Artifact legacy recovery, collision checks and failed record commits prese
     const blobRoot = path.join(root, "artifacts", first.artifactId)
     const manifestPath = path.join(blobRoot, "manifest.json")
     // Build the actual v1 disk shape; the migration must not silently rewrite it.
-    const { importId, ...legacy } = first
+    const { importId, verification, ...legacy } = first
     const legacyBytes = JSON.stringify(legacy)
     await writeFile(manifestPath, legacyBytes)
     await store.close()
@@ -147,6 +159,7 @@ test("Artifact legacy recovery, collision checks and failed record commits prese
     const recovered = store.get(first.artifactId)!
     assert.equal(recovered.importId, `legacy_${first.artifactId}`)
     assert.equal(recovered.name, first.name)
+    assert.deepEqual(recovered.verification, ARTIFACT_VERIFICATION)
     assert.equal(await readFile(manifestPath, "utf8"), legacyBytes)
 
     const nextId = await pending(store, files, "New import")

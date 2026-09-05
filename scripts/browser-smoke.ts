@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
+import assert from "node:assert/strict"
 import { Document, ProjectType } from "@openfairygui/core"
 import { NodeIO } from "@openfairygui/core/node"
 import { createNodeBackendRuntime } from "@openfairygui/backend/node"
@@ -242,6 +243,7 @@ try {
   await page.getByRole("button", { name: "导入发布目录", exact: true }).click()
   const imported = await importedResponse
   const importedArtifact = (await imported.json()).artifact as ArtifactManifest
+  assert.deepEqual(importedArtifact.verification, { content: "host-validated", source: "client-declared" })
   if (!imported.ok() || importedArtifact?.artifactId !== artifact.artifactId || importedArtifact.importId === artifact.importId || importedArtifact.name !== "Smoke") {
     throw new Error("Browser Artifact SHA-256 upload did not reproduce the immutable artifact")
   }
@@ -249,10 +251,26 @@ try {
   // The same content gets a new provenance record, visible after cache invalidation and reload.
   await page.getByText("2 components · 1 files · 2 imports", { exact: false }).waitFor()
   await page.getByText("Smoke", { exact: true }).waitFor()
+  await page.getByText("内容已校验 · 来源为客户端声明", { exact: true }).waitFor()
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("2 components · 1 files · 2 imports", { exact: false }).waitFor()
+  await page.getByText("内容已校验 · 来源为客户端声明", { exact: true }).waitFor()
   await page.goto(host.origin, { waitUntil: "domcontentloaded" })
   await page.getByText("1 packages · 1 files · 2 imports", { exact: false }).waitFor()
+  await evidence.step("host-trust-and-activity", async () => {
+    await page.getByText("内容已校验 · 来源为客户端声明", { exact: true }).waitFor()
+    const listed = await callTool(host!.origin, sessionId, 901, "list_artifact_components", { artifactId: artifact.artifactId })
+    const opened = await callTool(host!.origin, sessionId, 902, "open_artifact_player", { artifactId: artifact.artifactId })
+    for (const value of [listed.value.artifacts[0], opened.value]) {
+      assert.deepEqual(value.verification, { content: "host-validated", source: "client-declared" })
+      assert.equal(value.source.kind, "published-folder")
+    }
+    await assert.rejects(callTool(host!.origin, sessionId, 903, "openfairygui_backend_get_session", { sessionId: "missing-activity-probe" }), /session_not_found/)
+    await page.reload({ waitUntil: "domcontentloaded" })
+    await page.getByText("最近 Backend 错误", { exact: true }).click()
+    await page.getByText(/getSession · session_not_found/).waitFor()
+    return { clientDeclaredSource: true, hostContentValidation: true, mcpMetadata: true, dashboardFailureVisible: true }
+  })
 
   await evidence.step("lifecycle-player-fetch", async () => {
     const probe = await context.newPage()
@@ -270,6 +288,7 @@ try {
 
   await page.goto(`${host.origin}/artifacts/${artifact.artifactId}/player`, { waitUntil: "domcontentloaded" })
   await page.getByText("AGENT READY", { exact: true }).waitFor()
+  await page.getByText("内容已校验 · 来源为客户端声明", { exact: true }).waitFor()
   await waitFor(
     () => callTool(host!.origin, sessionId, 4, "open_artifact_player", { artifactId: artifact.artifactId }).catch(() => ({ value: null } as any)),
     (result) => result.value?.browserRequired === false,
@@ -314,6 +333,7 @@ try {
   await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")))
   await metadataRefresh
   await page.getByRole("heading", { name: "Relabeled Smoke", exact: true }).waitFor()
+  await page.getByText("内容已校验 · 来源为客户端声明", { exact: true }).waitFor()
   await page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
   const relabeledPlayer = (await callTool(host.origin, sessionId, 92, "open_artifact_player", { artifactId: artifact.artifactId })).value.renderSession
   if (relabeledPlayer?.renderSessionId !== stablePlayer.renderSessionId || relabeledPlayer?.semanticStateVersion !== stablePlayer.semanticStateVersion) throw new Error("Artifact provenance refresh reset the Player session")

@@ -131,7 +131,7 @@ type ViewerProject = {
   sourceRevision: string
   assetManagerUrl?: string
 }
-type PlayerArtifact = Pick<ArtifactManifest, "artifactId" | "playerUrl" | "digest" | "packages">
+type PlayerArtifact = Pick<ArtifactManifest, "artifactId" | "playerUrl" | "digest" | "packages"> & Partial<Pick<ArtifactManifest, "source" | "verification">>
 type CommandResult = RenderCommandResult
 type PendingCommand = {
   resolve(value: CommandResult): void
@@ -759,25 +759,25 @@ export function registerViewerMcpTools(
 
   server.registerTool("list_artifact_components", {
     title: "List published FairyGUI artifact components",
-    description: "List immutable published artifacts and their native FairyGUI package/component IDs.",
+    description: "List immutable published-format artifacts and their native IDs. Host validates content, but source labels/project revisions are client declarations, not proof of a publish operation.",
     inputSchema: z.object({ artifactId: z.string().min(1).optional() }),
     annotations: { readOnlyHint: true },
   }, async ({ artifactId }) => {
     const artifacts = artifactId ? [getArtifact(artifactId)].filter((value): value is PlayerArtifact => value !== null) : listArtifacts()
     if (artifactId && artifacts.length === 0) return toolResult({ ok: false, code: "artifact_not_found", artifactId }, true)
-    return toolResult({ ok: true, artifacts: artifacts.map(({ artifactId: id, playerUrl, digest, packages }) => ({ artifactId: id, playerUrl, digest, packages })) })
+    return toolResult({ ok: true, artifacts: artifacts.map(({ artifactId: id, playerUrl, digest, packages, source, verification }) => ({ artifactId: id, playerUrl, digest, packages, source, verification })) })
   })
 
   server.registerTool("open_artifact_player", {
     title: "Open published FairyGUI artifact Player",
-    description: "Return the Player URL for an immutable published artifact and its current render session when the browser is open.",
+    description: "Return the Player URL and current render session for an immutable artifact. Source is client-declared, not Host-verified publishing provenance.",
     inputSchema: z.object({ artifactId: z.string().min(1) }),
     annotations: { readOnlyHint: true },
   }, async ({ artifactId }) => {
     const artifact = getArtifact(artifactId)
     if (!artifact) return toolResult({ ok: false, code: "artifact_not_found", artifactId }, true)
     const renderSession = broker.getSessionForArtifact(artifactId)
-    return toolResult({ ok: true, artifactId, digest: artifact.digest, playerUrl: artifact.playerUrl, browserRequired: !renderSession, renderSession })
+    return toolResult({ ok: true, artifactId, digest: artifact.digest, source: artifact.source, verification: artifact.verification, playerUrl: artifact.playerUrl, browserRequired: !renderSession, renderSession })
   })
 
   server.registerTool("render_artifact_component", {

@@ -9,7 +9,7 @@ import { NodeIO } from "@openfairygui/core/node"
 import { createHostBackendFileSystem, PRIVATE_PROJECT_ERROR } from "../src/server/backend-files"
 import { startMakerHost } from "../src/server/index"
 
-test("Host project writes exclude private data, ancestors and aliases while sibling projects remain editable", async () => {
+test("Host project writes exclude private data, ancestors and aliases while sibling projects remain editable", async (t) => {
   // Exercise the real default Host allowlist, which is process.cwd(), without changing cwd for other tests.
   const root = await mkdtemp(join(process.cwd(), ".maker-path-test-"))
   const dataDir = join(root, "private")
@@ -71,6 +71,9 @@ test("Host project writes exclude private data, ancestors and aliases while sibl
     assert.equal(await readFile(sentinel, "utf8"), "private-state")
     await unlink(projectDir)
     await unlink(alias)
+  } catch (error) {
+    if (error instanceof Error && error.cause) t.diagnostic(`Host ${host.origin}: ${String(error.cause)}`)
+    throw error
   } finally {
     if (sessionId) await call("close_session", { sessionId })
     await client.close(); await host.close(); await rm(root, { recursive: true, force: true })

@@ -292,6 +292,14 @@ Viewer 与 Player 均使用 `sandbox="allow-scripts"`，不再授予 `allow-same
 
 ### 2.12 Artifact 持久化语义（批次 17）
 
+REST 的 Artifact 详情、列表、来源记录及 MCP 的 Artifact 查询分别返回
+`verification.content: host-validated` 与 `verification.source: client-declared`。
+前者仅表示 Host 已检查文件字节、摘要和包元数据；后者说明 `source.kind/projectId/sourceRevision`
+全部是客户端声明。`browser-publish`、已登记的项目 ID 或相同 revision 都不是发布过程证明，
+Host 不宣称验证了由哪个工程生成产物。Workbench 同样显示“内容已校验 / 来源为客户端声明”。
+客户端不能提交 verification/trust 字段提升可信度；旧来源记录在重启恢复时也按此规则投影，
+无需重写内容摘要或磁盘 schema，不给历史记录补造发布证明。
+
 `ArtifactBlob` 只描述内容：`artifactId + digest + runtimeProfile + files + packages`。`ArtifactImportRecord` 独立描述每次导入的 `importId + sequence + name + source + createdAt`，并绑定完整 `artifactId + digest`。同内容的新导入仍产生新记录，不覆盖旧名称、项目或 revision；来源字段是调用方的声明，不是 Host 对发布来源的认证。短 ID 仍为 SHA-256 前 24 位十六进制，但复用前必须比较完整摘要，不同摘要返回 `409 artifact_id_digest_collision`。
 
 磁盘格式与提交点：

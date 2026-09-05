@@ -7,6 +7,7 @@ import { MemoryFileSystem } from "../design-import/memory-fs"
 import { readArtifactFile } from "./artifact-files"
 
 import {
+  ARTIFACT_VERIFICATION,
   PLAYER_RUNTIME_PROFILE,
   MAX_ARTIFACT_FILES as MAX_FILES,
   MAX_ARTIFACT_FILE_BYTES as MAX_FILE_BYTES,
@@ -26,6 +27,12 @@ const MAX_RECORD_BYTES = 16 * 1024
 const MAX_PACKAGE_COMPONENTS = 50_000
 const FGUI_MAGIC = 0x46475549
 
+export const artifactSourceSchema = z.object({
+  kind: z.enum(["published-folder", "browser-publish"]),
+  projectId: z.string().min(1).max(128).optional(),
+  sourceRevision: z.string().min(1).max(128).optional(),
+}).strict()
+
 const legacyManifestFields = z.object({
   schemaVersion: z.literal(1),
   artifactId: z.string().regex(/^artifact_[a-f0-9]{24}$/),
@@ -33,11 +40,7 @@ const legacyManifestFields = z.object({
   digest: z.string().regex(/^[a-f0-9]{64}$/),
   createdAt: z.string().max(64).refine((value) => Number.isFinite(Date.parse(value)), "Invalid artifact creation time"),
   runtimeProfile: z.literal(PLAYER_RUNTIME_PROFILE),
-  source: z.object({
-    kind: z.enum(["published-folder", "browser-publish"]),
-    projectId: z.string().min(1).max(128).optional(),
-    sourceRevision: z.string().min(1).max(128).optional(),
-  }).strict(),
+  source: artifactSourceSchema,
   files: z.array(z.object({
     path: z.string().min(1).max(1_024),
     size: z.number().int().nonnegative().max(MAX_FILE_BYTES),
@@ -146,7 +149,7 @@ export class ArtifactStore {
     const record = importId ? this.records.get(importId) : this.latestImports.get(artifactId)
     if (!blob || !record || record.artifactId !== artifactId || record.digest !== blob.digest) return null
     const { name, source, createdAt } = record
-    return { schemaVersion: 1, ...blob, importId: record.importId, name, source, createdAt, playerUrl: `${this.origin}/artifacts/${artifactId}/player` }
+    return { schemaVersion: 1, ...blob, importId: record.importId, name, source: { ...source }, createdAt, verification: ARTIFACT_VERIFICATION, playerUrl: `${this.origin}/artifacts/${artifactId}/player` }
   }
 
   setOrigin(origin: string) {
@@ -158,7 +161,7 @@ export class ArtifactStore {
     // ponytail: scan the local record map; index by artifact if import history becomes large.
     const records = [...this.records.values()].filter((record) => record.artifactId === artifactId).sort((a, b) => b.sequence - a.sequence)
     const page = records.filter((record) => cursor === undefined || record.sequence < cursor).slice(0, limit)
-    return { records: page, total: records.length, nextCursor: page.length && records.some((record) => record.sequence < page.at(-1)!.sequence) ? page.at(-1)!.sequence : null }
+    return { records: page.map((record) => ({ ...record, source: { ...record.source }, verification: ARTIFACT_VERIFICATION })), total: records.length, nextCursor: page.length && records.some((record) => record.sequence < page.at(-1)!.sequence) ? page.at(-1)!.sequence : null }
   }
 
   components(artifactId: string, cursor = 0, limit = 100) {
@@ -182,6 +185,7 @@ export class ArtifactStore {
   }
 
   async createImport(input: { name: string; source: ArtifactManifest["source"]; files: ArtifactImportFile[] }) {
+    const source = artifactSourceSchema.parse(input.source)
     const files = validateDeclaredFiles(input.files)
     await this.pruneExpiredImports()
     if (this.imports.size >= MAX_PENDING_UPLOADS) throw new UploadError("artifact_import_limit_reached", 503)
@@ -195,7 +199,7 @@ export class ArtifactStore {
     this.imports.set(importId, {
       importId,
       name: input.name,
-      source: input.source,
+      source,
       files,
       uploaded: new Set(),
       root,

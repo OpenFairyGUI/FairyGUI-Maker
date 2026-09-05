@@ -24,7 +24,7 @@ import {
 } from "../asset-analysis"
 import { ImportDraftStore } from "../design-import/draft-store"
 import { planProjectReimport } from "../design-import/node"
-import { ArtifactStore } from "./artifacts"
+import { ArtifactStore, artifactSourceSchema } from "./artifacts"
 import { createHostBackendFileSystem } from "./backend-files"
 import { registerImportDraftApi } from "./import-drafts"
 import { createHostProjectSnapshot, type HostProjectSnapshot } from "./project-snapshot"
@@ -525,13 +525,9 @@ function registerApi(
       "/api/artifact-imports",
       zValidator("json", z.object({
         name: z.string().trim().min(1).max(200),
-        source: z.object({
-          kind: z.enum(["published-folder", "browser-publish"]),
-          projectId: z.string().min(1).max(128).optional(),
-          sourceRevision: z.string().min(1).max(128).optional(),
-        }).default({ kind: "published-folder" }),
+        source: artifactSourceSchema.default({ kind: "published-folder" }),
         files: z.array(z.object({ path: z.string().min(1).max(1_024), size: z.number().int().nonnegative(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1).max(5_000),
-      })),
+      }).strict()),
       async (c) => {
         try {
           return c.json(await readState().artifactStore.createImport(c.req.valid("json")), 201)

@@ -274,10 +274,22 @@ function DashboardPage() {
         <Card>
           <CardHeader className="border-b">
             <CardTitle>活跃会话</CardTitle>
-            <CardDescription>TanStack Table 负责结构，Virtual 只渲染可见行。</CardDescription>
+            <CardDescription>MCP 空闲 30 分钟自动回收，活跃调用不受影响；工程会话需显式关闭。</CardDescription>
             <CardAction><Badge variant="secondary">{(sessions.data?.mcp.length ?? 0) + (sessions.data?.projects.length ?? 0)} active</Badge></CardAction>
           </CardHeader>
-          <CardContent><SessionTable data={sessions.data} /></CardContent>
+          <CardContent>
+            <SessionTable data={sessions.data} />
+            {sessions.data?.activity.some((entry) => entry.errorCode) ? (
+              <details className="mt-4 border-t pt-3 text-xs text-muted-foreground">
+                <summary className="cursor-pointer">最近 Backend 错误</summary>
+                <ul className="mt-2 space-y-2">
+                  {sessions.data.activity.filter((entry) => entry.errorCode).slice(0, 10).map((entry, index) => (
+                    <li key={index} className="break-words">{entry.method} · {entry.errorCode} · {formatTime(entry.at)}</li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
+          </CardContent>
         </Card>
 
         <Card>
@@ -395,6 +407,7 @@ function ArtifactImportsCard({ artifacts, importing, progress, error, create }: 
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-medium">{artifact.name}</p><Badge variant="secondary">IMMUTABLE</Badge></div>
                   <p className="mt-1 truncate text-xs text-muted-foreground">{artifact.packageCount} packages · {artifact.fileCount} files · {artifact.importCount} imports · {artifact.digest.slice(0, 12)}</p>
+                  <p className="mt-1 text-xs text-muted-foreground"><ArtifactTrust artifact={artifact} /></p>
                 </div>
                 <Button asChild variant="outline"><Link to="/artifacts/$artifactId/player" params={{ artifactId: artifact.artifactId }}>打开 Player</Link></Button>
               </div>
@@ -413,6 +426,10 @@ function ArtifactImportsCard({ artifacts, importing, progress, error, create }: 
 function PermissionBadge({ permission }: { permission: ProjectBindingPermission }) {
   const label = permission === "host" ? "CLI 授权" : permission === "granted" ? "已授权" : permission === "prompt" ? "需要确认" : permission === "denied" ? "已拒绝" : permission === "missing" ? "绑定缺失" : "权限未知"
   return <Badge variant={permission === "granted" || permission === "host" ? "secondary" : "outline"}>{label}</Badge>
+}
+
+function ArtifactTrust({ artifact }: { artifact: Pick<ArtifactManifest, "verification"> }) {
+  return <span>{artifact.verification?.content === "host-validated" ? "内容已校验" : "内容校验未知"} · {artifact.verification?.source === "client-declared" ? "来源为客户端声明" : "来源未经验证"}</span>
 }
 
 function formatError(error: Error) {
@@ -434,14 +451,14 @@ function SessionTable({ data }: { data: Awaited<ReturnType<typeof getSessions>> 
       id: session.id ?? "initializing",
       kind: "MCP" as const,
       name: session.id ?? "Initializing",
-      state: session.lastError ? "Error" : "Connected",
+      state: session.lastError ?? (session.activeRequests ? "Running" : "Connected"),
       activity: formatTime(session.lastActivityAt),
     })),
     ...(data?.projects ?? []).map((session) => ({
       id: session.id,
       kind: "Project" as const,
       name: session.projectName,
-      state: session.dirty ? "Dirty" : "Clean",
+      state: session.lastError ?? (session.dirty ? "Dirty" : "Clean"),
       activity: formatTime(session.lastActivityAt ?? session.createdAt),
     })),
   ], [data])
@@ -610,6 +627,7 @@ function PlayerPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-medium">{artifact.name}</p><Badge variant="secondary">{artifact.runtimeProfile}</Badge></div>
                     <p className="mt-1 truncate text-xs text-muted-foreground">{artifact.componentCount} components · {artifact.fileCount} files · {artifact.importCount} imports · {formatTime(artifact.createdAt)}</p>
+                    <p className="mt-1 text-xs text-muted-foreground"><ArtifactTrust artifact={artifact} /></p>
                   </div>
                   <Button asChild variant="outline"><Link to="/artifacts/$artifactId/player" params={{ artifactId: artifact.artifactId }}>打开 Player</Link></Button>
                 </div>
@@ -728,7 +746,7 @@ function ArtifactPlayer({ artifact }: { artifact: ArtifactManifest }) {
   return (
     <div className="space-y-4">
       <section className="space-y-4">
-        <div><p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-blue-400">Artifact Player</p><h1 className="font-heading text-3xl font-semibold tracking-tight">{artifact.name}</h1><p className="mt-2 text-sm text-muted-foreground">{artifact.runtimeProfile} · {artifact.digest.slice(0, 16)} · 不可变快照</p></div>
+        <div><p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-blue-400">Artifact Player</p><h1 className="font-heading text-3xl font-semibold tracking-tight">{artifact.name}</h1><p className="mt-2 text-sm text-muted-foreground">{artifact.runtimeProfile} · {artifact.digest.slice(0, 16)} · 不可变快照 · <ArtifactTrust artifact={artifact} /></p></div>
         <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-3 shadow-sm">
           <RenderStateControls rendered={rendered} session={session} onError={setCommandError} />
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">

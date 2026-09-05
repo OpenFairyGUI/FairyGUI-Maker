@@ -74,6 +74,8 @@ npx fairygui-maker@0.1.0 --data-dir E:\FairyGUI\maker-data
 
 在完整模式下，OpenFairyGUI backend 只能访问启动命令当前目录及其子目录。请先进入用户明确授权的工程父目录再启动 Host；不要从磁盘根目录或包含无关工程的宽泛目录启动。
 
+Backend 还会排除 Maker 私有数据目录、其后代，以及包含该目录的祖先工程，避免工程保存替换 Host 状态；Junction/符号链接别名也不能绕过。如果工程本身就是启动目录，请用 `--data-dir` 指定工程外的独立目录。
+
 ### 保存确认（Host Save Grant）
 
 Agent 的 `save_session` / `materialize_session` 必须携带 `expectedRevision`。首次调用返回 `save_approval_required`，不写盘；所有者在 Dashboard 的 **Host Save Grant** 卡片核对会话、revision、目标和选项，输入独立的确认密钥并批准后，Agent 才能用相同参数重试一次。
@@ -93,6 +95,8 @@ Authorization: Bearer <启动令牌>
 ```
 
 Maker 对外只提供一个 Streamable HTTP MCP 服务。客户端应将令牌放在私密环境变量中，不要把令牌写进仓库配置。常用高层工具为：
+
+MCP 最多保留 32 个会话，空闲 30 分钟后回收，正在执行的调用不会被 TTL 误关。过期 ID 返回 `404 / mcp_session_not_found`，需重新 initialize；不要自动重放不确定是否已执行的写操作。Dashboard 显示最近 Backend 失败记录，连接回收不会关闭共享工程会话或丢弃未保存编辑。
 
 | 工作流 | 工具 |
 |---|---|
@@ -157,6 +161,8 @@ BuildPlan v2 绑定源结构、图片和 Binding 摘要及 Planner/Compiler 版�
 Host 同时提供带 bearer token 保护的 `/api/import-drafts` 创建、列表、详情、删除、`parse`、`plan`、`compile` 和 `materialize` 接口。所有变更请求都必须提交当前 `expectedRevision`；`view <project-path>` 只读模式禁用这些接口。编译后的 Draft 还可上传一张 PNG Reference Image，从同页 Viewer 捕获结果，并持久化 Reference、Capture、Pixel Diff 与原始像素指标；Workbench 提供透明度叠加、并排和热图视图，不设置跨字体、平台或 rasterizer 的全局相似度通过线。
 
 浏览器上传尚未完成的 Draft 和 Artifact Import 单独采用 30 分钟空闲有效期；每次成功上传文件续期。Host 按实际流量限制请求体，二进制先写 `.part`、校验后原子改名；Artifact manifest 必须为每个文件声明 SHA-256，同尺寸不同内容重试返回 `409`。JSON、视觉证据、并发、容量与取消接口见 [有界上传管线](./docs/workbench.md#25-有界上传管线批次-10)。
+
+Artifact 的 `verification.content: host-validated` 仅表示字节、摘要和包元数据已校验；`verification.source: client-declared` 表示来源由客户端声明。`browser-publish` 和 `projectId/sourceRevision` 都不是 Host 验证过的发布证明，REST、MCP 和 Workbench 显示相同的可信度边界。
 
 Artifact 同内容只存一份字节，每次导入独立保留名称、来源和时间；完成请求跨重启幂等，列表显示最近一次来源和导入次数。文件读取时重新校验实际字节，篡改或链接替换返回 `409`。旧 manifest 只读兼容；备份应包含整个 data dir，且一个 data dir 只能由一个 Host 写入。格式与历史/分页 API 见 [Artifact 持久化语义](./docs/workbench.md#212-artifact-持久化语义批次-17)。
 
