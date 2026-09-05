@@ -10,6 +10,7 @@ import { MAX_PENDING_UPLOADS, PENDING_UPLOAD_TTL_MS, receiveUpload, UploadError,
 import type { MakerImportSourceV1 } from './bundle';
 import { compilePlanToUam, safeName, type ConversionReport } from './convert';
 import type { Diagnostic, ImportDocument, ImportNode } from './model';
+import { parseImportJson, stringifyImportJson } from './json';
 import {
   MAKER_IMPORT_STATE,
   parseDesignSource,
@@ -864,9 +865,7 @@ function findNode(document: ImportDocument, nodeId: string): ImportNode | null {
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   const temporary = `${filePath}.tmp-${randomUUID()}`;
   try {
-    await writeFile(temporary, `${JSON.stringify(value, (_key, item) => (
-      item instanceof Uint8Array ? { $uint8: Buffer.from(item).toString('base64') } : item
-    ), 2)}\n`, { flag: 'wx' });
+    await writeFile(temporary, stringifyImportJson(value), { flag: 'wx' });
     await rename(temporary, filePath);
   } finally {
     await rm(temporary, { force: true });
@@ -874,11 +873,7 @@ async function writeJson(filePath: string, value: unknown): Promise<void> {
 }
 
 async function readJson<T>(filePath: string): Promise<T> {
-  return JSON.parse(await readFile(filePath, 'utf8'), (_key, item) => (
-    item && typeof item === 'object' && Object.keys(item).length === 1 && typeof item.$uint8 === 'string'
-      ? Uint8Array.from(Buffer.from(item.$uint8, 'base64'))
-      : item
-  )) as T;
+  return parseImportJson(await readFile(filePath, 'utf8')) as T;
 }
 
 async function copyRegularDirectory(source: string, target: string): Promise<void> {

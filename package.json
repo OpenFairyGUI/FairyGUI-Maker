@@ -40,8 +40,9 @@
 		"pretest": "pnpm build",
 		"test": "node --import tsx --test",
 		"test:browser": "node --import tsx scripts/browser-smoke.ts",
+		"test:memory": "node --import tsx scripts/memory-stress.ts",
 		"verify:runtime": "node scripts/verify-release-inputs.mjs",
-		"verify:release": "pnpm verify:runtime && pnpm test && pnpm test:browser && pnpm audit --prod && node scripts/release-smoke.mjs"
+		"verify:release": "pnpm verify:runtime && pnpm test && pnpm test:memory && pnpm test:browser && pnpm audit --prod && node scripts/release-smoke.mjs"
 	},
 	"dependencies": {
 		"@hono/node-server": "2.1.0",

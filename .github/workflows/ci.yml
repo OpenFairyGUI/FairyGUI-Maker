@@ -28,6 +28,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify:runtime
       - run: pnpm test
+      - run: pnpm test:memory
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: memory-${{ matrix.os }}-${{ matrix.node }}
+          path: test-results/memory/
+          if-no-files-found: warn
 
   release-smoke:
     runs-on: ubuntu-24.04
@@ -50,6 +57,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: browser-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: test-results/browser/
+          path: |
+            test-results/browser/
+            test-results/memory/
           if-no-files-found: warn
           retention-days: 14

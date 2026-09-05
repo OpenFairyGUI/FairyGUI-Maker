@@ -5,6 +5,7 @@ import { NodeIO } from '@openfairygui/core/node';
 import { assertValidUamProject, readProjectAsUam, writeProjectFromUam } from '@openfairygui/core/uam';
 import { Resvg } from '@resvg/resvg-js';
 
+import { parseImportJson, stringifyImportJson } from './json';
 import {
   makerImportSha256,
   parseMakerImportBundleV1,
@@ -297,17 +298,11 @@ function mergeManualOverlay(
 }
 
 function encodeImportJson(value: unknown): Uint8Array {
-  return new TextEncoder().encode(`${JSON.stringify(value, (_key, item) => (
-    item instanceof Uint8Array ? { $uint8: Buffer.from(item).toString('base64') } : item
-  ), 2)}\n`);
+  return new TextEncoder().encode(stringifyImportJson(value));
 }
 
 function decodeImportJson(bytes: Uint8Array): unknown {
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes), (_key, item) => (
-    item && typeof item === 'object' && Object.keys(item).length === 1 && typeof item.$uint8 === 'string'
-      ? Uint8Array.from(Buffer.from(item.$uint8, 'base64'))
-      : item
-  ));
+  return parseImportJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
 }
 
 export interface ParsedDesignSource {

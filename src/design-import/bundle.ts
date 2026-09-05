@@ -229,6 +229,12 @@ function manifest(value: unknown): MakerImportBundleManifestV1 {
   }
   const assets = array(raw.assets, 'manifest.assets').map((item, index) =>
     asset(item, `manifest.assets[${index}]`));
+  if (assets.reduce((bytes, item) => bytes + item.byteLength, 0) > 512 * 1024 * 1024) {
+    fail('manifest.assets', 'no larger than 512 MiB in total');
+  }
+  if (byteLength(documentRaw.byteLength, 'manifest.document.byteLength') > 16 * 1024 * 1024) {
+    fail('manifest.document', 'no larger than 16 MiB');
+  }
   const bindings = array(raw.bindings, 'manifest.bindings').map((item, index) =>
     binding(item, `manifest.bindings[${index}]`));
   sortedUnique(assets, (item) => item.path, 'manifest.assets');
@@ -282,7 +288,8 @@ function validateGrid(node: ImportImage, value: MakerImportScale9GridV1 | null, 
 
 export async function makerImportSha256(bytes: Uint8Array): Promise<string> {
   if (!globalThis.crypto?.subtle) throw new Error('Web Crypto SHA-256 is unavailable');
-  const digestBytes = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', Uint8Array.from(bytes)));
+  const data = bytes.buffer instanceof ArrayBuffer ? bytes as Uint8Array<ArrayBuffer> : new Uint8Array(bytes);
+  const digestBytes = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', data));
   return [...digestBytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
@@ -292,15 +299,18 @@ export async function serializeMakerImportBundleV1(
   const fixtureFiles = canonicalFixtureFiles(input.document);
   const validatedDocument = parseImportFixture(fixtureFiles);
   const documentBytes = fixtureFiles[IMPORT_FIXTURE_DOCUMENT];
-  const assets = await Promise.all(Object.entries(fixtureFiles)
+  const assets: MakerImportAssetV1[] = [];
+  // A hash already snapshots its bytes; do not snapshot every image concurrently.
+  for (const [path, bytes] of Object.entries(fixtureFiles)
     .filter(([path]) => ASSET_PATH.test(path))
-    .sort(([left], [right]) => compareText(left, right))
-    .map(async ([path, bytes]): Promise<MakerImportAssetV1> => ({
+    .sort(([left], [right]) => compareText(left, right))) {
+    assets.push({
       path,
       format: path.endsWith('.png') ? 'png' : 'svg',
       sha256: await makerImportSha256(bytes),
       byteLength: bytes.byteLength,
-    })));
+    });
+  }
   const assetsByContent = new Map(assets.map((item) => [`${item.format}:${item.sha256}`, item]));
   const images = imageNodes(validatedDocument);
   const overrides = input.assetBindings === undefined
@@ -310,7 +320,8 @@ export async function serializeMakerImportBundleV1(
   const unexpectedOverride = Object.keys(overrides).find((id) => !imageIds.has(id));
   if (unexpectedOverride) fail(`assetBindings.${unexpectedOverride}`, 'an existing ImportImage node ID');
 
-  const bindings = await Promise.all(images.map(async (image): Promise<MakerImportAssetBindingV1> => {
+  const bindings: MakerImportAssetBindingV1[] = [];
+  for (const image of images) {
     const imageDigest = await makerImportSha256(image.bytes);
     const assetEntry = assetsByContent.get(`${image.format}:${imageDigest}`);
     if (!assetEntry) fail(`image ${image.id}`, 'a serialized asset');
@@ -325,8 +336,8 @@ export async function serializeMakerImportBundleV1(
       scale9Grid: override.scale9Grid ?? null,
     };
     validateGrid(image, result.scale9Grid, `assetBindings.${image.id}.scale9Grid`);
-    return result;
-  }));
+    bindings.push(result);
+  }
   bindings.sort((left, right) => compareText(left.sourceNodeId, right.sourceNodeId));
 
   const bundleManifest = manifest({

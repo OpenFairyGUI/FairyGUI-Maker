@@ -122,10 +122,13 @@ export async function analyzeProjectAssets(
     }
   }
 
-  await Promise.all(project.packages.flatMap((pkg) => pkg.resources.map(async (resource) => {
-    if (resource.kind === "component" || !resource.sourceBytes?.byteLength) return
-    resourceByKey.get(assetResourceKey(pkg.id, resource.id))!.sha256 = await sha256(resource.sourceBytes)
-  })))
+  // Web Crypto snapshots its input. Keep only one native hash allocation in flight.
+  for (const pkg of project.packages) {
+    for (const resource of pkg.resources) {
+      if (resource.kind === "component" || !resource.sourceBytes?.byteLength) continue
+      resourceByKey.get(assetResourceKey(pkg.id, resource.id))!.sha256 = await sha256(resource.sourceBytes)
+    }
+  }
 
   const issues: AssetIssue[] = []
   const missing = new Map<string, AssetReference[]>()
@@ -289,7 +292,7 @@ function collectFairyUrls(
 }
 
 async function sha256(bytes: Uint8Array) {
-  const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+  const data = bytes.buffer instanceof ArrayBuffer ? bytes as Uint8Array<ArrayBuffer> : new Uint8Array(bytes)
   const digest = await crypto.subtle.digest("SHA-256", data)
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
 }
