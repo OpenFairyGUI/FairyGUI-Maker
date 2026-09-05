@@ -13,7 +13,7 @@ import {
 
 export const FAIRY_BUILD_PLAN_VERSION = 2 as const;
 export const FAIRY_PLANNER_VERSION = 'deterministic-v1' as const;
-export const FAIRY_COMPILER_VERSION = 'deterministic-v1' as const;
+export const FAIRY_COMPILER_VERSION = 'deterministic-v2' as const;
 export const IMPORT_DOCUMENT_SCHEMA_VERSION = 1 as const;
 
 export interface ConversionImageBinding {

@@ -120,6 +120,19 @@ function textRun(value: unknown, path: string): ImportTextRun {
   };
 }
 
+export function validateImportTextRuns(text: ImportText, path = text.id): void {
+  let end = 0;
+  for (const [index, run] of array(text.runs, `${path}.runs`, 4_096).entries()) {
+    const item = run as ImportTextRun;
+    if (!Number.isSafeInteger(item.start) || !Number.isSafeInteger(item.end)
+      || item.start < end || item.start < 0 || item.end <= item.start || item.end > text.text.length) {
+      fail(`${path}.runs[${index}]`, 'ordered, non-overlapping integer ranges within text.length');
+    }
+    if (!Number.isFinite(item.fontSize) || item.fontSize <= 0) fail(`${path}.runs[${index}].fontSize`, 'a positive finite number');
+    end = item.end;
+  }
+}
+
 function instanceOverride(value: unknown, path: string): ImportInstanceOverride {
   const raw = record(value, path);
   return {
@@ -279,15 +292,7 @@ function node(value: unknown, path: string, files: Record<string, Uint8Array>, b
     if (!['none', 'both', 'height', 'ellipsis'].includes(text.autoSize)) {
       fail(`${path}.autoSize`, '"none", "both", "height", or "ellipsis"');
     }
-    let end = 0;
-    for (const [index, run] of text.runs.entries()) {
-      if (!Number.isSafeInteger(run.start) || !Number.isSafeInteger(run.end)
-        || run.start < end || run.start < 0 || run.end <= run.start || run.end > text.text.length) {
-        fail(`${path}.runs[${index}]`, 'ordered, non-overlapping integer ranges within text.length');
-      }
-      if (run.fontSize <= 0) fail(`${path}.runs[${index}].fontSize`, 'a positive number');
-      end = run.end;
-    }
+    validateImportTextRuns(text, path);
     return text;
   }
   if (kind === 'shape') {

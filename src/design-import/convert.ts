@@ -28,6 +28,7 @@ import type {
   ImportInstanceOverride,
   ImportNode,
 } from './model';
+import { validateImportTextRuns } from './fixture';
 import {
   planDocument,
   validateBuildPlan,
@@ -62,20 +63,33 @@ function constraintRelations(node: ImportNode) {
   return [...horizontal, ...vertical];
 }
 
-function richText(node: Extract<ImportNode, { kind: 'text' }>): string {
-  return node.runs.map((run) => {
+function richText(node: Extract<ImportNode, { kind: 'text' }>): string | undefined {
+  // Backslash escaping and strike tags differ between FairyGUI runtimes; preserve these as plain text.
+  if (node.text.includes('\\') || [node, ...node.runs].some((run) =>
+    /[\[\]<>"'&\\=\u0000-\u001f]/.test(run.fontFamily)
+    || !/^#[a-f\d]{6}(?:[a-f\d]{2})?$/i.test(run.color) || run.strikethrough)) return undefined;
+  const escapeText = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;').replaceAll('[', '\\[');
+  const format = (value: string, run: typeof node.runs[number] | typeof node): string => {
     const tags: string[] = [];
-    if (run.fontFamily !== node.fontFamily) tags.push(`font=${run.fontFamily.replace(/[\[\]]/g, '')}`);
+    if (run.fontFamily !== node.fontFamily) tags.push(`font=${run.fontFamily}`);
     if (Math.round(run.fontSize) !== Math.round(node.fontSize)) tags.push(`size=${Math.max(1, Math.round(run.fontSize))}`);
     if (run.color !== node.color) tags.push(`color=${run.color}`);
     if (run.bold) tags.push('b');
     if (run.italic) tags.push('i');
     if (run.underline) tags.push('u');
-    if (run.strikethrough) tags.push('s');
-    const value = node.text.slice(run.start, run.end);
-    return `${tags.map((tag) => `[${tag}]`).join('')}${value}${[...tags].reverse()
+    return `${tags.map((tag) => `[${tag}]`).join('')}${escapeText(value)}${[...tags].reverse()
       .map((tag) => `[/${tag.split('=')[0]}]`).join('')}`;
-  }).join('');
+  };
+  let end = 0;
+  const parts: string[] = [];
+  for (const run of node.runs) {
+    if (run.start > end) parts.push(format(node.text.slice(end, run.start), node));
+    parts.push(format(node.text.slice(run.start, run.end), run));
+    end = run.end;
+  }
+  if (end < node.text.length) parts.push(format(node.text.slice(end), node));
+  return parts.join('');
 }
 
 export interface ConversionResult {
@@ -453,9 +467,15 @@ export function compilePlanToUam(
     const convertNode = (node: ImportNode, exported = false, resourcePath?: string): UamDisplayNode => {
       const directive = directiveFor(node);
       if (node.kind === 'text') {
-        const mixed = node.runs.length > 0;
+        validateImportTextRuns(node);
+        const formatted = node.runs.length > 0 && directive?.target !== 'text-input' ? richText(node) : undefined;
+        const mixed = formatted !== undefined;
+        if (node.runs.length > 0 && !mixed && directive?.target !== 'text-input') diagnostics.push({
+          code: 'RICH_TEXT_PLAIN_FALLBACK', nodeId: node.id, severity: 'warning',
+          message: '文本或样式不能安全表示为跨 Runtime UBB；已保留原文和基础样式，停用富文本。',
+        });
         const properties = {
-          text: mixed ? richText(node) : node.text,
+          text: formatted ?? node.text,
           font: node.fontFamily,
           fontSize: Math.max(1, Math.round(node.fontSize)),
           color: node.color,
@@ -520,6 +540,9 @@ export function compilePlanToUam(
       }
       if (node.kind === 'instance') {
         if (node.overrides.length > 0) {
+          if (node.overrides.length > 256 || node.overrides.some((override) => override.targetPath.length > 32)) {
+            throw new Error('INSTANCE_OVERRIDE_LIMIT: at most 256 overrides per instance and 32 targetPath entries');
+          }
           const resourceId = idFor('overridden-resource', node.id);
           const targetPackageId = componentPackages.get(node.componentId) ?? packageId;
           pendingOverrides.push({ instance: node, packageId: targetPackageId, resourceId });
@@ -876,20 +899,41 @@ export function compilePlanToUam(
     .filter((resource): resource is Extract<UamResource, { kind: 'component' }> => resource.kind === 'component')
     .map((resource) => [resource.id, { pkg, resource }] as const)));
   type ComponentEntry = NonNullable<ReturnType<typeof componentIndex.get>>;
+  let overrideClones = 0;
+  let overrideNodes = 0;
+  let overrideBytes = 0;
+  let searchedNodes = 0;
+  const findOverrideNode = (source: ComponentEntry, targetId: string) => {
+    searchedNodes += source.resource.component.displayList.length;
+    if (searchedNodes > 1_000_000) throw new Error('INSTANCE_OVERRIDE_LIMIT: search exceeds 1000000 display nodes');
+    return source.resource.component.displayList.find((node) => node.id === targetId);
+  };
+  const cloneOverride = (source: ComponentEntry) => {
+    overrideClones += 1;
+    overrideNodes += source.resource.component.displayList.length;
+    if (overrideClones > 1_024 || overrideNodes > 100_000) {
+      throw new Error('INSTANCE_OVERRIDE_LIMIT: exceeds 1024 clones or 100000 cloned display nodes');
+    }
+    overrideBytes += new TextEncoder().encode(JSON.stringify(source.resource)).byteLength;
+    if (overrideBytes > 32 * 1024 * 1024) throw new Error('INSTANCE_OVERRIDE_LIMIT: cloned component data exceeds 32 MiB');
+    return structuredClone(source.resource);
+  };
 
   const findTargetRoute = (
     source: ComponentEntry,
     targetId: string,
     visited = new Set<string>(),
+    depth = 0,
   ): string[] | undefined => {
-    if (source.resource.component.displayList.some((node) => node.id === targetId)) return [];
     if (visited.has(source.resource.id)) return undefined;
-    const nextVisited = new Set(visited).add(source.resource.id);
+    if (depth >= 32) throw new Error('INSTANCE_OVERRIDE_LIMIT: component route exceeds 32 levels');
+    if (findOverrideNode(source, targetId)) return [];
+    visited.add(source.resource.id);
     for (const node of source.resource.component.displayList) {
       if (node.kind !== 'component') continue;
       const child = componentIndex.get(node.resource.resourceId);
       if (!child) continue;
-      const nested = findTargetRoute(child, targetId, nextVisited);
+      const nested = findTargetRoute(child, targetId, visited, depth + 1);
       if (nested) return [node.id, ...nested];
     }
     return undefined;
@@ -905,7 +949,7 @@ export function compilePlanToUam(
     for (const sourceId of override.targetPath) {
       const nodeId = ids[`${sourceId}:node`];
       if (!nodeId) continue;
-      const node = current.resource.component.displayList.find((item) => item.id === nodeId);
+      const node = findOverrideNode(current, nodeId);
       if (!node) continue;
       if (node.id === targetId) return route;
       if (node.kind !== 'component') continue;
@@ -914,7 +958,7 @@ export function compilePlanToUam(
       route.push(node.id);
       current = child;
     }
-    return current.resource.component.displayList.some((node) => node.id === targetId) ? route : undefined;
+    return findOverrideNode(current, targetId) ? route : undefined;
   };
 
   const applyOverride = (
@@ -936,6 +980,8 @@ export function compilePlanToUam(
     if (override.width !== null) target.size.width = override.width;
     if (override.height !== null) target.size.height = override.height;
     if (override.text !== null && (target.kind === 'text' || target.kind === 'richText')) {
+      // GRichTextField parses HTML even with UBB disabled; replacement text must use a plain text node.
+      Object.assign(target, { ...createDefaultUamPlainTextProperties(), ...target, kind: 'text' });
       target.text = override.text;
       target.ubbEnabled = false;
     }
@@ -965,7 +1011,7 @@ export function compilePlanToUam(
     const source = sourceId && componentIndex.get(sourceId);
     const targetPackage = packages.find((pkg) => pkg.id === pending.packageId);
     if (!source || !targetPackage) continue;
-    const cloned = structuredClone(source.resource);
+    const cloned = cloneOverride(source);
     cloned.id = pending.resourceId;
     cloned.name = resourceName(pending.packageId, stripSemanticName(pending.instance.name), 'Instance', 'xml');
     cloned.path = '/_internal/overrides/';
@@ -978,6 +1024,7 @@ export function compilePlanToUam(
       const targetId = ids[`${override.targetId}:node`];
       if (!targetId) continue;
       const route = explicitTargetRoute(source, override, targetId) ?? findTargetRoute(source, targetId);
+      if (route && route.length >= 32) throw new Error('INSTANCE_OVERRIDE_LIMIT: component route exceeds 32 levels');
       if (!route) {
         diagnostics.push({
           code: 'INSTANCE_OVERRIDE_TARGET_MISSING',
@@ -996,7 +1043,7 @@ export function compilePlanToUam(
         if (!childClone) {
           const childSource = componentIndex.get(componentNode.resource.resourceId);
           if (!childSource) break;
-          const childResource = structuredClone(childSource.resource);
+          const childResource = cloneOverride(childSource);
           childResource.id = idFor('override-resource', pending.instance.id, current.resource.id, componentNode.id);
           childResource.name = resourceName(
             childSource.pkg.id,

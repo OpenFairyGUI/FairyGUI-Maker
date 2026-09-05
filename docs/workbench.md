@@ -306,7 +306,15 @@ Player 连接只绑定 `artifactId + digest`，详情刷新中的来源名称/�
 
 ### 2.13 确定性 Planner/Compiler（批次 18）
 
-Host/CLI 的 `planDocument()` 生成 `FairyBuildPlanV2`，`compilePlanToUam()` 在产生 UAM、写任何生成文件前执行严格 Zod 与源引用校验。计划包含 `sourceSchemaVersion: 1`、`plannerVersion/compilerVersion: deterministic-v1`、`sourceDocumentId` 和 `sourceDigest`；不接受旧版本、未知字段、重复 Page/Root、跨 Page 错放的 Root 或任意自定义保留 Key。Package/Component 名称和 exported、经过校验的 Semantic Overlay 仍可编辑。
+Host/CLI 的 `planDocument()` 生成 `FairyBuildPlanV2`，`compilePlanToUam()` 在产生 UAM、写任何生成文件前执行严格 Zod 与源引用校验。计划包含 `sourceSchemaVersion: 1`、`plannerVersion: deterministic-v1`、`compilerVersion: deterministic-v2`、`sourceDocumentId` 和 `sourceDigest`；不接受旧版本、未知字段、重复 Page/Root、跨 Page 错放的 Root 或任意自定义保留 Key。Package/Component 名称和 exported、经过校验的 Semantic Overlay 仍可编辑。
+
+导入文本的 UBB/HTML 字面量会统一转义，未被 Text Run 覆盖的文本使用基础样式。反斜杠、
+不安全的字体/颜色属性或跨 Runtime 不支持的分段删除线会降级为普通文本，并产生
+`RICH_TEXT_PLAIN_FALLBACK`；替换 RichText 的 Override 文本也会改为普通文本节点。
+Override 每个 Instance 最多 256 项、路径和组件搜索深度最多 32；每次编译最多扫描 1,000,000 个
+显示节点、克隆 1,024 个组件 / 100,000 个显示节点，克隆组件 JSON 累计最多 32 MiB，超限在写工程前失败。
+T1 改变了文本输出和路径安全规则，因此 Compiler 版本升为 `deterministic-v2`；旧计划需重新生成，
+显式记录旧 Compiler 版本的导入状态不能直接用于新版本重导入。
 
 `sourceDigest` 为完整 ImportDocument（含原始诊断）和 `imageBindings` 的规范 JSON SHA-256。对象键按代码点排序，数组顺序保留；图片先按实际字节计算 SHA-256 和长度，不展开成 JSON 数字数组。Binding 的像素比例、trim、尺寸、scale9Grid 也被绑定；源结构、同尺寸图片内容或 Binding 变化均需重新 Plan。摘要标识编译输入，不是原始 FIG/PSD 文件摘要，也不是来源签名；更改 Overlay 是编辑计划，不更改源摘要。
 

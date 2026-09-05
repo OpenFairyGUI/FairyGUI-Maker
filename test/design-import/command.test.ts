@@ -34,7 +34,7 @@ test('imports real FIG and PSD files into new validated projects and refuses ove
       const stateBefore = await readFile(join(outputPath, MAKER_IMPORT_STATE), 'utf8');
       const state = JSON.parse(stateBefore);
       assert.equal(state.schemaVersion, 2);
-      assert.equal(state.compiler.compilerVersion, 'deterministic-v1');
+      assert.equal(state.compiler.compilerVersion, 'deterministic-v2');
       assert.equal(state.compiler.plannerVersion, 'deterministic-v1');
       assert.equal(state.source.path, sourcePath);
       assert.ok(Object.keys(result.ids).every((nodeId) => state.sourceNodes[nodeId]));

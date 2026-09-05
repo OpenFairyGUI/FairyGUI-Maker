@@ -17,6 +17,7 @@ import { saveGrantSmoke } from "./save-grant-smoke"
 import { assertRuntimeIsolated, runtimeNavigationSmoke } from "./runtime-isolation-smoke"
 import { createBrowserEvidence, goldenUpdateEnabled, saveVisualGolden } from "./browser-evidence"
 import { browserEvidenceSmoke } from "./browser-evidence-smoke"
+import { importTextSmoke } from "./import-text-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -192,6 +193,7 @@ try {
     return goldens.at(-1)!.metrics
   })
   const viewerIsolation = await evidence.step("isolation-viewer", () => assertRuntimeIsolated(page, "viewer", `/api/projects/${projectId}/source-index`))
+  await evidence.step("import-text-boundary", () => importTextSmoke(page))
   if (!viewerRender.value?.value?.observation?.objectTree?.children?.length) {
     throw new Error("Viewer observation did not include imported FIG children")
   }
