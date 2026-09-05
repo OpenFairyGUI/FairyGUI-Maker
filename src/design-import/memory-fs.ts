@@ -1,4 +1,5 @@
 import type { FileSystem } from '@openfairygui/core/project-io';
+import { safeName } from './convert';
 
 function normalize(path: string): string {
   const parts: string[] = [];
@@ -76,15 +77,17 @@ export class MemoryFileSystem implements FileSystem {
   }
 
   toZipEntries(wrapper: string): Record<string, Uint8Array> {
+    const root = safeWrapper(wrapper);
     const entries: Record<string, Uint8Array> = {};
     for (const [path, value] of this.files) {
       const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
-      entries[`${safeWrapper(wrapper)}/${path.slice(1)}`] = new Uint8Array(bytes);
+      entries[`${root}/${path.slice(1)}`] = new Uint8Array(bytes);
     }
     return entries;
   }
 }
 
 function safeWrapper(value: string): string {
-  return value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').trim() || 'FigmaProject';
+  if (safeName(value) !== value) throw new Error('ZIP wrapper must be a safe single directory name (no traversal, separators or reserved names)');
+  return value;
 }

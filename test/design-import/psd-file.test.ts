@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -7,7 +7,7 @@ import { NodeIO } from '@openfairygui/core/node';
 import { readProjectAsUam, writeProjectFromUam } from '@openfairygui/core/uam';
 import { writePsdUint8Array } from 'ag-psd';
 import { convertDocument } from '../../src/design-import';
-import { parsePsdFile } from '../../src/design-import/node';
+import { importDesignSource, parsePsdFile } from '../../src/design-import/node';
 
 const pixels = new Uint8ClampedArray([
   255, 0, 0, 255, 0, 255, 0, 255,
@@ -118,4 +118,27 @@ test('converts the pinned third-party PSD corpus into readable FairyGUI projects
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('PSD text-layer pixel budgets reject oversized 8/16/32-bit inputs before creating a project', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'maker-psd-text-budget-'));
+  try {
+    for (const [bits, size, count] of [[8, 10_000, 2], [16, 6_000, 2], [32, 6_000, 1]]) {
+      // Tiny raw channels declare large bounds; the test never allocates the claimed pixel buffers.
+      const bytes = writePsdUint8Array({ width: 100, height: 60, children: Array.from({ length: count }, (_, i) => ({
+        name: `Text ${i}`, top: 0, left: 0, right: size, bottom: size,
+        text: { text: 'Text', style: { font: { name: 'Arial' }, fontSize: 12 } },
+        rawData: { colorMode: 3, bitsPerChannel: 8, large: false, channels: [{ id: 0, compression: 0, data: new Uint8Array([0]) }] },
+      })) });
+      new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setUint16(22, bits);
+      assert.ok(bytes.length < 100_000);
+      assert.throws(() => parsePsdFile(bytes), /decoded layer pixels exceed the 512 MiB limit/, `${bits}-bit text pixels`);
+      const sourcePath = join(directory, `source-${bits}.psd`);
+      const outputPath = join(directory, `output-${bits}`);
+      await writeFile(sourcePath, bytes);
+      await assert.rejects(importDesignSource({ sourcePath, outputPath }), /decoded layer pixels exceed the 512 MiB limit/);
+      await assert.rejects(access(outputPath), { code: 'ENOENT' });
+    }
+    assert.ok(parsePsdFile(fixture()).pages.length, 'normal PSDs still work after rejection');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

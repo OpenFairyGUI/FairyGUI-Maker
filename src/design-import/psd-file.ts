@@ -219,11 +219,16 @@ function validateStructure(layers: Layer[], bitsPerChannel: number): void {
     const box = ownBox(layer);
     const width = Math.max(0, box.right - box.left);
     const height = Math.max(0, box.bottom - box.top);
-    if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+    // Pixel decoding uses layer bounds, not the artboard's visual rectangle.
+    const pixelWidth = Math.max(0, number(layer.right) - number(layer.left));
+    const pixelHeight = Math.max(0, number(layer.bottom) - number(layer.top));
+    if ([width, height, pixelWidth, pixelHeight].some((size) => size > MAX_DIMENSION)) {
       throw new Error(`PSD layer exceeds ${MAX_DIMENSION} px: ${layer.name || layer.id || layerCount}`);
     }
-    if (!layer.children && !layer.text) {
-      decodedBytes += width * height * 4 * bytesPerChannel;
+    // Text layers also carry pixels and can fall back to raster decoding; account for them before conversion.
+    if (!layer.children || layer.rawData?.channels.some((channel) => channel.data?.byteLength)) {
+      const channels = layer.rawData?.colorMode === 4 ? 5 : 4; // ag-psd expands CMYK to five channels.
+      decodedBytes += pixelWidth * pixelHeight * channels * bytesPerChannel;
       if (!Number.isSafeInteger(decodedBytes) || decodedBytes > MAX_DECODED_BYTES) {
         throw new Error('PSD decoded layer pixels exceed the 512 MiB limit');
       }

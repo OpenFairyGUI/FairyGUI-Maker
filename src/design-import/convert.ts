@@ -240,12 +240,13 @@ export function createConversionReport(
 
 export function safeName(value: string, fallback = 'Untitled'): string {
   const cleaned = value
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+    .normalize('NFC')
+    .replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '_')
     .trim()
-    .replace(/[. ]+$/g, '')
-    .slice(0, 80);
+    .slice(0, 80)
+    .replace(/[. ]+$/g, '');
   if (!cleaned || cleaned === '.' || cleaned === '..') return fallback;
-  return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(cleaned) ? `_${cleaned}` : cleaned;
+  return /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(cleaned) ? `_${cleaned}` : cleaned;
 }
 
 function canFlattenGroup(frame: ImportFrame): boolean {
@@ -374,7 +375,6 @@ export function compilePlanToUam(
     page.roots.forEach((root) => indexComponents(root, packageId));
   }
 
-  const packageNames = new Set<string>();
   const resourceNames = new Map<string, Set<string>>();
   const resourceName = (packageId: string, value: string, fallback: string, extension = ''): string => {
     const used = resourceNames.get(packageId) ?? new Set<string>();
@@ -879,10 +879,7 @@ export function compilePlanToUam(
       const rootPlan = rootPlans.get(root.id)!;
       convertFrame(root, rootPlan.exported);
     });
-    const baseName = safeName(page.name, pageIndex === 0 ? 'Main' : `Page${pageIndex + 1}`);
-    let name = baseName;
-    for (let suffix = 2; packageNames.has(name); suffix += 1) name = `${baseName}_${suffix}`;
-    packageNames.add(name);
+    const name = resourceName('$packages', page.name, pageIndex === 0 ? 'Main' : `Page${pageIndex + 1}`);
     return {
       id: packageId,
       name,

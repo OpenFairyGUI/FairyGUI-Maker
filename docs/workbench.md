@@ -316,6 +316,10 @@ Override 每个 Instance 最多 256 项、路径和组件搜索深度最多 32�
 T1 改变了文本输出和路径安全规则，因此 Compiler 版本升为 `deterministic-v2`；旧计划需重新生成，
 显式记录旧 Compiler 版本的导入状态不能直接用于新版本重导入。
 
+PSD 的 512 MiB 像素预算包含文本层携带的像素，并按实际图层像素边界和 8/16/32-bit 深度计算；
+Artboard 的可视矩形不能掩盖像素超限。Package 与 Resource 名称共用 NFC 规范化、大小写不敏感
+冲突后缀和 Windows 保留名规则；ZIP wrapper 必须是安全的单层目录名，危险路径直接拒绝。
+
 `sourceDigest` 为完整 ImportDocument（含原始诊断）和 `imageBindings` 的规范 JSON SHA-256。对象键按代码点排序，数组顺序保留；图片先按实际字节计算 SHA-256 和长度，不展开成 JSON 数字数组。Binding 的像素比例、trim、尺寸、scale9Grid 也被绑定；源结构、同尺寸图片内容或 Binding 变化均需重新 Plan。摘要标识编译输入，不是原始 FIG/PSD 文件摘要，也不是来源签名；更改 Overlay 是编辑计划，不更改源摘要。
 
 所有新 Project、Package、Resource、Display Node、Shadow、Layout、Controller Page 和 Override Clone ID 使用同一分配器：`SHA-256([maker-id-v1, sourceDocumentId, role, logicalParts, attempt])` 映射为 8 位小写 base36 ID。碰撞时确定性递增 attempt，预留全部有效旧 ID（包括尚未访问和已删除的键）；当前键有可复用的 State v2 ID 时优先复用。图片内容去重的多键映射继续保留。公开 `conversionIds` 沿用旧键格式，内部按类型元组区分命名空间；遇到不同角色/来源拼接成相同旧键时明确拒绝，不静默复用。
