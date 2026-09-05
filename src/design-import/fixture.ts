@@ -178,6 +178,10 @@ function base(raw: JsonRecord, path: string) {
     mask: boolean(raw.mask, `${path}.mask`),
     constraints: constraints(raw.constraints, `${path}.constraints`),
     layoutChild: boolean(raw.layoutChild, `${path}.layoutChild`),
+    ...(raw.interactions === undefined ? {} : { interactions: array(raw.interactions, `${path}.interactions`, 64).map((value, index) => {
+      const item = record(value, `${path}.interactions[${index}]`);
+      return { trigger: string(item.trigger, `${path}.trigger`, 128), action: string(item.action, `${path}.action`, 128), source: string(item.source, `${path}.source`, 16_384) };
+    }) }),
   };
 }
 
@@ -236,6 +240,11 @@ function node(value: unknown, path: string, files: Record<string, Uint8Array>, b
       kind,
       ...common,
       sourceType,
+      ...(raw.sourceLayout === undefined ? {} : { sourceLayout: (() => {
+        const value = string(raw.sourceLayout, `${path}.sourceLayout`);
+        if (!['preserved', 'baked', 'dropped'].includes(value)) fail(`${path}.sourceLayout`, 'preserved, baked or dropped');
+        return value as ImportFrame['sourceLayout'];
+      })() }),
       ...(sourceType === 'group' ? { flattenable: boolean(raw.flattenable, `${path}.flattenable`) } : {}),
       variantProperties: stringRecord(raw.variantProperties, `${path}.variantProperties`),
       layout: raw.layout === null ? null : (() => {
@@ -270,6 +279,8 @@ function node(value: unknown, path: string, files: Record<string, Uint8Array>, b
       ...common,
       text: string(raw.text, `${path}.text`, MAX_TEXT_LENGTH),
       fontFamily: string(raw.fontFamily, `${path}.fontFamily`),
+      ...(raw.fontStyle === undefined ? {} : { fontStyle: string(raw.fontStyle, `${path}.fontStyle`) }),
+      ...(raw.fontPostScriptName === undefined ? {} : { fontPostScriptName: string(raw.fontPostScriptName, `${path}.fontPostScriptName`) }),
       fontSize: number(raw.fontSize, `${path}.fontSize`),
       color: string(raw.color, `${path}.color`),
       align: string(raw.align, `${path}.align`) as ImportText['align'],

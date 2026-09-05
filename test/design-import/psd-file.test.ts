@@ -84,7 +84,7 @@ test('reads a real PSD layer tree and converts text plus pixels', async () => {
   assert.equal(group.x, 10);
   assert.equal(group.y, 5);
   assert.equal(group.children[1].x, 10);
-  assert.deepEqual(document.diagnostics.map((item) => item.code), ['RASTERIZED_NODE']);
+  assert.deepEqual(document.diagnostics.map((item) => item.code), ['PSD_COLOR_MANAGEMENT_UNVERIFIED', 'RASTERIZED_NODE']);
   const image = group.children[1];
   assert.ok(image.kind === 'image');
   assert.deepEqual(Array.from(image.bytes.subarray(0, 8)), [137, 80, 78, 71, 13, 10, 26, 10]);
@@ -111,6 +111,9 @@ test('converts the pinned third-party PSD corpus into readable FairyGUI projects
       const output = join(directory, `${expected.name}.fairy`);
       const converted = convertDocument(parsePsdFile(await readFile(input), expected.name));
       const report = converted.report;
+      assert.ok(report.diagnostics.PSD_COLOR_MANAGEMENT_UNVERIFIED);
+      if (expected.name === 'mask.psd') assert.ok(report.diagnostics.PSD_MASK_DROPPED);
+      if (expected.name === 'effects-enabled.psd') assert.ok(report.diagnostics.PSD_EFFECTS_DROPPED);
       assert.equal(report.nodes, expected.nodes, expected.name);
       assert.equal(report.editableText, expected.editableText, expected.name);
       assert.equal(report.rasterizedNodes, expected.rasterizedNodes, expected.name);

@@ -180,7 +180,36 @@ function base(node: FigNode, root = false, inferredSize?: { width: number; heigh
     mask: isFigmaMask(node),
     constraints: nodeConstraints(node),
     layoutChild: node.stackPositioning !== 'ABSOLUTE',
+    ...(node.prototypeInteractions?.length ? { interactions: interactionIntents(node) } : {}),
   };
+}
+
+function interactionIntents(node: FigNode) {
+  if (!Array.isArray(node.prototypeInteractions) || node.prototypeInteractions.length > 64) throw new Error('FIG_INTERACTION_LIMIT: at most 64 interactions per node');
+  return node.prototypeInteractions.map((item: Record<string, any>) => {
+    // Keep the original action/destination fields without inventing executable FairyGUI events.
+    let entries = 0;
+    const check = (value: unknown, depth = 0): void => {
+      if (++entries > 1_024 || depth > 16 || typeof value === 'string' && value.length > 4_096) throw new Error('FIG_INTERACTION_LIMIT: interaction metadata exceeds budget');
+      if (value && typeof value === 'object') Object.values(value).forEach((child) => check(child, depth + 1));
+    };
+    check(item);
+    const source = JSON.stringify(item);
+    if (source.length > 16_384) throw new Error('FIG_INTERACTION_LIMIT: interaction metadata exceeds 16 Ki characters');
+    const label = (value: unknown) => typeof value === 'string' ? value.slice(0, 128) : 'unknown';
+    return { trigger: label(item.trigger?.type ?? item.trigger), action: label(item.action?.type ?? item.actions?.[0]?.type ?? item.action), source };
+  });
+}
+
+function diagnoseTransform(node: FigNode, diagnostics: Diagnostic[]) {
+  const transform = node.transform;
+  if (!transform) return;
+  const a = finite(transform.m00, 1), b = finite(transform.m10, 0), c = finite(transform.m01, 0), d = finite(transform.m11, 1);
+  const denominator = Math.hypot(a, b) * Math.hypot(c, d);
+  if (denominator < 1e-8 || Math.abs(a * c + b * d) > 1e-6 * denominator) diagnostics.push({
+    code: 'FIG_TRANSFORM_APPROXIMATED', nodeId: id(node), severity: 'warning',
+    message: '源变换包含 shear/skew 或退化矩阵；当前保留位置、旋转、缩放，未保留剪切。',
+  });
 }
 
 export function isFigmaMask(node: FigNode): boolean {
@@ -684,6 +713,10 @@ function svgImageNode(
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size.width}" height="${size.height}" viewBox="0 0 ${size.width} ${size.height}">${definitions}${elements.join('')}</svg>`;
   const bytes = svgBytes(svg, format, node.type === 'TEXT');
   if (!bytes) return undefined;
+  if (node.type === 'TEXT') diagnostics.push({
+    code: 'FONT_FALLBACK_ENVIRONMENT_UNVERIFIED', nodeId: id(node), severity: 'warning',
+    message: `文字图片需要 ${node.fontName?.family ?? 'Arial'} / sans-serif；${format === 'png' ? 'PNG 在解析时使用 Host 系统字体' : 'SVG 的实际字体取决于目标渲染器'}，未验证字体文件或排版度量，后续 Overlay 不会改写已生成图片。`,
+  });
   if (directShape && (node.effects ?? []).some((effect) => effect.visible !== false)
     && !diagnostics.some((item) => item.code === 'FIG_EFFECTS_IGNORED' && item.nodeId === id(node))) diagnostics.push({
     code: 'FIG_EFFECTS_IGNORED',
@@ -759,6 +792,7 @@ function frameDecoration(
   return {
     kind: 'shape',
     ...base(node, false, inferredSize),
+    interactions: undefined,
     id: `${id(node)}:background`,
     name: `${node.name || node.type} background`,
     x: 0,
@@ -905,6 +939,8 @@ function textNode(document: FigDocument, node: FigNode, diagnostics: Diagnostic[
     ...base(node),
     text: node.textData.characters,
     fontFamily: style.fontFamily,
+    ...(typeof node.fontName?.style === 'string' ? { fontStyle: node.fontName.style } : {}),
+    ...(typeof node.fontName?.postScriptName === 'string' ? { fontPostScriptName: node.fontName.postScriptName } : {}),
     fontSize: style.fontSize,
     color: style.color,
     align: ({ CENTER: 'center', RIGHT: 'right' } as const)[String(node.textAlignHorizontal) as 'CENTER' | 'RIGHT'] ?? 'left',
@@ -1140,16 +1176,11 @@ function readNode(
   if (CONTAINERS.has(node.type)) {
     if (vectorFallback !== 'skip' && isFigmaGroup(node)) {
       const composite = svgImageNode(document, node, diagnostics, vectorFallback, true);
-      if (composite) return composite;
+      if (composite) { diagnoseTransform(node, diagnostics); return composite; }
     }
     return readFrame(document, node, diagnostics, componentIds, false, vectorFallback);
   }
-  if (Array.isArray(node.prototypeInteractions) && node.prototypeInteractions.length > 0) diagnostics.push({
-    code: 'INTERACTION_DROPPED',
-    message: 'Prototype interaction 没有通用 FairyGUI 事件等价物，当前未写入工程。',
-    nodeId: id(node),
-    severity: 'warning',
-  });
+  diagnoseTransform(node, diagnostics);
   if (node.type === 'INSTANCE') {
     const target = componentId(node);
     if (target && componentIds.has(target)) {
@@ -1229,12 +1260,7 @@ function readFrame(
   root: boolean,
   vectorFallback: FigmaVectorFallback,
 ): ImportFrame {
-  if (Array.isArray(node.prototypeInteractions) && node.prototypeInteractions.length > 0) diagnostics.push({
-    code: 'INTERACTION_DROPPED',
-    message: 'Prototype interaction 没有通用 FairyGUI 事件等价物，当前未写入工程。',
-    nodeId: id(node),
-    severity: 'warning',
-  });
+  diagnoseTransform(node, diagnostics);
   const inferredSize = nodeSize(node) ? undefined : inferResizeToFitSize(document, node);
   if (inferredSize) diagnostics.push({
     code: 'FIG_BOUNDS_INFERRED',
@@ -1257,8 +1283,8 @@ function readFrame(
   });
   const layout = simpleAutoLayout(node, sourceChildren, convertedChildren);
   if (typeof node.stackMode === 'string' && node.stackMode !== 'NONE' && !layout) diagnostics.push({
-    code: 'AUTO_LAYOUT_BAKED',
-    message: '复杂 Auto Layout 已按当前坐标烘焙；简单无 padding/wrap/grow 的布局才映射为 FairyGUI Group。',
+    code: convertedChildren.length === sourceChildren.length ? 'LAYOUT_BAKED' : 'LAYOUT_DROPPED',
+    message: '复杂 Auto Layout 已按保留下来的节点坐标烘焙；缺失子节点时布局关系同时降级。简单无 padding/wrap/grow 的布局才映射为 FairyGUI Group。',
     nodeId: id(node),
     severity: 'warning',
   });
@@ -1284,6 +1310,8 @@ function readFrame(
     ...(group ? { flattenable: canFlatten } : {}),
     variantProperties: variantProperties(document, node),
     layout,
+    ...(typeof node.stackMode === 'string' && node.stackMode !== 'NONE'
+      ? { sourceLayout: layout ? 'preserved' as const : convertedChildren.length === sourceChildren.length ? 'baked' as const : 'dropped' as const } : {}),
     clipContent: group ? false : node.frameMaskDisabled === false,
     backgroundColor: group ? null : !decoration && background ? color(background) ?? null : null,
     children: [...(decoration ? [decoration] : []), ...convertedChildren],

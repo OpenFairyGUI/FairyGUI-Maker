@@ -332,7 +332,7 @@ Player 连接只绑定 `artifactId + digest`，详情刷新中的来源名称/�
 
 ### 2.13 确定性 Planner/Compiler（批次 18）
 
-Host/CLI 的 `planDocument()` 生成 `FairyBuildPlanV2`，`compilePlanToUam()` 在产生 UAM、写任何生成文件前执行严格 Zod 与源引用校验。计划包含 `sourceSchemaVersion: 1`、`plannerVersion: deterministic-v1`、`compilerVersion: deterministic-v2`、`sourceDocumentId` 和 `sourceDigest`；不接受旧版本、未知字段、重复 Page/Root、跨 Page 错放的 Root 或任意自定义保留 Key。Package/Component 名称和 exported、经过校验的 Semantic Overlay 仍可编辑。
+Host/CLI 的 `planDocument()` 生成 `FairyBuildPlanV2`，`compilePlanToUam()` 在产生 UAM、写任何生成文件前执行严格 Zod 与源引用校验。当前计划包含 `sourceSchemaVersion: 1`、`plannerVersion: deterministic-v2`、`compilerVersion: deterministic-v3`、`sourceDocumentId` 和 `sourceDigest`；不接受旧版本、未知字段、重复 Page/Root、跨 Page 错放的 Root 或任意自定义保留 Key。Package/Component 名称和 exported、经过校验的 Semantic Overlay 仍可编辑。T5 新增字段与版本迁移见[导入语义与视觉保真](./import-fidelity.md)。
 
 导入文本的 UBB/HTML 字面量会统一转义，未被 Text Run 覆盖的文本使用基础样式。反斜杠、
 不安全的字体/颜色属性或跨 Runtime 不支持的分段删除线会降级为普通文本，并产生
@@ -380,7 +380,7 @@ failure-page-*.png        失败时仍可读取的页面截图
 
 视觉报告绑定模式、来源 ID/revision（Player 为完整 artifact digest）、package/component ID、renderSessionId、semantic/view 双版本、实际 view 和两张 PNG 的 SHA-256。两套 fixture 各自配置尺寸与阈值，任何像素超限或尺寸变化都会失败；不能只以 PNG Header 正确代替视觉验收。浏览器上下文固定 1280×720、DPR=1、en-US、UTC；Player Golden 显式设置 482×446 的 Broker View，Viewer Golden 同样断言 482×446。CI 固定 ubuntu-24.04 与 lockfile 中的 Chromium/Playwright 版本，报告保存实际 OS/Node/浏览器版本。
 
-Viewer 基线沿用真实 `basic-shapes.fig`；Player 基线使用本地构造并通过 Core 发布的 `Smoke.fui`，捕获 `SMOKE001/OTHER001` 的原生矩形与圆形。Player 的 Main 文本、Controller、Transition 与组件切换继续走功能回归，但**图形 Golden 不认证系统字体、文字排版或所有业务 UI 的视觉保真**。跨操作系统/浏览器升级需另行审查实际差异，不能靠扩大公共阈值消除失败。
+Viewer 图形基线沿用真实 `basic-shapes.fig`；Player 图形基线使用本地构造并通过 Core 发布的 `Smoke.fui`，捕获 `SMOKE001/OTHER001` 的原生矩形与圆形。Player 的 Main 文本、Controller、Transition 与组件切换继续走功能回归。T5 另增[固定字体、文字/按钮四态/List 的 8 张双模式 Golden](./import-fidelity.md#验收)，不认证任意系统字体、复杂脚本或所有业务 UI 的视觉保真。跨操作系统/浏览器升级需另行审查实际差异，不能靠扩大公共阈值消除失败。
 
 所有页面和 iframe 统一采集 `pageerror`、`console.error/warning`、`requestfailed`、HTTP 4xx/5xx 和 `securitypolicyviolation`。未预期的诊断以及诊断数量溢出阻断测试；取消的长轮询、关闭会话、特定 CAS/交付故障、权限拒绝与隔离攻击探针按具体场景和特征归类，仍在报告中留存原因。报告不收集请求体、Cookie、Authorization、存储或 DOM dump，文本脱敏 Host/审批 token 和临时工程路径，失败截图遮盖 password 输入。不启用包含请求体/凭证的原始 Playwright trace/HAR；证据仅针对合成测试工程，不是生产用户工程的遥测。
 

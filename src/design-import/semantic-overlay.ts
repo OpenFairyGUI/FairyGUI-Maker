@@ -26,6 +26,7 @@ export interface SemanticNodeDirective {
   componentKey?: string;
   extensionType?: 'Button' | 'Label' | 'ProgressBar' | 'Slider';
   state?: { controller: string; page: string };
+  layout?: 'preserve' | 'bake';
   asset?: { rasterize?: boolean; scale9Grid?: [number, number, number, number] };
   confidence?: number;
   rationale?: string;
@@ -40,6 +41,13 @@ export interface MakerSemanticOverlayV1 {
     unsupportedNode: 'skip' | 'rasterize' | 'fail';
   };
   nodes: Record<string, SemanticNodeDirective>;
+  fonts?: {
+    availableFamilies?: string[];
+    substitutions?: Record<string, string>;
+    fallbackFamilies?: string[];
+  };
+  // Explicit keys resolve only to source Component IDs, never filesystem paths or remote URLs.
+  componentLibrary?: Record<string, string>;
 }
 
 const scale9GridSchema = z.tuple([
@@ -53,7 +61,8 @@ export const semanticNodeDirectiveSchema = z.object({
   target: z.enum(SEMANTIC_TARGETS),
   componentKey: z.string().trim().min(1).max(128).optional(),
   extensionType: z.enum(['Button', 'Label', 'ProgressBar', 'Slider']).optional(),
-  state: z.object({ controller: z.string().trim().min(1).max(128), page: z.string().trim().min(1).max(128) }).strict().optional(),
+  state: z.object({ controller: z.string().trim().min(1).max(128), page: z.string().trim().min(1).max(128).regex(/^[^,]+$/, 'Controller page names cannot contain commas') }).strict().optional(),
+  layout: z.enum(['preserve', 'bake']).optional(),
   asset: z.object({ rasterize: z.boolean().optional(), scale9Grid: scale9GridSchema.optional() }).strict().optional(),
   confidence: z.number().finite().min(0).max(1).optional(),
   rationale: z.string().trim().min(1).max(1_000).optional(),
@@ -73,6 +82,13 @@ export const semanticOverlaySchema = z.object({
     unsupportedNode: z.enum(['skip', 'rasterize', 'fail']),
   }).strict(),
   nodes: z.record(z.string().min(1).max(1_024), semanticNodeDirectiveSchema),
+  fonts: z.object({
+    availableFamilies: z.array(z.string().trim().min(1).max(256)).max(1_024).optional(),
+    substitutions: z.record(z.string().min(1).max(256), z.string().trim().min(1).max(256)).refine((value) => Object.keys(value).length <= 1_024).optional(),
+    fallbackFamilies: z.array(z.string().trim().min(1).max(256)).max(16).optional(),
+  }).strict().optional(),
+  componentLibrary: z.record(z.string().min(1).max(128), z.string().min(1).max(1_024))
+    .refine((value) => Object.keys(value).length <= 1_024).optional(),
 }).strict();
 
 export function createSemanticOverlay(document: ImportDocument): MakerSemanticOverlayV1 {
@@ -101,6 +117,17 @@ export function validateSemanticOverlay(document: ImportDocument, input: MakerSe
     const node = nodes.get(nodeId);
     if (!node) throw new Error(`Semantic overlay references missing node ${nodeId}`);
     assertSemanticTarget(node, directive);
+    if (directive.componentKey && overlay.componentLibrary?.[directive.componentKey]) {
+      const target = nodes.get(overlay.componentLibrary[directive.componentKey]);
+      if (node.kind !== 'instance' || target?.kind !== 'frame' || target.sourceType !== 'component') {
+        throw new Error(`Component library mapping ${directive.componentKey} requires an Instance and a source Component`);
+      }
+      if (node.overrides.length) throw new Error(`Component library mapping ${nodeId} cannot retarget source-specific overrides`);
+    }
+  }
+  for (const [key, nodeId] of Object.entries(overlay.componentLibrary ?? {})) {
+    const node = nodes.get(nodeId);
+    if (node?.kind !== 'frame' || node.sourceType !== 'component') throw new Error(`Component library key ${key} references missing Component ${nodeId}`);
   }
   return overlay;
 }
@@ -119,6 +146,7 @@ export function assertSemanticTarget(node: ImportNode, input: SemanticNodeDirect
   if (directive.asset?.scale9Grid && node.kind !== 'image') {
     throw new Error(`Semantic scale9Grid is only valid for image node ${node.id}`);
   }
+  if (directive.layout && node.kind !== 'frame') throw new Error(`Semantic layout requires a Frame: ${node.id}`);
   return directive;
 }
 

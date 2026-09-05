@@ -134,6 +134,7 @@ test('converts an ImportDocument and writes a readable FairyGUI project', async 
   );
   const converted = convertDocument(document);
   assert.deepEqual(converted.report, {
+    fidelity: { fonts: [], layouts: [], interactions: [] },
     sourceName: 'Demo',
     pages: 1,
     roots: 1,

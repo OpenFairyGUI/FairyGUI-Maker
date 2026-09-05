@@ -2,6 +2,7 @@ import { parseJta, type UamAssetResource, type UamComponentResource, type UamDis
 import { installResourceLoadBudget, loadRuntimeTexture, reserveImage, setImageProbeWorker } from "./image-budget"
 import { acceptRuntimeConnection } from "../runtime-channel"
 import { disableRuntimeStorage, flushRuntimeFrame, nextRuntimeFrame } from "./platform"
+import { inspectRuntimeFont, type RuntimeFontEvidence } from "./font-evidence"
 import { checkBudget, checkImageDimensions, checkRuntimeMetadata, ObservationBudget, ResourceBudget, RUNTIME_LIMITS } from "./resource-budget"
 import {
   type ViewerControlKind,
@@ -611,7 +612,7 @@ function applyTextProperties(object: any, node: UamTextProperties) {
   object.fontSize = node.fontSize
   object.color = node.color
   object.align = horizontalAlign(node.align)
-  object.verticalAlign = verticalAlign(node.vAlign)
+  object.valign = verticalAlign(node.vAlign)
   object.leading = node.leading
   object.letterSpacing = node.letterSpacing
   object.autoSize = node.autoSize
@@ -621,7 +622,7 @@ function applyTextProperties(object: any, node: UamTextProperties) {
   object.italic = node.italic
   object.bold = node.bold
   object.strokeColor = node.strokeColor || "#000000"
-  object.stroke = node.strokeSize
+  object.stroke = node.strokeColor ? node.strokeSize : 0
   object.text = node.text
 }
 
@@ -720,7 +721,7 @@ function configureControl(record: ComponentRecord, ownerRecord: ComponentRecord,
       selectionController: "",
       items: [],
       icons: [],
-      title: "",
+      title: String(findChildByName(object, "title")?.text ?? ""),
       selectedTitle: "",
       icon: "",
       selectedIcon: "",
@@ -895,7 +896,7 @@ function openComboPopup(control: InteractiveControl) {
     label.setSize(row.width, row.height)
     label.fontSize = Math.max(12, Math.min(18, rowHeight - 10))
     label.color = index === control.selectedIndex ? "#60a5fa" : "#f4f4f5"
-    label.verticalAlign = fgui.VertAlignType.Middle
+    label.valign = "middle"
     label.text = `  ${control.items[index]}`
     label.touchable = false
     row.addChild(label)
@@ -1507,7 +1508,7 @@ function objectPath(object: any) {
   return runtime.objectPaths.get(object) ?? "viewer"
 }
 
-function snapshotObject(object: any, budget: ObservationBudget, depth = 1): ViewerObjectSnapshot {
+function snapshotObject(object: any, budget: ObservationBudget, depth = 1, fonts = new Map<string, RuntimeFontEvidence['availability']>()): ViewerObjectSnapshot {
   budget.node(depth)
   const path = objectPath(object)
   const control = runtime.controls.get(path)
@@ -1529,8 +1530,9 @@ function snapshotObject(object: any, budget: ObservationBudget, depth = 1): View
     if (["comboBox", "list", "tree"].includes(control.kind)) snapshot.selectedIndex = control.selectedIndex
   }
   if (typeof object?.text === "string") snapshot.text = budget.text(object.text)
+  if (typeof object?.font === "string") snapshot.font = inspectRuntimeFont(object, budget.text(object.font), fonts)
   checkBudget(object.numChildren ?? 0, RUNTIME_LIMITS.nodes, "observation_nodes")
-  if (Number(object?.numChildren ?? 0) > 0) snapshot.children = Array.from({ length: object.numChildren }, (_, index) => snapshotObject(object.getChildAt(index), budget, depth + 1))
+  if (Number(object?.numChildren ?? 0) > 0) snapshot.children = Array.from({ length: object.numChildren }, (_, index) => snapshotObject(object.getChildAt(index), budget, depth + 1, fonts))
   return snapshot
 }
 

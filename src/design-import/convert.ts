@@ -29,6 +29,7 @@ import type {
   ImportNode,
 } from './model';
 import { validateImportTextRuns } from './fixture';
+import { analyzeImportFidelity, canRasterizeShape, rasterizeShape, requestedRaster, supportsRasterization, resolveImportFont, type FidelityReport } from './fidelity';
 import {
   planDocument,
   validateBuildPlan,
@@ -100,6 +101,7 @@ export interface ConversionResult {
 }
 
 export interface ConversionReport {
+  fidelity?: FidelityReport;
   sourceName: string;
   pages: number;
   roots: number;
@@ -145,6 +147,7 @@ export function createConversionReport(
   document: ImportDocument,
   previousIds: Record<string, string> = {},
   ids: Record<string, string> = {},
+  outputNodes?: ReadonlyMap<string, ImportNode>,
 ): ConversionReport {
   let nodes = 0;
   let frames = 0;
@@ -168,14 +171,16 @@ export function createConversionReport(
       frames += 1;
       if (node.sourceType === 'componentSet') variantSets += 1;
       node.children.forEach((child) => visit(child, page, root));
-    } else if (node.kind === 'instance') {
+    }
+    const output = outputNodes ? outputNodes.get(node.id) : node;
+    if (output?.kind === 'instance') {
       editableInstances += 1;
-    } else if (node.kind === 'text') {
+    } else if (output?.kind === 'text') {
       editableText += 1;
-    } else if (node.kind === 'shape') {
+    } else if (output?.kind === 'shape') {
       editableShapes += 1;
-    } else {
-      imageBytes += node.bytes.byteLength;
+    } else if (output?.kind === 'image') {
+      imageBytes += output.bytes.byteLength;
     }
   };
   document.pages.forEach((page) => page.roots.forEach((root) => visit(root, page, root)));
@@ -294,6 +299,12 @@ export function compilePlanToUam(
   const sourcePages = new Map(sourceDocument.pages.map((page) => [page.id, page]));
   const semanticOverlay = plan.semanticOverlay;
   const directiveFor = (node: ImportNode): SemanticNodeDirective | undefined => semanticOverlay.nodes[node.id];
+  const mappedComponent = (node: Extract<ImportNode, { kind: 'instance' }>) =>
+    semanticOverlay.componentLibrary?.[directiveFor(node)?.componentKey ?? ''] ?? node.componentId;
+  const interactionData = (node: ImportNode) => node.interactions?.length
+    ? JSON.stringify({ maker: { interactionIntents: node.interactions, executable: false } }) : '';
+  let rasterPixels = 0;
+  const outputNodes = new Map<string, ImportNode>();
   const packageKeys = new Map(plan.packages.map((pkg) => [pkg.sourcePageId, pkg.key]));
   const rootPlans = new Map(plan.packages.flatMap((pkg) => pkg.components.map((component) => [
     component.sourceNodeId,
@@ -326,7 +337,7 @@ export function compilePlanToUam(
   const diagnostics = [...document.diagnostics];
 
   const idFor = (
-    role: 'project' | 'package' | 'resource' | 'node' | 'layout' | 'shadow' | 'variant' | 'overridden-resource' | 'override-resource',
+    role: 'project' | 'package' | 'resource' | 'node' | 'layout' | 'background' | 'shadow' | 'variant' | 'state-page' | 'overridden-resource' | 'override-resource',
     ...parts: string[]
   ): string => {
     // Keep State v2's public conversion-map keys, but hash typed tuples, not ambiguous concatenations.
@@ -426,7 +437,7 @@ export function compilePlanToUam(
       filter: '',
       filterData: '',
       group: '',
-      customData: '',
+      customData: interactionData(node),
       relations: constraintRelations(node),
       gears: [],
     });
@@ -466,8 +477,17 @@ export function compilePlanToUam(
 
     const convertNode = (node: ImportNode, exported = false, resourcePath?: string): UamDisplayNode => {
       const directive = directiveFor(node);
+      if (requestedRaster(directive) && canRasterizeShape(node)) {
+        rasterPixels += Math.ceil(node.width) * Math.ceil(node.height);
+        if (rasterPixels > 64_000_000) throw new Error('SEMANTIC_RASTER_BUDGET: planned rasters exceed 64 million pixels');
+        diagnostics.push({ code: 'RASTERIZED_NODE', nodeId: node.id, severity: 'warning', message: '按计划将平面形状栅格化为 PNG；位置、尺寸和后续工程编辑仍保留。' });
+        node = rasterizeShape(node);
+      }
+      outputNodes.set(node.id, node);
       if (node.kind === 'text') {
         validateImportTextRuns(node);
+        node = { ...node, fontFamily: resolveImportFont(node.fontFamily, semanticOverlay.fonts).resolved,
+          runs: node.runs.map((run) => ({ ...run, fontFamily: resolveImportFont(run.fontFamily, semanticOverlay.fonts).resolved })) };
         const formatted = node.runs.length > 0 && directive?.target !== 'text-input' ? richText(node) : undefined;
         const mixed = formatted !== undefined;
         if (node.runs.length > 0 && !mixed && directive?.target !== 'text-input') diagnostics.push({
@@ -555,16 +575,17 @@ export function compilePlanToUam(
             },
           };
         }
-        return { kind: 'component', ...nodeBase(node), resource: resourceRef(node.componentId) };
+        return { kind: 'component', ...nodeBase(node), resource: resourceRef(mappedComponent(node)) };
       }
       if (node.kind === 'frame' && directive?.target === 'list') {
         const explicitItems = node.children.filter((child) => directiveFor(child)?.target === 'list-item');
         const items = (explicitItems.length ? explicitItems : node.children)
           .filter((child): child is ImportFrame | Extract<ImportNode, { kind: 'instance' }> => child.kind === 'frame' || child.kind === 'instance');
         const listItems = items.map((item) => {
+          outputNodes.set(item.id, item);
           const resource = item.kind === 'frame'
             ? { resourceId: convertFrame(item, false, '/_internal/list-items/') }
-            : resourceRef(item.componentId);
+            : resourceRef(mappedComponent(item));
           const url = `ui://${resource.packageId ?? packageId}${resource.resourceId}`;
           return {
             title: firstText(item),
@@ -660,9 +681,7 @@ export function compilePlanToUam(
         const resourceKey = `${node.id}:resource`;
         const resourceId = idFor('resource', node.id);
         const dimensions = binding?.pixelSize ?? { width: node.width, height: node.height };
-        const contentKey = `${imageContentKey(node.format, node.bytes)}${binding
-          ? `:${dimensions.width}x${dimensions.height}:${image.scale9Grid?.join(',') ?? ''}`
-          : ''}`;
+        const contentKey = `${imageContentKey(node.format, node.bytes)}:${dimensions.width}x${dimensions.height}:${image.scale9Grid?.join(',') ?? ''}`;
         const existing = imageResources.get(contentKey)?.find((resource) =>
           resource.sourceBytes instanceof Uint8Array && sameBytes(resource.sourceBytes, node.bytes));
         if (existing) {
@@ -722,7 +741,9 @@ export function compilePlanToUam(
     ): UamDisplayNode[] => {
       const target = directiveFor(node)?.target;
       if (target === 'ignore') return [];
-      if (node.kind === 'frame' && canFlattenGroup(node) && (!target || target === 'auto')) {
+      if (semanticOverlay.profile.unsupportedNode === 'skip' && requestedRaster(directiveFor(node))
+        && !supportsRasterization(node)) return [];
+      if (node.kind === 'frame' && canFlattenGroup(node) && !directiveFor(node)?.state && !node.interactions?.length && (!target || target === 'auto')) {
         const id = idFor('node', node.id);
         const children = node.children.flatMap((child) =>
           convertDisplayNode(child, offsetX + node.x, offsetY + node.y, id));
@@ -811,7 +832,7 @@ export function compilePlanToUam(
               height: Math.max(...variants.map((variant) => variant.height)),
             },
             properties,
-            customData: '',
+            customData: interactionData(frame),
             displayList,
             controllers: [{
               name: 'Variant',
@@ -832,23 +853,46 @@ export function compilePlanToUam(
         return resourceId;
       }
 
-      const layoutGroupId = frame.layout && directive?.target !== 'list' ? idFor('layout', frame.id) : '';
+      const layout = directive?.layout === 'bake' ? null : frame.layout;
+      const layoutGroupId = layout && directive?.target !== 'list' ? idFor('layout', frame.id) : '';
       const displayList = directive?.target === 'list'
         ? [{ ...convertNode(frame), position: { x: 0, y: 0 } }]
         : frame.children.flatMap((child) => convertDisplayNode(child, 0, 0, child.layoutChild ? layoutGroupId : ''));
-      if (frame.layout && directive?.target !== 'list') displayList.push(groupNode(
+      if (layout && directive?.target !== 'list') displayList.push(groupNode(
         frame,
         layoutGroupId,
         'Auto Layout',
         { x: 0, y: 0 },
-        frame.layout,
+        layout,
       ));
+      const controllers: Extract<UamResource, { kind: 'component' }>['component']['controllers'] = [];
+      for (const child of frame.children) {
+        const state = directiveFor(child)?.state;
+        const target = displayList.find((item) => item.id === ids[`${child.id}:node`]);
+        if (!state || !target) continue;
+        let controller = controllers.find((item) => item.name === state.controller);
+        if (!controller) {
+          controller = { name: state.controller, selectedIndex: 0, autoRadioGroupDepth: false, alias: '', exported: false,
+            homePageType: 'default', homePage: '', pages: [], actions: [] };
+          controllers.push(controller);
+        }
+        let page = controller.pages.find((item) => item.name === state.page);
+        if (!page) {
+          page = { id: idFor('state-page', frame.id, state.controller, state.page), name: state.page, remark: '' };
+          controller.pages.push(page);
+        }
+        target.gears = [...(target.gears ?? []), { kind: 'display', name: '', controllerName: state.controller, visibleOnPageIds: [page.id] }];
+      }
       const properties = createDefaultUamComponentProperties();
       properties.extensionType = extensionTypeForTarget(directive?.target ?? 'auto') ?? '';
       properties.overflow = frame.clipContent ? OverflowType.Hidden : OverflowType.Visible;
       if (frame.backgroundColor) {
-        properties.bgColor = frame.backgroundColor;
-        properties.bgColorEnabled = true;
+        // Component bgColor is editor-only in published FUI. A native Graph renders in both runtimes.
+        displayList.unshift({ kind: 'graph', ...nodeBase(frame), id: idFor('background', frame.id), name: '__background',
+          position: { x: 0, y: 0 }, rotation: 0, scale: { x: 1, y: 1 }, alpha: 1, visible: true, touchable: false,
+          customData: '', relations: [{ targetNodeId: '', type: RelationType.Width, usePercent: false }, { targetNodeId: '', type: RelationType.Height, usePercent: false }],
+          graphType: GraphType.Rect, fillColor: frame.backgroundColor, lineSize: 0, lineColor: '#000000', cornerRadius: null,
+          points: null, sides: 0, startAngle: 0, distances: null });
       }
       const mask = frame.children.find((child) => child.mask);
       if (mask) properties.mask = idFor('node', mask.id);
@@ -864,9 +908,9 @@ export function compilePlanToUam(
         component: {
           size: { width: frame.width, height: frame.height },
           properties,
-          customData: '',
+          customData: interactionData(frame),
           displayList,
-          controllers: [],
+          controllers,
           transitions: [],
         },
       };
@@ -994,7 +1038,7 @@ export function compilePlanToUam(
       }
     }
     if (target.kind === 'text' || target.kind === 'richText') {
-      if (override.fontFamily !== null) target.font = override.fontFamily;
+      if (override.fontFamily !== null) target.font = resolveImportFont(override.fontFamily, semanticOverlay.fonts).resolved;
       if (override.fontSize !== null) target.fontSize = Math.max(1, Math.round(override.fontSize));
       if (override.bold !== null) target.bold = override.bold;
       if (override.italic !== null) target.italic = override.italic;
@@ -1089,6 +1133,6 @@ export function compilePlanToUam(
     project,
     ids: Object.fromEntries(Object.entries(ids).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)),
     diagnostics,
-    report: createConversionReport(convertedDocument, previousIds, ids),
+    report: { ...createConversionReport(convertedDocument, previousIds, ids, outputNodes), fidelity: analyzeImportFidelity(document, semanticOverlay).report },
   };
 }

@@ -38,6 +38,8 @@ test('reads legacy component sets, component properties, reflection, and safe Au
     { guid: guid(10), type: 'FRAME', name: 'Root', parentIndex: parent(1, '!'), size: { x: 200, y: 100 } },
     {
       guid: guid(11), type: 'INSTANCE', name: 'Configured', parentIndex: parent(10, '$'), size: { x: 100, y: 20 },
+      transform: { m00: 1, m01: 0.2, m02: 0, m10: 0, m11: 1, m12: 0 },
+      prototypeInteractions: [{ trigger: { type: 'ON_CLICK' }, actions: [{ type: 'NODE', destinationId: '1:22' }] }],
       symbolData: { symbolID: guid(30), symbolOverrides: [] },
       componentPropAssignments: [
         { defID: guid(90), value: { textValue: { characters: 'Configured label' } } },
@@ -106,6 +108,9 @@ test('reads legacy component sets, component properties, reflection, and safe Au
   assert.deepEqual(root.children.map((node) => node.name), ['Configured', 'Reflected', 'Hug layout']);
   const instance = root.children[0];
   assert.ok(instance.kind === 'instance');
+  assert.equal(instance.interactions?.[0].trigger, 'ON_CLICK');
+  assert.match(instance.interactions?.[0].source ?? '', /destinationId/);
+  assert.ok(imported.diagnostics.some((item) => item.code === 'FIG_TRANSFORM_APPROXIMATED' && item.nodeId === '1:11'));
   assert.deepEqual(instance.overrides.map((override) => ({
     targetId: override.targetId,
     text: override.text,
@@ -121,7 +126,7 @@ test('reads legacy component sets, component properties, reflection, and safe Au
   assert.ok(layout.kind === 'frame');
   assert.equal(layout.layout, null);
   assert.deepEqual(layout.children[0].constraints, { horizontal: 'max', vertical: 'min' });
-  assert.ok(imported.diagnostics.some((item) => item.nodeId === '1:13' && item.code === 'AUTO_LAYOUT_BAKED'));
+  assert.ok(imported.diagnostics.some((item) => item.nodeId === '1:13' && item.code === 'LAYOUT_BAKED'));
 
   const components = imported.pages.find((page) => page.name === 'Components')!.roots;
   const configurable = components.find((node) => node.id === '1:30')!;
@@ -212,9 +217,11 @@ test('falls back gradient shapes with effects and single-line gradient text to S
   assert.ok(svg.diagnostics.some((item) => item.nodeId === '1:3' && item.code === 'FIG_EFFECTS_IGNORED'));
   assert.ok(svg.diagnostics.some((item) => item.nodeId === '1:3' && item.code === 'FIG_SHAPE_SVG_FALLBACK'));
   assert.ok(svg.diagnostics.some((item) => item.nodeId === '1:4' && item.code === 'FIG_TEXT_SVG_FALLBACK'));
+  assert.ok(svg.diagnostics.some((item) => item.nodeId === '1:4' && item.code === 'FONT_FALLBACK_ENVIRONMENT_UNVERIFIED'));
   assert.equal(svg.diagnostics.filter((item) => item.code === 'FIG_FILE_NODE_SKIPPED').length, 0);
 
   const png = importFigmaDocument(document, 'Gradient', 'png');
+  assert.ok(png.diagnostics.some((item) => item.code === 'FONT_FALLBACK_ENVIRONMENT_UNVERIFIED' && item.message.includes('Host')));
   assert.equal(png.pages[0].roots[0].children.length, 2);
   for (const node of png.pages[0].roots[0].children) {
     assert.ok(node.kind === 'image');

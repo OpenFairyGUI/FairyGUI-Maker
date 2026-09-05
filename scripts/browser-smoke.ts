@@ -19,6 +19,7 @@ import { assertRuntimeIsolated, runtimeNavigationSmoke } from "./runtime-isolati
 import { createBrowserEvidence, goldenUpdateEnabled, saveVisualGolden } from "./browser-evidence"
 import { browserEvidenceSmoke } from "./browser-evidence-smoke"
 import { importTextSmoke } from "./import-text-smoke"
+import { semanticFidelitySmoke } from "./semantic-fidelity-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -148,6 +149,9 @@ try {
   const page = await context.newPage()
   evidence.phase("workbench-import")
   await page.goto(`${host.origin}/design-import?token=${token}`, { waitUntil: "domcontentloaded" })
+  const semanticFidelity = await evidence.step("semantic-fidelity", () => semanticFidelitySmoke(context, host!.origin, publishDir, evidence, goldens,
+    (name, args) => callTool(host!.origin, sessionId, 200, name, args)))
+  evidence.phase("workbench-import")
   await page.locator('input[type="file"][accept=".fig,.psd"]').setInputFiles(importFixture)
   await page.waitForURL(/\/imports\/draft_/)
   const mappingResponse = page.waitForResponse((response) => response.request().method() === "PATCH" && response.url().includes("/semantic-overlay"))
@@ -251,14 +255,16 @@ try {
   // The same content gets a new provenance record, visible after cache invalidation and reload.
   await page.getByText("2 components · 1 files · 2 imports", { exact: false }).waitFor()
   await page.getByText("Smoke", { exact: true }).waitFor()
-  await page.getByText("内容已校验 · 来源为客户端声明", { exact: true }).waitFor()
+  const smokeTrust = page.locator('.divide-y > div').filter({ has: page.locator(`a[href="/artifacts/${artifact.artifactId}/player"]`) })
+    .getByText("内容已校验 · 来源为客户端声明", { exact: true })
+  await smokeTrust.waitFor()
   await page.reload({ waitUntil: "domcontentloaded" })
   await page.getByText("2 components · 1 files · 2 imports", { exact: false }).waitFor()
-  await page.getByText("内容已校验 · 来源为客户端声明", { exact: true }).waitFor()
+  await smokeTrust.waitFor()
   await page.goto(host.origin, { waitUntil: "domcontentloaded" })
   await page.getByText("1 packages · 1 files · 2 imports", { exact: false }).waitFor()
   await evidence.step("host-trust-and-activity", async () => {
-    await page.getByText("内容已校验 · 来源为客户端声明", { exact: true }).waitFor()
+    await smokeTrust.waitFor()
     const listed = await callTool(host!.origin, sessionId, 901, "list_artifact_components", { artifactId: artifact.artifactId })
     const opened = await callTool(host!.origin, sessionId, 902, "open_artifact_player", { artifactId: artifact.artifactId })
     for (const value of [listed.value.artifacts[0], opened.value]) {
@@ -357,7 +363,7 @@ try {
   // Golden changes are explicit and happen only after all functional/diagnostic checks pass.
   if (updateGoldens) for (const golden of goldens) await writeFile(golden.golden, golden.actual)
   await evidence.finish("passed", { environment, goldenUpdate: updateGoldens }, [])
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, deterministicPlan: true, artifactUpload: true, artifactPersistence: true, mapping: true, visualEvidence: true, viewer: true, player: true, viewerState, playerState, viewerDelivery, playerDelivery, viewerLifecycle, playerLifecycle, runtimeBudgets, projectRevision, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 4, artifactId: artifact.artifactId }) + "\n")
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, deterministicPlan: true, artifactUpload: true, artifactPersistence: true, mapping: true, visualEvidence: true, viewer: true, player: true, semanticFidelity, viewerState, playerState, viewerDelivery, playerDelivery, viewerLifecycle, playerLifecycle, runtimeBudgets, projectRevision, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 4 + semanticFidelity.goldens, artifactId: artifact.artifactId }) + "\n")
 } catch (error) {
   await evidence.finish("failed", { environment }, browser?.contexts().flatMap((context) => context.pages()) ?? [], error)
   throw error

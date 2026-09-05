@@ -252,7 +252,7 @@ pnpm verify:release
 
 门禁先校验 `vendor-runtime.lock.json`、实际 runtime 字节和第三方声明的一致性，`npm pack` 的 `prepack` 也执行该检查。需要联网复核固定上游快照时运行 `pnpm verify:runtime --upstream`；复制来源和复现边界见[第三方声明](./THIRD_PARTY_NOTICES.md)。
 
-每次浏览器测试在 `test-results/browser/run-*/` 留存 reference/actual/diff、阈值、来源/组件/Broker 版本和诊断报告；CI 成败均上传并保留 14 天。未预期 Console/CSP/网络错误阻断测试。Viewer 的真实 FIG 与 Player 的原生图形分别使用固定尺寸、独立零差异阈值，不覆盖系统字体保真。详见[批次 19：证据闭环](./docs/workbench.md#214-视觉与故障证据闭环批次-19)。
+每次浏览器测试在 `test-results/browser/run-*/` 留存 reference/actual/diff、阈值、来源/组件/Broker 版本和诊断报告；CI 成败均上传并保留 14 天。未预期 Console/CSP/网络错误阻断测试。Viewer 的真实 FIG、Player 原生图形与 T5 新增的固定字体文字/按钮四态/List 使用独立零差异 Golden，不覆盖任意系统字体保真。详见[证据闭环](./docs/workbench.md#214-视觉与故障证据闭环批次-19)与[T5 字体、布局、组件库和栅格策略](./docs/import-fidelity.md)。
 
 测试固定使用 ANGLE/SwiftShader，以统一 Windows/Linux 的图形栅格化；不改变正常 Workbench 浏览器的 GPU 配置，也不放宽像素阈值。发布验收必须记录同一个提交的本地结果和完整 CI 矩阵，不能用不同提交的绿灯拼接通过。
 

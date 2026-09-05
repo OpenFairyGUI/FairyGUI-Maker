@@ -26,6 +26,14 @@ interface ImportNodeBase {
   mask: boolean;
   constraints: ImportConstraints | null;
   layoutChild: boolean;
+  interactions?: ImportInteractionIntent[];
+}
+
+// Declarative source evidence, never executable code or an automatically opened URL.
+export interface ImportInteractionIntent {
+  trigger: string;
+  action: string;
+  source: string;
 }
 
 export type ImportConstraint = 'min' | 'center' | 'max' | 'stretch' | 'scale';
@@ -64,6 +72,7 @@ export interface ImportFrame extends ImportNodeBase {
   flattenable?: boolean;
   variantProperties: Record<string, string>;
   layout: ImportLayout | null;
+  sourceLayout?: 'preserved' | 'baked' | 'dropped';
   clipContent: boolean;
   backgroundColor: string | null;
   children: ImportNode[];
@@ -104,6 +113,8 @@ export interface ImportText extends ImportNodeBase {
   fontSize: number;
   color: string;
   align: 'left' | 'center' | 'right';
+  fontStyle?: string;
+  fontPostScriptName?: string;
   verticalAlign: 'top' | 'middle' | 'bottom';
   lineHeight: number | null;
   letterSpacing: number;

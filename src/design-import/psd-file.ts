@@ -120,6 +120,7 @@ function textNode(
     ...base(layer, parent, path),
     text: text.text.replace(/\r/g, '\n'),
     fontFamily: style.font?.name || 'Arial',
+    ...(style.font?.name ? { fontPostScriptName: style.font.name } : {}),
     fontSize,
     color: color(style.fillColor),
     align: justification === 'center' || justification === 'justify-center'
@@ -249,13 +250,15 @@ function validateStructure(layers: Layer[], bitsPerChannel: number, diagnostics:
 }
 
 function diagnoseStyle(layer: Layer, path: number[], diagnostics: Diagnostic[]): void {
-  if (!layer.effects && !layer.mask && !layer.realMask && !layer.vectorMask && !layer.adjustment
-    && !layer.clipping && (!layer.blendMode || layer.blendMode === 'normal' || layer.blendMode === 'pass through')) return;
-  diagnostics.push({
-    code: 'PSD_LAYER_STYLE_APPROXIMATED',
-    message: 'PSD 图层的混合、蒙版、调整或效果尚未映射为 FairyGUI 语义。',
-    nodeId: layerId(layer, path),
-    severity: 'warning',
+  const effects = [
+    [layer.effects, 'PSD_EFFECTS_DROPPED', '图层效果未合成'],
+    [layer.mask || layer.realMask || layer.vectorMask, 'PSD_MASK_DROPPED', '像素/矢量蒙版未应用'],
+    [layer.adjustment, 'PSD_ADJUSTMENT_DROPPED', '调整图层未应用'],
+    [layer.clipping, 'PSD_CLIPPING_DROPPED', '剪贴链未合成'],
+    [layer.blendMode && !['normal', 'pass through'].includes(layer.blendMode), 'PSD_BLEND_APPROXIMATED', '混合模式降级为 normal'],
+  ] as const;
+  for (const [present, code, detail] of effects) if (present) diagnostics.push({
+    code, message: `${detail}；单图层 PNG 不等于 Photoshop 最终合成像素。`, nodeId: layerId(layer, path), severity: 'warning',
   });
 }
 
@@ -336,6 +339,8 @@ export function parsePsdFile(input: Uint8Array, name = 'PhotoshopDocument'): Imp
   }
 
   const diagnostics: Diagnostic[] = [];
+  if ((psd.bitsPerChannel ?? 8) > 8) diagnostics.push({ code: 'PSD_PRECISION_REDUCED', nodeId: 'psd:document', severity: 'warning', message: `${psd.bitsPerChannel}-bit 通道量化为 8-bit PNG。` });
+  diagnostics.push({ code: 'PSD_COLOR_MANAGEMENT_UNVERIFIED', nodeId: 'psd:document', severity: 'warning', message: `源颜色模式 ${psd.colorMode ?? 'unknown'}；当前未做 ICC 显示色彩管理，输出颜色需与 Photoshop 合成结果比较。` });
   const documentBox = { left: 0, top: 0, right: psd.width, bottom: psd.height };
   const layers = psd.children ?? [];
   // ponytail: synchronous hard caps are enough for a CLI; use a worker/streaming decoder if larger PSDs become required.

@@ -530,13 +530,15 @@ export class ImportDraftStore {
     });
   }
 
-  async plan(draftId: string, expectedRevision: number, rootIds?: string[]): Promise<{ draft: ImportDraftV1; buildPlan: FairyBuildPlanV2 }> {
+  async plan(draftId: string, expectedRevision: number, rootIds?: string[], inputOverlay?: MakerSemanticOverlayV1): Promise<{ draft: ImportDraftV1; buildPlan: FairyBuildPlanV2 }> {
     return this.mutate(async () => {
       const draft = this.requireDraft(draftId, expectedRevision, ['parsed', 'planned']);
       const snapshot = await this.readParsedSnapshot(draftId);
-      const semanticOverlay = await this.readSemanticOverlay(draftId, snapshot.document);
+      const semanticOverlay = inputOverlay ? validateSemanticOverlay(snapshot.document, inputOverlay)
+        : await this.readSemanticOverlay(draftId, snapshot.document);
       const buildPlan = planDocument(snapshot.document, { rootIds, semanticOverlay, imageBindings: snapshot.imageBindings });
       await writeJson(path.join(this.resolveDraftRoot(draftId), 'build-plan.json'), buildPlan);
+      if (inputOverlay) await writeJson(path.join(this.resolveDraftRoot(draftId), 'semantic-overlay.json'), semanticOverlay);
       const updated = await this.update(draft, 'planned', {
         diagnostics: buildPlan.diagnostics,
         buildPlan: {
@@ -545,7 +547,7 @@ export class ImportDraftStore {
           components: buildPlan.packages.reduce((count, pkg) => count + pkg.components.length, 0),
         },
         semanticOverlay: {
-          revision: draft.semanticOverlay?.revision ?? 1,
+          revision: (draft.semanticOverlay?.revision ?? 1) + (inputOverlay ? 1 : 0),
           mappedNodes: Object.keys(semanticOverlay.nodes).length,
         },
       });

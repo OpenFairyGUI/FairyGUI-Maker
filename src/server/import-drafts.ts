@@ -9,12 +9,13 @@ import {
   visualEvidenceSchema,
   type ImportDraftStore,
 } from '../design-import/draft-store';
-import { semanticNodeDirectiveSchema } from '../design-import/semantic-overlay';
+import { semanticNodeDirectiveSchema, semanticOverlaySchema } from '../design-import/semantic-overlay';
 import type { RegisteredProject } from './index';
 import { UploadError } from '../upload';
 
 const revisionSchema = z.object({ expectedRevision: z.number().int().positive() }).strict();
 const planSchema = revisionSchema.extend({
+  semanticOverlay: semanticOverlaySchema.optional(),
   rootIds: z.array(z.string().min(1).max(1_024)).min(1).max(10_000)
     .refine((ids) => new Set(ids).size === ids.length, 'rootIds must be unique')
     .optional(),
@@ -171,8 +172,8 @@ export function registerImportDraftApi(
       const { importDraftStore, importsEnabled } = readState();
       if (!importsEnabled) return readOnly(c);
       try {
-        const { expectedRevision, rootIds } = c.req.valid('json');
-        return c.json(await importDraftStore.plan(c.req.param('draftId'), expectedRevision, rootIds));
+        const { expectedRevision, rootIds, semanticOverlay } = c.req.valid('json');
+        return c.json(await importDraftStore.plan(c.req.param('draftId'), expectedRevision, rootIds, semanticOverlay));
       } catch (error) {
         return draftError(c, error);
       }

@@ -4,6 +4,7 @@ import { playRuntimeAudio, prepareRuntimeAudio } from "./audio-budget"
 import { installResourceLoadBudget, loadRuntimeTexture, reserveImage, setImageProbeWorker } from "./image-budget"
 import { acceptRuntimeConnection } from "../runtime-channel"
 import { disableRuntimeStorage, flushRuntimeFrame, nextRuntimeFrame } from "./platform"
+import { inspectRuntimeFont, type RuntimeFontEvidence } from "./font-evidence"
 import { checkBudget, checkImageDimensions, checkRuntimeMetadata, decompressFuiIfNeeded, ObservationBudget, ResourceBudget, RUNTIME_LIMITS } from "./resource-budget"
 import {
   type ViewerCommand,
@@ -382,7 +383,7 @@ function createObservation(budget = new ObservationBudget()): ViewerObservation 
   return { objectTree: snapshotObject(runtime.current, budget), controllers: snapshotControllers(runtime.current, budget), availableTransitions: snapshotTransitions(runtime.current, budget) }
 }
 
-function snapshotObject(object: any, budget: ObservationBudget, depth = 1): ViewerObjectSnapshot {
+function snapshotObject(object: any, budget: ObservationBudget, depth = 1, fonts = new Map<string, RuntimeFontEvidence['availability']>()): ViewerObjectSnapshot {
   budget.node(depth)
   const snapshot: ViewerObjectSnapshot = {
     id: budget.text(runtime.paths.get(object)),
@@ -392,7 +393,7 @@ function snapshotObject(object: any, budget: ObservationBudget, depth = 1): View
     y: number(object.y),
     width: number(object.width),
     height: number(object.height),
-    visible: object.visible !== false,
+    visible: object.visible !== false && object.internalVisible !== false && object.internalVisible2 !== false,
   }
   const kind = controlKind(object)
   if (kind) snapshot.controlKind = kind
@@ -401,9 +402,10 @@ function snapshotObject(object: any, budget: ObservationBudget, depth = 1): View
   if ("value" in object && typeof object.value === "number") snapshot.value = object.value
   if ("selectedIndex" in object && typeof object.selectedIndex === "number") snapshot.selectedIndex = object.selectedIndex
   if ("text" in object && typeof object.text === "string") snapshot.text = budget.text(object.text)
+  if (typeof object.font === "string") snapshot.font = inspectRuntimeFont(object, budget.text(object.font), fonts)
   if (object instanceof fgui.GComponent) {
     checkBudget(object.numChildren, RUNTIME_LIMITS.nodes, "observation_nodes")
-    snapshot.children = Array.from({ length: object.numChildren }, (_, index) => snapshotObject(object.getChildAt(index), budget, depth + 1))
+    snapshot.children = Array.from({ length: object.numChildren }, (_, index) => snapshotObject(object.getChildAt(index), budget, depth + 1, fonts))
   }
   return snapshot
 }

@@ -78,3 +78,7 @@ Text Run 使用 UTF-16 索引，必须为非空整数区间，满足 `0 <= start
 语义 Overlay 已落地为独立的 `MakerSemanticOverlayV1`：`nodes` 以 ImportDocument 节点 ID
 关联源节点，由 Draft 保存并进入 BuildPlan；它不属于 Bundle v1 manifest，也不改写源文档。
 重导入的 ID 复用与冲突检查由 State v2 负责，不在 Bundle 层实现人工编辑的三方合并。
+
+T5 在 ImportDocument v1 中增加可选的文本 `fontStyle/fontPostScriptName`、Frame `sourceLayout`
+和有界 `interactions` 元数据，旧 Fixture 仍可读取。字体解析、组件库映射和栅格策略属于独立 Overlay，
+不是 Bundle manifest 字段；可执行范围、Plan API 与视觉证据见[导入语义与视觉保真](./import-fidelity.md)。

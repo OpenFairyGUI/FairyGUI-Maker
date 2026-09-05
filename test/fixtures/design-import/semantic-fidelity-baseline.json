@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "fixture": "semantic-fidelity.ts with @fontsource-variable/geist 5.3.0 Latin variable font",
+  "width": 460,
+  "height": 350,
+  "maxDifferentPixels": 0,
+  "maxMeanAbsoluteError": 0
+}

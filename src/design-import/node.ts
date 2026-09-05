@@ -320,6 +320,8 @@ function mergeManualOverlay(
 ): { overlay: MakerSemanticOverlayV1; conflicts: Set<string> } {
   const overlay = createSemanticOverlay(document);
   overlay.profile = previous.profile;
+  if (previous.fonts) overlay.fonts = previous.fonts;
+  if (previous.componentLibrary) overlay.componentLibrary = previous.componentLibrary;
   const nodes = new Map<string, ImportNode>();
   const visit = (node: ImportNode): void => {
     nodes.set(node.id, node);

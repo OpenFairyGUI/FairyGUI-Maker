@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { canonicalJson } from './bundle';
 import type { Diagnostic, ImportDocument, ImportNode } from './model';
+import { analyzeImportFidelity, requestedRaster, supportsRasterization } from './fidelity';
 import {
   createSemanticOverlay,
   semanticOverlaySchema,
@@ -12,8 +13,8 @@ import {
 } from './semantic-overlay';
 
 export const FAIRY_BUILD_PLAN_VERSION = 2 as const;
-export const FAIRY_PLANNER_VERSION = 'deterministic-v1' as const;
-export const FAIRY_COMPILER_VERSION = 'deterministic-v2' as const;
+export const FAIRY_PLANNER_VERSION = 'deterministic-v2' as const;
+export const FAIRY_COMPILER_VERSION = 'deterministic-v3' as const;
 export const IMPORT_DOCUMENT_SCHEMA_VERSION = 1 as const;
 
 export interface ConversionImageBinding {
@@ -127,7 +128,9 @@ export function planDocument(
       if (nodesById.has(node.id)) throw new Error(`Build plan source contains duplicate node ID ${node.id}`);
       ownerByNodeId.set(node.id, root.id);
       nodesById.set(node.id, node);
-      const isIgnored = parentIgnored || overlay.nodes[node.id]?.target === 'ignore';
+      const isIgnored = parentIgnored || overlay.nodes[node.id]?.target === 'ignore'
+        || overlay.profile.unsupportedNode === 'skip' && requestedRaster(overlay.nodes[node.id])
+          && !supportsRasterization(node);
       if (isIgnored) ignored.add(node.id);
       if (node.kind === 'frame') node.children.forEach((child) => visit(child, isIgnored));
     };
@@ -140,7 +143,7 @@ export function planDocument(
   const selectedRootIds = options.rootIds ?? roots.map((root) => root.id);
   const missing = selectedRootIds.find((id) => !rootsById.has(id));
   if (missing) throw new Error(`Build plan root does not exist: ${missing}`);
-  const requested = new Set(selectedRootIds.filter((id) => overlay.nodes[id]?.target !== 'ignore'));
+  const requested = new Set(selectedRootIds.filter((id) => !ignored.has(id)));
   if (requested.size === 0) {
     throw new Error('Build plan must include at least one root frame');
   }
@@ -153,7 +156,8 @@ export function planDocument(
     const visit = (node: ImportNode): void => {
       if (ignored.has(node.id)) return;
       if (node.kind === 'instance') {
-        for (const componentId of new Set([node.componentId, ...node.overrides.map((override) => override.componentId)])) {
+        const mapped = overlay.componentLibrary?.[overlay.nodes[node.id]?.componentKey ?? ''];
+        for (const componentId of new Set([mapped ?? node.componentId, ...node.overrides.map((override) => override.componentId)])) {
           if (!componentId) continue;
           const ownerId = ownerByNodeId.get(componentId);
           const component = nodesById.get(componentId);
@@ -185,20 +189,33 @@ export function planDocument(
     };
     visit(rootsById.get(rootId)!);
   }
+  // Check the effective containment/reference graph without recursive component expansion.
+  const edges = new Map<string, string[]>();
+  const incoming = new Map<string, number>();
+  for (const id of includedNodeIds) if (!ignored.has(id)) incoming.set(id, 0);
+  for (const id of incoming.keys()) {
+    const node = nodesById.get(id)!;
+    const targets = node.kind === 'frame' ? node.children.map((child) => child.id)
+      : node.kind === 'instance' ? [overlay.componentLibrary?.[overlay.nodes[id]?.componentKey ?? ''] ?? node.componentId,
+        ...node.overrides.map((override) => override.componentId)] : [];
+    const dependencies = [...new Set(targets.filter((target): target is string => !!target && incoming.has(target)))];
+    edges.set(id, dependencies);
+    for (const target of dependencies) incoming.set(target, incoming.get(target)! + 1);
+  }
+  const queue = [...incoming.keys()].filter((id) => incoming.get(id) === 0);
+  for (let index = 0; index < queue.length; index++) for (const target of edges.get(queue[index])!) {
+    incoming.set(target, incoming.get(target)! - 1);
+    if (incoming.get(target) === 0) queue.push(target);
+  }
+  if (queue.length !== incoming.size) dependencyDiagnostics.push({ code: 'SEMANTIC_COMPONENT_CYCLE',
+    nodeId: [...incoming.keys()].find((id) => incoming.get(id)! > 0)!, severity: 'error',
+    message: 'Component references, including library mappings, must not form a cycle.' });
   // Keep document-level diagnostics even when only some roots are selected.
   const sourceDiagnostics = document.diagnostics.filter((diagnostic) =>
     includedNodeIds.has(diagnostic.nodeId) || !nodesById.has(diagnostic.nodeId));
-  const semanticDiagnostics: Diagnostic[] = Object.entries(overlay.nodes).flatMap(([nodeId, directive]) => {
-    const node = nodesById.get(nodeId);
-    return includedNodeIds.has(nodeId) && directive.target === 'rasterize' && node?.kind !== 'image'
-      ? [{
-        code: 'SEMANTIC_RASTERIZE_UNAVAILABLE',
-        message: '该结构节点没有可用的合成像素，已保留原有可编辑转换。',
-        nodeId,
-        severity: 'warning' as const,
-      }]
-      : [];
-  });
+  const { diagnostics: semanticDiagnostics } = analyzeImportFidelity({ ...document,
+    pages: document.pages.map((page) => ({ ...page, roots: page.roots.filter((root) => included.has(root.id)) })),
+  }, overlay);
 
   return {
     schemaVersion: FAIRY_BUILD_PLAN_VERSION,
@@ -274,6 +291,8 @@ export function validateBuildPlan(
   }
   const missingDependency = expected.diagnostics.find((diagnostic) => diagnostic.code === 'PLAN_COMPONENT_DEPENDENCY_MISSING');
   if (missingDependency) throw new Error(`${missingDependency.code}: ${missingDependency.message}`);
+  const policyError = expected.diagnostics.find((diagnostic) => diagnostic.severity === 'error' && diagnostic.code.startsWith('SEMANTIC_'));
+  if (policyError) throw new Error(`${policyError.code}: ${policyError.message}`);
   if (expected.packages.reduce((count, pkg) => count + pkg.components.length, 0) !== seenRoots.size) {
     throw new Error('FairyBuildPlan includes an ignored root');
   }

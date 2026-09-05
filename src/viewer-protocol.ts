@@ -121,6 +121,7 @@ export type ViewerObjectSnapshot = {
   value?: number
   selectedIndex?: number
   text?: string
+  font?: import('./runtime/font-evidence').RuntimeFontEvidence
   children?: ViewerObjectSnapshot[]
 }
 

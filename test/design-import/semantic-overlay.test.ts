@@ -63,8 +63,9 @@ test('semantic overlay rules compile native FairyGUI roles and strip source anno
   assert.equal(overlay.nodes.debug.target, 'ignore');
   assert.equal(overlay.nodes.glow.target, 'rasterize');
   const plan = planDocument(document, { semanticOverlay: overlay });
-  assert.ok(plan.diagnostics.some(({ code, nodeId }) => code === 'SEMANTIC_RASTERIZE_UNAVAILABLE' && nodeId === 'effect'));
+  assert.ok(!plan.diagnostics.some(({ code, nodeId }) => code === 'SEMANTIC_RASTERIZE_UNAVAILABLE' && nodeId === 'effect'));
   const result = compilePlanToUam(document, plan);
+  assert.ok(result.diagnostics.some(({ code, nodeId }) => code === 'RASTERIZED_NODE' && nodeId === 'effect'));
   const resources = result.project.packages[0].resources;
   const extension = (name: string) => {
     const resource = resources.find((candidate) => candidate.kind === 'component' && candidate.name === name);
