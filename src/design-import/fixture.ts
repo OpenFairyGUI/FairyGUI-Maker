@@ -17,6 +17,8 @@ import type {
 export const IMPORT_FIXTURE_DOCUMENT = 'fixture.json';
 const ASSET_PATH = /^assets\/\d{6}\.(?:png|svg)$/;
 const MAX_NODE_DEPTH = 100;
+const MAX_NODES = 10_000;
+const MAX_TEXT_LENGTH = 1024 * 1024;
 type JsonRecord = Record<string, unknown>;
 
 function fail(path: string, expected: string): never {
@@ -28,14 +30,41 @@ function record(value: unknown, path: string): JsonRecord {
   return value as JsonRecord;
 }
 
-function array(value: unknown, path: string): unknown[] {
+function array(value: unknown, path: string, limit = 10_000): unknown[] {
   if (!Array.isArray(value)) fail(path, 'an array');
+  if (value.length > limit) fail(path, `an array with at most ${limit} entries`);
   return value;
 }
 
-function string(value: unknown, path: string): string {
+function string(value: unknown, path: string, limit = 1_024): string {
   if (typeof value !== 'string') fail(path, 'a string');
+  if (value.length > limit) fail(path, `a string with at most ${limit} UTF-16 code units`);
   return value;
+}
+
+// Bound the entire JSON tree, including unused fields, before allocating parsed nodes or asset copies.
+function validateInputBudget(value: unknown): void {
+  let entries = 0;
+  let stringUnits = 0;
+  const visit = (item: unknown, depth: number): void => {
+    if (++entries > 1_000_000) fail('fixture', 'at most 1000000 JSON values and keys');
+    if (depth > MAX_NODE_DEPTH * 2 + 10) fail('fixture', 'a bounded JSON tree');
+    if (typeof item === 'string') {
+      stringUnits += item.length;
+      if (item.length > MAX_TEXT_LENGTH || stringUnits > 4 * MAX_TEXT_LENGTH) {
+        fail('fixture', 'strings within the 1 Mi individual / 4 Mi total UTF-16 budget');
+      }
+    } else if (Array.isArray(item)) {
+      array(item, 'fixture collection').forEach((child) => visit(child, depth + 1));
+    } else if (item && typeof item === 'object') {
+      for (const [key, child] of Object.entries(item)) {
+        string(key, 'fixture key');
+        visit(key, depth + 1);
+        visit(child, depth + 1);
+      }
+    }
+  };
+  visit(value, 0);
 }
 
 function number(value: unknown, path: string): number {
@@ -95,11 +124,11 @@ function instanceOverride(value: unknown, path: string): ImportInstanceOverride 
   const raw = record(value, path);
   return {
     targetId: string(raw.targetId, `${path}.targetId`),
-    targetPath: array(raw.targetPath, `${path}.targetPath`)
+    targetPath: array(raw.targetPath, `${path}.targetPath`, 32)
       .map((item, index) => string(item, `${path}.targetPath[${index}]`)),
     componentId: nullableString(raw.componentId, `${path}.componentId`),
     name: nullableString(raw.name, `${path}.name`),
-    text: nullableString(raw.text, `${path}.text`),
+    text: raw.text === null ? null : string(raw.text, `${path}.text`, MAX_TEXT_LENGTH),
     visible: raw.visible === null ? null : boolean(raw.visible, `${path}.visible`),
     opacity: raw.opacity === null ? null : number(raw.opacity, `${path}.opacity`),
     width: raw.width === null ? null : number(raw.width, `${path}.width`),
@@ -141,6 +170,7 @@ function base(raw: JsonRecord, path: string) {
 
 function stringRecord(value: unknown, path: string): Record<string, string> {
   const raw = record(value, path);
+  if (Object.keys(raw).length > 256) fail(path, 'at most 256 entries');
   return Object.fromEntries(Object.entries(raw).map(([key, item]) => [key, string(item, `${path}.${key}`)]));
 }
 
@@ -168,7 +198,7 @@ function diagnostic(value: unknown, path: string): Diagnostic {
   if (severity !== 'warning' && severity !== 'error') fail(`${path}.severity`, '"warning" or "error"');
   return {
     code: string(raw.code, `${path}.code`),
-    message: string(raw.message, `${path}.message`),
+    message: string(raw.message, `${path}.message`, 16_384),
     nodeId: string(raw.nodeId, `${path}.nodeId`),
     severity,
     ...(nodeName === undefined ? {} : { nodeName }),
@@ -180,8 +210,9 @@ function diagnostic(value: unknown, path: string): Diagnostic {
   };
 }
 
-function node(value: unknown, path: string, files: Record<string, Uint8Array>, depth = 0): ImportNode {
+function node(value: unknown, path: string, files: Record<string, Uint8Array>, budget: { nodes: number; imageBytes: number }, depth = 0): ImportNode {
   if (depth > MAX_NODE_DEPTH) fail(path, `a node tree no deeper than ${MAX_NODE_DEPTH}`);
+  if (++budget.nodes > MAX_NODES) fail('fixture', `at most ${MAX_NODES} nodes`);
   const raw = record(value, path);
   const kind = string(raw.kind, `${path}.kind`);
   const common = base(raw, path);
@@ -203,7 +234,7 @@ function node(value: unknown, path: string, files: Record<string, Uint8Array>, d
       clipContent: boolean(raw.clipContent, `${path}.clipContent`),
       backgroundColor: nullableString(raw.backgroundColor, `${path}.backgroundColor`),
       children: array(raw.children, `${path}.children`)
-        .map((child, index) => node(child, `${path}.children[${index}]`, files, depth + 1)),
+        .map((child, index) => node(child, `${path}.children[${index}]`, files, budget, depth + 1)),
     };
     if (!['frame', 'group', 'component', 'componentSet'].includes(frame.sourceType)) {
       fail(`${path}.sourceType`, '"frame", "group", "component", or "componentSet"');
@@ -215,7 +246,7 @@ function node(value: unknown, path: string, files: Record<string, Uint8Array>, d
       kind,
       ...common,
       componentId: string(raw.componentId, `${path}.componentId`),
-      overrides: array(raw.overrides, `${path}.overrides`)
+      overrides: array(raw.overrides, `${path}.overrides`, 256)
         .map((item, index) => instanceOverride(item, `${path}.overrides[${index}]`)),
     };
     return instance;
@@ -224,7 +255,7 @@ function node(value: unknown, path: string, files: Record<string, Uint8Array>, d
     const text: ImportText = {
       kind,
       ...common,
-      text: string(raw.text, `${path}.text`),
+      text: string(raw.text, `${path}.text`, MAX_TEXT_LENGTH),
       fontFamily: string(raw.fontFamily, `${path}.fontFamily`),
       fontSize: number(raw.fontSize, `${path}.fontSize`),
       color: string(raw.color, `${path}.color`),
@@ -238,7 +269,7 @@ function node(value: unknown, path: string, files: Record<string, Uint8Array>, d
       italic: boolean(raw.italic, `${path}.italic`),
       underline: boolean(raw.underline, `${path}.underline`),
       strikethrough: boolean(raw.strikethrough, `${path}.strikethrough`),
-      runs: array(raw.runs, `${path}.runs`).map((item, index) => textRun(item, `${path}.runs[${index}]`)),
+      runs: array(raw.runs, `${path}.runs`, 4_096).map((item, index) => textRun(item, `${path}.runs[${index}]`)),
       shadow: raw.shadow === null ? null : shadow(raw.shadow, `${path}.shadow`),
     };
     if (!['left', 'center', 'right'].includes(text.align)) fail(`${path}.align`, '"left", "center", or "right"');
@@ -247,6 +278,15 @@ function node(value: unknown, path: string, files: Record<string, Uint8Array>, d
     }
     if (!['none', 'both', 'height', 'ellipsis'].includes(text.autoSize)) {
       fail(`${path}.autoSize`, '"none", "both", "height", or "ellipsis"');
+    }
+    let end = 0;
+    for (const [index, run] of text.runs.entries()) {
+      if (!Number.isSafeInteger(run.start) || !Number.isSafeInteger(run.end)
+        || run.start < end || run.start < 0 || run.end <= run.start || run.end > text.text.length) {
+        fail(`${path}.runs[${index}]`, 'ordered, non-overlapping integer ranges within text.length');
+      }
+      if (run.fontSize <= 0) fail(`${path}.runs[${index}].fontSize`, 'a positive number');
+      end = run.end;
     }
     return text;
   }
@@ -260,7 +300,7 @@ function node(value: unknown, path: string, files: Record<string, Uint8Array>, d
       strokeWidth: number(raw.strokeWidth, `${path}.strokeWidth`),
       cornerRadius: cornerRadius(raw.cornerRadius, `${path}.cornerRadius`),
       points: points(raw.points, `${path}.points`),
-      shadows: array(raw.shadows, `${path}.shadows`)
+      shadows: array(raw.shadows, `${path}.shadows`, 32)
         .map((item, index) => shadow(item, `${path}.shadows[${index}]`)),
     };
     if (!['rectangle', 'ellipse', 'polygon'].includes(shape.shape)) {
@@ -286,6 +326,8 @@ function node(value: unknown, path: string, files: Record<string, Uint8Array>, d
     }
     const bytes = files[asset];
     if (!bytes?.byteLength) fail(`${path}.asset`, 'an existing non-empty asset');
+    budget.imageBytes += bytes.byteLength;
+    if (budget.imageBytes > 512 * 1024 * 1024) fail('fixture', 'at most 512 MiB of referenced image bytes');
     const image: ImportImage = { kind, ...common, format, bytes: new Uint8Array(bytes) };
     return image;
   }
@@ -293,11 +335,13 @@ function node(value: unknown, path: string, files: Record<string, Uint8Array>, d
 }
 
 function parseDocument(value: unknown, files: Record<string, Uint8Array>): ImportDocument {
+  validateInputBudget(value);
+  const budget = { nodes: 0, imageBytes: 0 };
   const raw = record(value, 'fixture');
-  const pages: ImportPage[] = array(raw.pages, 'fixture.pages').map((value, pageIndex) => {
+  const pages: ImportPage[] = array(raw.pages, 'fixture.pages', 100).map((value, pageIndex) => {
     const page = record(value, `fixture.pages[${pageIndex}]`);
-    const roots = array(page.roots, `fixture.pages[${pageIndex}].roots`).map((value, rootIndex) => {
-      const root = node(value, `fixture.pages[${pageIndex}].roots[${rootIndex}]`, files);
+    const roots = array(page.roots, `fixture.pages[${pageIndex}].roots`, 1_000).map((value, rootIndex) => {
+      const root = node(value, `fixture.pages[${pageIndex}].roots[${rootIndex}]`, files, budget);
       if (root.kind !== 'frame') fail(`fixture.pages[${pageIndex}].roots[${rootIndex}].kind`, '"frame"');
       return root;
     });

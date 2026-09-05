@@ -66,6 +66,15 @@ assets/
 - Reader 拒绝额外文件、缺失文件、路径穿越、重复内容资源、重复/错序 binding 和节点错绑。
 - ImportDocument 自带的 diagnostics 保存在 `fixture.json`，不在 manifest 中复制。
 
+Fixture 在创建目标工程前还会检查结构预算：最多 100 页、每页 1,000 个根、全局 10,000 个节点、
+节点深度 100；普通集合最多 10,000 项，variantProperties 最多 256 项，单节点最多 4,096 个
+Text Run、256 个 Override、32 个 Shadow，Override targetPath 最多 32 项。
+普通字符串最多 1,024 个 UTF-16 code unit，诊断 message 最多 16,384，text 最多 1 Mi；
+整个 JSON（包括字段名和未使用字段）的字符串合计最多 4 Mi，值与键合计最多 1,000,000 项。
+图片按节点引用累计最多 512 MiB，避免重复引用同一资源放大解析内存。
+Text Run 使用 UTF-16 索引，必须为非空整数区间，满足 `0 <= start < end <= text.length`，
+按 start 排序且不重叠；允许未指定样式的间隙。
+
 语义 Overlay 已落地为独立的 `MakerSemanticOverlayV1`：`nodes` 以 ImportDocument 节点 ID
 关联源节点，由 Draft 保存并进入 BuildPlan；它不属于 Bundle v1 manifest，也不改写源文档。
 重导入的 ID 复用与冲突检查由 State v2 负责，不在 Bundle 层实现人工编辑的三方合并。
