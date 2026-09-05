@@ -55,6 +55,16 @@ function fixture(): Uint8Array {
 }
 
 test('reads a real PSD layer tree and converts text plus pixels', async () => {
+  const duplicateIds = Buffer.from(writePsdUint8Array({ width: 100, height: 60, children: [
+    { id: 1, name: 'First', children: [] }, { id: 1, name: 'Second', children: [] },
+  ] }));
+  // ag-psd deduplicates IDs when writing; make the malformed input explicit at its lyid blocks.
+  let idCount = 0;
+  for (let offset = duplicateIds.indexOf('8BIMlyid'); offset !== -1; offset = duplicateIds.indexOf('8BIMlyid', offset + 16)) {
+    duplicateIds.writeUInt32BE(1, offset + 12); idCount += 1;
+  }
+  assert.equal(idCount, 2);
+  assert.throws(() => parsePsdFile(duplicateIds), /duplicate layer IDs/);
   assert.throws(() => parsePsdFile(new Uint8Array([0])), /missing 8BPS signature/);
   const psb = fixture();
   psb[5] = 2;

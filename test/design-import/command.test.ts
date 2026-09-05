@@ -59,7 +59,9 @@ test('imports real FIG and PSD files into new validated projects and refuses ove
       delete state.compiler.compilerVersion;
       delete state.compiler.plannerVersion;
       await writeFile(join(outputPath, MAKER_IMPORT_STATE), JSON.stringify(state));
-      assert.deepEqual(await planProjectReimport(outputPath), before);
+      const legacyPlan = await planProjectReimport(outputPath);
+      assert.deepEqual({ ...legacyPlan, projectRevision: before.projectRevision, planDigest: before.planDigest }, before);
+      assert.notEqual(legacyPlan.planDigest, before.planDigest, 'Import State changes invalidate approvals');
       state.compiler.compilerVersion = 'future';
       await writeFile(join(outputPath, MAKER_IMPORT_STATE), JSON.stringify(state));
       await assert.rejects(planProjectReimport(outputPath), /Planner\/Compiler version/);

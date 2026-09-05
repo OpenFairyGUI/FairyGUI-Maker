@@ -57,6 +57,7 @@ export class MemoryFileSystem implements FileSystem {
 
   async readdir(path: string): Promise<string[]> {
     const directory = normalize(path);
+    if (!this.directories.has(directory)) throw new Error(`Not a directory: ${path}`);
     const prefix = directory === '/' ? '/' : `${directory}/`;
     const children = new Set<string>();
     for (const candidate of [...this.directories, ...this.files.keys()]) {

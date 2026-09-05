@@ -149,6 +149,7 @@ fairygui-maker import inspect E:\Design\hud.fig
 fairygui-maker import plan E:\Design\hud.fig --out E:\Design\hud-plan.json
 fairygui-maker import E:\Design\hud.fig --dry-run
 fairygui-maker reimport E:\Projects\hud-imported --dry-run
+fairygui-maker reimport E:\Projects\hud-imported --apply <上一步的planDigest>
 fairygui-maker view E:\Projects\hud-imported
 ```
 
@@ -156,7 +157,7 @@ fairygui-maker view E:\Projects\hud-imported
 
 BuildPlan v2 绑定源结构、图片和 Binding 摘要及 Planner/Compiler 版本；首次导入 ID 确定性生成，重导入优先保留旧 ID，Plan 无法删除源诊断。同一输入和固定版本可复现生成文件；旧 Plan 需在 Workbench 点击“重新生成 Build Plan”。身份范围与兼容边界见 [批次 18](docs/workbench.md#213-确定性-plannercompiler批次-18)。
 
-`reimport <project> --dry-run` 会重新读取本地源文件并执行三方比较，只输出 `added`、`changed`、`removed`、`preserved`、`conflict`，不会修改 FairyGUI 工程。上传型 Workbench 导入没有稳定的本地源路径，因此当前批次不提供 CLI 重导入；`--apply` 会在 Backend Transaction 版本中另行实现。
+`reimport <project> --dry-run` 重新读取本地源文件，返回 `added`、`changed`、`removed`、`preserved`、`conflict`、`blockers` 和 `planDigest`，不修改工程。关闭该工程的 Host/编辑器会话并核对结果后，用 `--apply <planDigest>` 明确批准这一份计划。源文件、工程内容或 Import State 有变化时，旧摘要会被拒绝；有冲突、PSD 图层身份不确定或 Backend 不支持的内容时不写回。工程与新的源生成快照/State 在同一次 Backend 暂存目录提交中更新；用户字段、不重叠的修改和用户自建资源会保留。上传型 Workbench 导入没有稳定本地源路径，仍不能 CLI 重导入。完整边界与失败恢复见 [T4 安全重导入](docs/reimport.md)。本地命令不改变 Host/MCP 的独立保存审批流程。
 
 Host 同时提供带 bearer token 保护的 `/api/import-drafts` 创建、列表、详情、删除、`parse`、`plan`、`compile` 和 `materialize` 接口。所有变更请求都必须提交当前 `expectedRevision`；`view <project-path>` 只读模式禁用这些接口。编译后的 Draft 还可上传一张 PNG Reference Image，从同页 Viewer 捕获结果，并持久化 Reference、Capture、Pixel Diff 与原始像素指标；Workbench 提供透明度叠加、并排和热图视图，不设置跨字体、平台或 rasterizer 的全局相似度通过线。
 

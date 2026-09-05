@@ -1,8 +1,12 @@
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { basename, extname, join, relative, resolve, sep } from 'node:path';
 import { NodeIO } from '@openfairygui/core/node';
-import { assertValidUamProject, readProjectAsUam, writeProjectFromUam } from '@openfairygui/core/uam';
+import type { BackendFileSystem } from '@openfairygui/backend/node';
+import { ProjectReader, ProjectWriter } from '@openfairygui/core/project-io';
+import { assertValidUamProject, liftDocumentToUamProject, materializeUamProject, readProjectAsUam, writeProjectFromUam } from '@openfairygui/core/uam';
 import { Resvg } from '@resvg/resvg-js';
 
 import { parseImportJson, stringifyImportJson } from './json';
@@ -23,8 +27,8 @@ import {
   parseMakerImportStateV2,
   type MakerImportGeneratedSnapshotV2,
   type MakerImportStateV2,
-  type ReimportPlanV1,
 } from './import-state';
+import { MemoryFileSystem } from './memory-fs';
 import type { ImportDocument, ImportNode } from './model';
 import { FAIRY_COMPILER_VERSION, FAIRY_PLANNER_VERSION, planDocument } from './plan';
 import { parsePsdFile } from './psd-file';
@@ -45,6 +49,7 @@ export {
   type FigmaVectorFallback,
 } from './figma-file';
 export { parsePsdFile } from './psd-file';
+export { planProjectReimport, applyProjectReimport, type ReimportApplyPlanV1 } from './reimport';
 
 export const MAKER_IMPORT_STATE = 'maker-import-state.json';
 const require = createRequire(import.meta.url);
@@ -177,6 +182,7 @@ export async function writeMakerImportStateV2(input: {
   profile: unknown;
   semanticOverlay: MakerSemanticOverlayV1;
   conversionIds: Record<string, string>;
+  fileSystem?: BackendFileSystem;
 }): Promise<MakerImportStateV2> {
   const snapshot: MakerImportGeneratedSnapshotV2 = {
     schemaVersion: 2,
@@ -185,8 +191,11 @@ export async function writeMakerImportStateV2(input: {
   };
   const snapshotBytes = encodeImportJson(snapshot);
   const metadataRoot = join(input.projectRoot, MAKER_IMPORT_SNAPSHOT_DIRECTORY);
-  await mkdir(metadataRoot, { recursive: true });
-  await writeFile(join(input.projectRoot, ...MAKER_IMPORT_GENERATED_SNAPSHOT.split('/')), snapshotBytes, { flag: 'wx' });
+  const write = (filePath: string, bytes: Uint8Array) => input.fileSystem
+    ? input.fileSystem.writeFileRaw(filePath, bytes)
+    : writeFile(filePath, bytes, { flag: 'wx' });
+  await (input.fileSystem ?? { mkdir }).mkdir(metadataRoot, { recursive: true });
+  await write(join(input.projectRoot, ...MAKER_IMPORT_GENERATED_SNAPSHOT.split('/')), snapshotBytes);
   const state = await createMakerImportStateV2({
     source: input.source,
     sourcePath: input.sourcePath,
@@ -199,11 +208,12 @@ export async function writeMakerImportStateV2(input: {
     conversionIds: input.conversionIds,
     generatedSnapshotDigest: await makerImportSha256(snapshotBytes),
   });
-  await writeFile(join(input.projectRoot, MAKER_IMPORT_STATE), encodeImportJson(state), { flag: 'wx' });
+  await write(join(input.projectRoot, MAKER_IMPORT_STATE), encodeImportJson(state));
   return state;
 }
 
-export async function planProjectReimport(projectPath: string): Promise<ReimportPlanV1> {
+// Internal preparation shared by preview and apply; neither trusts a caller-supplied project/plan.
+export async function prepareProjectReimport(projectPath: string) {
   const projectDirectory = resolve(projectPath);
   const projectStat = await lstat(projectDirectory).catch(() => null);
   if (!projectStat?.isDirectory() || projectStat.isSymbolicLink()) {
@@ -246,10 +256,15 @@ export async function planProjectReimport(projectPath: string): Promise<Reimport
   }
 
   const fairyPath = join(projectDirectory, state.project.fairyFile);
-  const currentProject = await readProjectAsUam(new NodeIO(), fairyPath, { hydrateResourceBytes: true });
+  const currentRead = await new NodeIO().readProjectDetailed(fairyPath, { hydrateResourceBytes: true });
+  if (!currentRead.complete || !currentRead.document || currentRead.diagnostics.some(({ severity }) => severity === 'error')) {
+    throw new Error('Reimport target project could not be read completely without errors');
+  }
+  const currentProject = liftDocumentToUamProject(currentRead.document);
   assertValidUamProject(currentProject);
   if (currentProject.projectId !== state.project.projectId) throw new Error('Reimport target project ID does not match import state');
 
+  const sourceDigest = await digestReimportPath(state.source.path);
   const parsed = await parseDesignSource(state.source.path);
   if (parsed.source.kind !== state.source.kind || parsed.document.name !== state.source.documentId) {
     throw new Error('Reimport source does not match the imported document');
@@ -257,7 +272,13 @@ export async function planProjectReimport(projectPath: string): Promise<Reimport
   const { overlay, conflicts } = mergeManualOverlay(parsed.document, snapshot.semanticOverlay);
   const plan = planDocument(parsed.document, { semanticOverlay: overlay, imageBindings: parsed.imageBindings });
   const proposed = compilePlanToUam(parsed.document, plan, state.compiler.conversionIds, parsed.imageBindings);
-  return createReimportPlanV1({
+  // Compare persisted UAM on both sides, including reader defaults and image source paths.
+  const memory = new MemoryFileSystem();
+  const memoryPath = `/${state.project.fairyFile}`;
+  await new ProjectWriter(memory).write(materializeUamProject(proposed.project), memoryPath);
+  proposed.project = liftDocumentToUamProject(await new ProjectReader(memory).read(memoryPath, { hydrateResourceBytes: true }));
+  assertValidUamProject(proposed.project);
+  const report = await createReimportPlanV1({
     projectDirectory,
     sourcePath: state.source.path,
     state,
@@ -269,6 +290,28 @@ export async function planProjectReimport(projectPath: string): Promise<Reimport
     proposedIds: proposed.ids,
     semanticConflicts: conflicts,
   });
+  if (await digestReimportPath(state.source.path) !== sourceDigest) throw new Error('Reimport source changed while planning; run --dry-run again');
+  return { report, state, snapshot, currentProject, parsed, proposed, overlay, profile, sourceDigest };
+}
+
+// Stream one file at a time. Also bind unmodelled project files and actual Bundle bytes, not its declared source SHA.
+export async function digestReimportPath(root: string): Promise<string> {
+  const hash = createHash('sha256');
+  const visit = async (filePath: string, depth: number): Promise<void> => {
+    if (depth > 100) throw new Error('Reimport path nesting exceeds 100 levels');
+    const stats = await lstat(filePath);
+    if (stats.isSymbolicLink()) throw new Error('Reimport paths cannot contain symbolic links');
+    hash.update(JSON.stringify([relative(root, filePath).split(sep).join('/'), stats.isDirectory() ? 'directory' : 'file']) + '\n');
+    if (stats.isDirectory()) {
+      for (const name of (await readdir(filePath)).sort(compareText)) await visit(join(filePath, name), depth + 1);
+    } else if (stats.isFile()) {
+      const fileHash = createHash('sha256');
+      for await (const chunk of createReadStream(filePath)) fileHash.update(chunk);
+      hash.update(fileHash.digest());
+    } else throw new Error('Reimport paths must contain only regular files and directories');
+  };
+  await visit(root, 0);
+  return hash.digest('hex');
 }
 
 function mergeManualOverlay(

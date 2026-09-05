@@ -46,6 +46,7 @@ export interface MakerImportStateV2 {
   source: MakerImportSourceV1 & {
     documentId: string;
     path?: string;
+    psdIdentityUncertain?: boolean;
   };
   compiler: {
     makerVersion: string;
@@ -141,6 +142,7 @@ export const makerImportStateV2Schema = z.object({
     sha256: sha256Schema,
     documentId: z.string().min(1).max(1_024),
     path: z.string().min(1).max(32_768).optional(),
+    psdIdentityUncertain: z.boolean().optional(),
   }).strict(),
   compiler: z.object({
     makerVersion: z.string().min(1).max(128),
@@ -194,6 +196,9 @@ export async function createMakerImportStateV2(input: {
       ...input.source,
       documentId: input.document.name,
       ...(input.sourcePath ? { path: input.sourcePath } : {}),
+      ...(input.source.kind === 'psd' ? {
+        psdIdentityUncertain: input.document.diagnostics.some(({ code }) => code === 'PSD_LAYER_ID_MISSING'),
+      } : {}),
     },
     compiler: {
       makerVersion: input.makerVersion,
@@ -260,9 +265,9 @@ export async function createReimportPlanV1(input: {
 
     if (input.semanticConflicts?.has(sourceNodeId)) {
       conflict.push(entry(sourceNodeId, current, 'semantic-mapping-invalid'));
-    } else if (previous.fingerprint !== current.fingerprint && pathsOverlap(sourceTargetChanges, projectSourceChanges)) {
+    } else if (sourceTargetChanges.size > 0 && pathsOverlap(sourceTargetChanges, projectSourceChanges)) {
       conflict.push(entry(sourceNodeId, current, 'source-and-project-changed'));
-    } else if (previous.fingerprint !== current.fingerprint) {
+    } else if (previous.fingerprint !== current.fingerprint || sourceTargetChanges.size > 0) {
       changed.push(entry(sourceNodeId, current, 'source-changed'));
     } else {
       preserved.push(entry(sourceNodeId, current, projectChanged ? 'user-change-preserved' : 'unchanged'));

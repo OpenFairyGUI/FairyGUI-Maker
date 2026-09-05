@@ -555,8 +555,16 @@ test("CLI view registers one bounded read-only project snapshot", async () => {
       reimportPath: projectRoot,
       dryRun: true,
     })
-    assert.throws(() => readCliArguments(["reimport", projectRoot]), /reimport <project-directory> --dry-run/)
-    assert.throws(() => readCliArguments(["reimport", projectRoot, "--apply"]), /Unknown option/)
+    const planDigest = "a".repeat(64)
+    assert.deepEqual(readCliArguments(["reimport", projectRoot, "--apply", planDigest, "--data-dir", dataDir]), {
+      help: false, reimportPath: projectRoot, applyDigest: planDigest, dataDir,
+    })
+    assert.throws(() => readCliArguments(["reimport", projectRoot]), /reimport <project-directory>/)
+    assert.throws(() => readCliArguments(["reimport", projectRoot, "--apply"]), /requires the planDigest/)
+    assert.throws(() => readCliArguments(["reimport", projectRoot, "--apply", planDigest, "--dry-run"]), /reimport <project-directory>/)
+    assert.throws(() => readCliArguments(["reimport", projectRoot, "--apply", planDigest, "--apply", planDigest]), /only be specified once/)
+    assert.throws(() => readCliArguments(["import", "source.fig", "--out", "generated", "--apply", planDigest]), /requires a reimport command/)
+    assert.throws(() => readCliArguments(["view", projectRoot, "--apply", planDigest]), /requires a reimport command/)
     assert.throws(() => readCliArguments(["import", "source.fig"]), /--out <new-directory>/)
     assert.throws(() => readCliArguments(["import", "source.fig", "--out", "generated", "--port", "3900"]), /--out <new-directory>/)
     assert.deepEqual(readCliArguments(["--version"]), { version: true })

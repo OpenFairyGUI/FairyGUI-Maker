@@ -23,7 +23,7 @@ import {
   type ProjectAssetAnalysis,
 } from "../asset-analysis"
 import { ImportDraftStore } from "../design-import/draft-store"
-import { planProjectReimport } from "../design-import/node"
+import { applyProjectReimport, planProjectReimport } from "../design-import/node"
 import { ArtifactStore, artifactSourceSchema } from "./artifacts"
 import { createHostBackendFileSystem } from "./backend-files"
 import { registerImportDraftApi } from "./import-drafts"
@@ -938,6 +938,7 @@ export function readCliArguments(argv: string[]) {
   let dataDir: string | undefined
   let outputPath: string | undefined
   let dryRun = false
+  let applyDigest: string | undefined
   const positional: string[] = []
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -962,10 +963,17 @@ export function readCliArguments(argv: string[]) {
       dryRun = true
       continue
     }
+    if (argument === "--apply") {
+      if (applyDigest !== undefined) throw new Error("--apply may only be specified once")
+      applyDigest = argv[++index]
+      if (!applyDigest || !/^[a-f0-9]{64}$/.test(applyDigest)) throw new Error("--apply requires the planDigest from a fresh --dry-run")
+      continue
+    }
     if (argument.startsWith("-")) throw new Error(`Unknown option: ${argument}`)
     positional.push(argument)
   }
   if (positional[0] === "import") {
+    if (applyDigest !== undefined) throw new Error("--apply requires a reimport command")
     if (port !== undefined) {
       throw new Error("Usage: fairygui-maker import <source.fig|source.psd|bundle-directory> --out <new-directory>")
     }
@@ -994,11 +1002,12 @@ export function readCliArguments(argv: string[]) {
     }
   }
   if (positional[0] === "reimport") {
-    if (positional.length !== 2 || !dryRun || outputPath !== undefined || port !== undefined || dataDir !== undefined) {
-      throw new Error("Usage: fairygui-maker reimport <project-directory> --dry-run")
+    if (positional.length !== 2 || dryRun === (applyDigest !== undefined) || outputPath !== undefined || port !== undefined) {
+      throw new Error("Usage: fairygui-maker reimport <project-directory> (--dry-run | --apply <planDigest>) [--data-dir <path>]")
     }
-    return { help: false as const, reimportPath: positional[1]!, dryRun: true as const }
+    return { help: false as const, reimportPath: positional[1]!, ...(dryRun ? { dryRun: true as const } : { applyDigest: applyDigest! }), ...(dataDir ? { dataDir } : {}) }
   }
+  if (applyDigest !== undefined) throw new Error("--apply requires a reimport command")
   if (outputPath !== undefined || dryRun) throw new Error("--out and --dry-run require an import or reimport command")
   if (positional.length === 0) return { help: false as const, port, dataDir, projectPath: undefined }
   if (positional[0] !== "view" || positional.length !== 2) throw new Error("Usage: fairygui-maker view <project-path> [--port <port>] [--data-dir <path>]")
@@ -1012,11 +1021,34 @@ export async function runCli(argv = process.argv.slice(2)) {
     return null
   }
   if (options.help) {
-    process.stdout.write("Usage:\n  fairygui-maker [view <project-path>] [--port <port>] [--data-dir <path>]\n  fairygui-maker import <source.fig|source.psd|bundle-directory> --out <new-directory> [--data-dir <path>]\n  fairygui-maker import <source.fig|source.psd|bundle-directory> --dry-run [--data-dir <path>]\n  fairygui-maker import inspect <source.fig|source.psd|bundle-directory> [--data-dir <path>]\n  fairygui-maker import plan <source.fig|source.psd|bundle-directory> --out <plan.json> [--data-dir <path>]\n  fairygui-maker reimport <project-directory> --dry-run\n\nOptions:\n  --out <path>       New project directory, or plan JSON for `import plan`\n  --dry-run          Compile a draft or plan reimport changes without writing the target project\n  --port <port>      Localhost port (default: 3847)\n  --data-dir <path>  Private artifact, draft, and runtime data directory (default: .fairygui-maker)\n  --version          Print the installed Maker version\n\nEnvironment: FAIRYGUI_MAKER_TOKEN, FAIRYGUI_MAKER_APPROVAL_TOKEN, FAIRYGUI_MAKER_PORT, FAIRYGUI_MAKER_DATA_DIR, FAIRYGUI_MAKER_LOG_LEVEL\nSave approval: the owner confirms each revision-bound save in Workbench using a separate approval token, never the MCP token.\n")
+    process.stdout.write(`Usage:
+  fairygui-maker [view <project-path>] [--port <port>] [--data-dir <path>]
+  fairygui-maker import <source.fig|source.psd|bundle-directory> --out <new-directory> [--data-dir <path>]
+  fairygui-maker import <source.fig|source.psd|bundle-directory> --dry-run [--data-dir <path>]
+  fairygui-maker import inspect <source.fig|source.psd|bundle-directory> [--data-dir <path>]
+  fairygui-maker import plan <source.fig|source.psd|bundle-directory> --out <plan.json> [--data-dir <path>]
+  fairygui-maker reimport <project-directory> --dry-run [--data-dir <path>]
+  fairygui-maker reimport <project-directory> --apply <planDigest> [--data-dir <path>]
+
+Options:
+  --out <path>       New project directory, or plan JSON for import plan
+  --dry-run          Compile a draft or plan reimport changes without writing the target project
+  --apply <digest>   Explicitly approve the exact reimport planDigest from --dry-run; conflicts and stale inputs are refused
+  --port <port>      Localhost port (default: 3847)
+  --data-dir <path>  Private artifact, draft, and runtime data directory (default: .fairygui-maker)
+  --version          Print the installed Maker version
+
+Environment: FAIRYGUI_MAKER_TOKEN, FAIRYGUI_MAKER_APPROVAL_TOKEN, FAIRYGUI_MAKER_PORT, FAIRYGUI_MAKER_DATA_DIR, FAIRYGUI_MAKER_LOG_LEVEL
+Host save approval: the owner confirms each revision-bound save in Workbench using a separate approval token, never the MCP token.
+CLI reimport approval: close the project in Host/editor, review --dry-run, then explicitly run --apply <planDigest>. This is a local owner command, not an MCP save approval bypass.
+`)
     return null
   }
   if ("reimportPath" in options) {
-    const result = await planProjectReimport(options.reimportPath!)
+    const fileSystem = await createHostBackendFileSystem(resolve(options.dataDir ?? process.env.FAIRYGUI_MAKER_DATA_DIR ?? ".fairygui-maker"))
+    const result = "applyDigest" in options
+      ? { ...await applyProjectReimport(options.reimportPath!, options.applyDigest!, fileSystem), applied: true }
+      : await planProjectReimport(options.reimportPath!, fileSystem)
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
     return result
   }

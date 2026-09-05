@@ -186,9 +186,14 @@ try {
     if (!(await readFile(originalPath)).equals(await readFile(freshPath))) throw new Error(`Installed CLI fresh import bytes differ: ${file.name}`)
   }
   const reimport = JSON.parse((await run(bin, ["reimport", importedDirectory, "--dry-run"], { cwd: consumer })).stdout)
-  if (reimport.added?.length || reimport.changed?.length || reimport.removed?.length || reimport.conflict?.length || !reimport.preserved?.length) {
+  if (reimport.added?.length || reimport.changed?.length || reimport.removed?.length || reimport.conflict?.length || reimport.blockers?.length || !reimport.preserved?.length || !/^[a-f0-9]{64}$/.test(reimport.planDigest)) {
     throw new Error("Installed CLI returned an unstable no-change reimport plan")
   }
+  if (!help.stdout.includes("--apply <planDigest>")) throw new Error("Installed CLI help is missing explicit reimport approval")
+  const applied = JSON.parse((await run(bin, ["reimport", importedDirectory, "--apply", reimport.planDigest], { cwd: consumer })).stdout)
+  if (applied.applied !== true || applied.planDigest !== reimport.planDigest) throw new Error("Installed CLI did not apply the approved reimport plan")
+  const reopened = JSON.parse((await run(bin, ["reimport", importedDirectory, "--dry-run"], { cwd: consumer })).stdout)
+  if (reopened.added?.length || reopened.changed?.length || reopened.removed?.length || reopened.conflict?.length || reopened.blockers?.length) throw new Error("Installed CLI reimport did not reopen cleanly")
   let overwriteError = ""
   try {
     await run(bin, ["import", path.join(root, "test", "fixtures", "design-import", "basic-shapes.fig"), "--out", importedDirectory], { cwd: consumer })

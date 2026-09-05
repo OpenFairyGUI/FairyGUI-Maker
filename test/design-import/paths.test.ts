@@ -16,6 +16,9 @@ test('ZIP wrappers reject traversal, absolute paths and cross-platform reserved 
   for (const name of invalid) assert.throws(() => files.toZipEntries(name), /ZIP wrapper/, name);
   await files.writeFile('/project.fairy', 'project');
   await files.writeFile('/assets/Main/package.xml', 'package');
+  await assert.rejects(files.readdir('/project.fairy'), /Not a directory/);
+  await assert.rejects(files.readdir('/missing'), /Not a directory/);
+  assert.deepEqual(await files.readdir('/assets/Main'), ['package.xml']);
   for (const name of invalid) assert.throws(() => files.toZipEntries(name), /ZIP wrapper/, name);
   const entries = files.toZipEntries('工程 Demo');
   assert.deepEqual(Object.keys(entries), ['工程 Demo/project.fairy', '工程 Demo/assets/Main/package.xml']);

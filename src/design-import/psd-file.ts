@@ -208,14 +208,24 @@ function imageNode(
   return item;
 }
 
-function validateStructure(layers: Layer[], bitsPerChannel: number): void {
+function validateStructure(layers: Layer[], bitsPerChannel: number, diagnostics: Diagnostic[]): void {
   let layerCount = 0;
   let decodedBytes = 0;
+  const layerIds = new Set<number>();
   const bytesPerChannel = bitsPerChannel <= 8 ? 1 : bitsPerChannel <= 16 ? 2 : 4;
   const visit = (layer: Layer, depth: number): void => {
     layerCount += 1;
     if (layerCount > MAX_LAYERS) throw new Error(`PSD contains more than ${MAX_LAYERS} layers`);
     if (depth > MAX_DEPTH) throw new Error(`PSD layer nesting exceeds ${MAX_DEPTH} levels`);
+    if (layer.id === undefined) {
+      if (!diagnostics.some(({ code }) => code === 'PSD_LAYER_ID_MISSING')) diagnostics.push({
+        code: 'PSD_LAYER_ID_MISSING', nodeId: 'psd:document', severity: 'warning',
+        message: 'PSD lacks stable layer IDs; changed-source reimport is blocked because positional identity is ambiguous.',
+      });
+    } else {
+      if (layerIds.has(layer.id)) throw new Error(`PSD contains duplicate layer IDs: ${layer.id}`);
+      layerIds.add(layer.id);
+    }
     const box = ownBox(layer);
     const width = Math.max(0, box.right - box.left);
     const height = Math.max(0, box.bottom - box.top);
@@ -329,7 +339,7 @@ export function parsePsdFile(input: Uint8Array, name = 'PhotoshopDocument'): Imp
   const documentBox = { left: 0, top: 0, right: psd.width, bottom: psd.height };
   const layers = psd.children ?? [];
   // ponytail: synchronous hard caps are enough for a CLI; use a worker/streaming decoder if larger PSDs become required.
-  validateStructure(layers, psd.bitsPerChannel ?? 8);
+  validateStructure(layers, psd.bitsPerChannel ?? 8, diagnostics);
   const artboards = layers.filter((layer) => layer.artboard);
   const roots = artboards.length > 0
     ? artboards.map((artboard, index) => frame(artboard, layerBox(artboard), [index], diagnostics, true))
