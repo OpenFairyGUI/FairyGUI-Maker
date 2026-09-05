@@ -96,6 +96,13 @@ Host 的 MCP 会话上限为 32，空闲 30 分钟后由每分钟清理或下一
 同步抛错、Promise reject、无 session ID 的失败都会留下方法、时间、session ID 和稳定错误码，
 不记录参数、异常详情或凭据。未知异常沿用 `backend_unhandled_error`；不存在的 session ID 不会创建占位工程会话。
 
+默认 Node Backend 在打开工程和每次事务写回时，以真实路径排除当前 Maker data directory、
+其后代及包含它的祖先工程（Node 保存会替换整个工程目录）。符号链接/Junction 别名不能绕过，
+相似前缀的兄弟目录不受影响。被拒绝的打开沿用 Backend 的 `project_open_failed`，不创建工程锁；
+底层文件系统策略使用 `maker_private_path_forbidden`，保存失败继续使用 Backend 原有事务失败码。
+data directory 默认位置保持不变；请把可写工程放在与私有数据分离的目录中。
+由可信嵌入者通过 `StartMakerHostOptions.runtime` 注入的自定义 Runtime，需自行提供等价文件系统策略。
+
 文件夹授权只发生在 Dashboard 的“创建/打开 FairyGUI 工程”动作中：
 
 1. 用户点击按钮，Dashboard 调用 `showDirectoryPicker({ mode: 'read' })`。

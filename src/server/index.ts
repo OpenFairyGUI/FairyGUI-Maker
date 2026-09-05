@@ -25,6 +25,7 @@ import {
 import { ImportDraftStore } from "../design-import/draft-store"
 import { planProjectReimport } from "../design-import/node"
 import { ArtifactStore } from "./artifacts"
+import { createHostBackendFileSystem } from "./backend-files"
 import { registerImportDraftApi } from "./import-drafts"
 import { createHostProjectSnapshot, type HostProjectSnapshot } from "./project-snapshot"
 import { HostSaveGrants, hostBackendFailure } from "./save-grants"
@@ -638,7 +639,9 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   await importDraftStore.init()
   const renderBroker = new ViewerRenderBroker((projectId) => projects.get(projectId), (artifactId) => artifactStore.get(artifactId))
   const allowedProjectRoot = await realpath(options.projectPath ?? process.cwd())
-  const backend = options.runtime ?? createNodeBackendRuntime({ allowedProjectRoots: [allowedProjectRoot] })
+  const backend = options.runtime ?? createNodeBackendRuntime({
+    allowedProjectRoots: [allowedProjectRoot], fileSystem: await createHostBackendFileSystem(dataDir),
+  })
   const saveGrants = new HostSaveGrants(backend)
   const runtime = createTrackedRuntime(backend, backendSessions, backendActivity, saveGrants)
   const viewOnly = projectSource !== null
