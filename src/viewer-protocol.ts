@@ -1,7 +1,7 @@
 import type { UamAssetResource, UamComponentResource } from "@openfairygui/core"
 import type { PlayerRenderSource } from "./artifact-protocol"
 
-export const VIEWER_PROTOCOL_VERSION = 6
+export const VIEWER_PROTOCOL_VERSION = 7
 export const MAX_RENDERER_INTERACTION_BYTES = 64 * 1024
 
 export type ViewerComponent = {
@@ -62,6 +62,8 @@ export type ViewerConnectMessage = {
 export type ViewerCommand = { expectedRuntimeEventSeq?: number } & (
   | { kind: "render"; requestId: string; scene: ViewerScene }
   | { kind: "render-artifact"; requestId: string; source: PlayerRenderSource }
+  | { kind: "prepare-artifact"; requestId: string; source: PlayerRenderSource }
+  | { kind: "unload-artifact"; requestId: string }
   | { kind: "capture"; requestId: string }
   | { kind: "observe"; requestId: string }
   | { kind: "set-view"; requestId: string; view: Partial<ViewerViewState> }

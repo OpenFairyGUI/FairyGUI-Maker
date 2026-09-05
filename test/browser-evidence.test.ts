@@ -24,6 +24,12 @@ test("evidence gates reject a changed pixel, dimensions, unexpected browser fail
   assert.ok(expectedDiagnostic(teardown))
   assert.equal(expectedDiagnostic({ ...teardown, message: "net::ERR_FAILED" }), undefined)
   assert.equal(expectedDiagnostic({ ...teardown, url: "http://localhost/api/projects/project-id" }), undefined)
+  const media: BrowserDiagnostic = { phase: "runtime-budgets", kind: "requestfailed", method: "GET", message: "net::ERR_ABORTED",
+    url: "blob:null/1234-abcd", resourceType: "media", navigation: false, frameUrl: "http://127.0.0.1:3847/player-runtime.html" }
+  assert.ok(expectedDiagnostic(media))
+  for (const change of [{ phase: "player-golden" }, { message: "net::ERR_FAILED" }, { resourceType: "image" }, { url: "https://example.com/sound.wav" }]) {
+    assert.equal(expectedDiagnostic({ ...media, ...change }), undefined)
+  }
   assert.throws(() => goldenUpdateEnabled({ CI: "true", UPDATE_VISUAL_GOLDENS: "1" }), /CI must not update/)
   assert.equal(goldenUpdateEnabled({ UPDATE_VISUAL_GOLDENS: "1" }), true)
   assert.equal(goldenUpdateEnabled({ CI: "true" }), false)

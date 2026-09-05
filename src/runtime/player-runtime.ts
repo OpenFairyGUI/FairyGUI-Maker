@@ -1,4 +1,6 @@
-import type { ArtifactManifest, ArtifactPackage, PlayerRenderSource } from "../artifact-protocol"
+import type { ArtifactManifest, PlayerRenderSource } from "../artifact-protocol"
+import { artifactPackageClosure } from "./artifact-resources"
+import { playRuntimeAudio, prepareRuntimeAudio } from "./audio-budget"
 import { installResourceLoadBudget, loadRuntimeTexture, reserveImage, setImageProbeWorker } from "./image-budget"
 import { acceptRuntimeConnection } from "../runtime-channel"
 import { disableRuntimeStorage, flushRuntimeFrame, nextRuntimeFrame } from "./platform"
@@ -20,6 +22,9 @@ declare const fgui: any
 const runtime = {
   sourceRevision: "",
   artifactId: "",
+  rootPackageId: "",
+  resourcesLoaded: false,
+  requiredFiles: [] as string[],
   manifest: null as ArtifactManifest | null,
   current: null as any,
   objects: new Map<string, any>(),
@@ -27,6 +32,7 @@ const runtime = {
   packageIds: [] as string[],
   loaderUrls: new Set<string>(),
   imageUrls: new Set<string>(),
+  audios: new Map<string, HTMLAudioElement>(),
   blobUrls: [] as string[],
   ownedTextures: [] as any[],
   ownedObjects: new Set<any>(),
@@ -79,6 +85,8 @@ async function boot() {
   if (!fgui.GRoot.inst.displayObject.parent) Laya.stage.addChild(fgui.GRoot.inst.displayObject)
   installResourceLoadBudget(runtime.loaderUrls, runtime.imageUrls)
   installConstructionBudget()
+  fgui.GRoot.prototype.playOneShotSound = (url: string, volume = 1) => playRuntimeAudio(runtime.audios, url,
+    Laya.SoundManager.muted || Laya.SoundManager.soundMuted ? 0 : volume * Laya.SoundManager.soundVolume)
   bindInteractionEvents()
   resize()
 }
@@ -91,6 +99,15 @@ async function handleCommand(command: ViewerCommand) {
       return
     }
     switch (command.kind) {
+      case "prepare-artifact":
+        validateSource(command.source)
+        await loadArtifact(command.source)
+        respond(command.requestId, { files: runtime.requiredFiles })
+        return
+      case "unload-artifact":
+        resetArtifact()
+        respond(command.requestId)
+        return
       case "render-artifact": {
         const value = await renderArtifact(command.source)
         post({ kind: "rendered", value })
@@ -140,15 +157,19 @@ async function handleCommand(command: ViewerCommand) {
         throw new Error("Player runtime 不接受工程态 Viewer Scene。")
     }
   } catch (error) {
-    if (command?.kind === "render-artifact") resetArtifact()
+    if (command?.kind === "render-artifact" || command?.kind === "prepare-artifact") resetArtifact()
     respond(command.requestId, undefined, formatError(error))
   }
 }
 
 async function renderArtifact(source: PlayerRenderSource): Promise<ViewerRendered> {
   validateSource(source)
-  if (runtime.artifactId !== source.artifact.artifactId || runtime.sourceRevision !== source.artifact.digest) {
-    await loadArtifact(source.artifact, source.files)
+  if (runtime.artifactId !== source.artifact.artifactId || runtime.rootPackageId !== source.packageId) {
+    await loadArtifact(source)
+  }
+  if (!runtime.resourcesLoaded) {
+    await preloadArtifactFiles(source.artifact, transferredFiles(source))
+    runtime.resourcesLoaded = true
   }
   clearCurrent()
   const pkgSpec = source.artifact.packages.find(({ packageId }) => packageId === source.packageId)
@@ -179,27 +200,34 @@ async function renderArtifact(source: PlayerRenderSource): Promise<ViewerRendere
   }
 }
 
-async function loadArtifact(artifact: ArtifactManifest, files: PlayerRenderSource["files"]) {
-  if (artifact.runtimeProfile !== "layaair-3.3.10/fairygui") throw new Error(`Player 不支持 runtime profile：${artifact.runtimeProfile}`)
-  resetArtifact()
-  for (const file of artifact.files) runtime.budget.encoded(file.size)
-  if (!Array.isArray(files) || files.length !== artifact.files.length) throw new Error("Player requires parent-transferred Artifact files")
+function transferredFiles({ artifact, files }: PlayerRenderSource) {
+  if (!Array.isArray(files)) throw new Error("Player requires parent-transferred Artifact files")
+  checkBudget(files.length, RUNTIME_LIMITS.nodes, "artifact_files")
+  const metadata = new Map(artifact.files.map(file => [file.path, file]))
   const bytesByPath = new Map(files.map(({ path, data }) => [path, data]))
   if (bytesByPath.size !== files.length) throw new Error("Duplicate Artifact bytes")
-  const readFile = (path: string) => {
-    const file = artifact.files.find((file) => file.path === path)
-    const data = bytesByPath.get(path)
+  return (path: string) => {
+    const file = metadata.get(path), data = bytesByPath.get(path)
     if (!file || !(data instanceof ArrayBuffer) || data.byteLength !== file.size) throw new Error(`Artifact file size mismatch: ${path}`)
     return new Uint8Array(data)
   }
-  for (const file of artifact.files) readFile(file.path)
+}
+
+async function loadArtifact(source: PlayerRenderSource) {
+  const { artifact } = source
+  if (artifact.runtimeProfile !== "layaair-3.3.10/fairygui") throw new Error(`Player 不支持 runtime profile：${artifact.runtimeProfile}`)
+  resetArtifact()
+  const readFile = transferredFiles(source)
+  const packages = artifactPackageClosure(artifact.packages, source.packageId)
   let inflatedBytes = 0
   let packageItems = 0
   const metadataBudget = new ObservationBudget()
-  for (const pkg of sortPackages(artifact.packages)) {
+  for (const pkg of packages) {
     const binaryUrl = artifactFileUrl(artifact.artifactId, pkg.binaryPath)
     const signal = AbortSignal.any([runtime.loading.signal, AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
-    const bytes = await decompressFuiIfNeeded(readFile(pkg.binaryPath), signal, RUNTIME_LIMITS.inflatedBytes - inflatedBytes)
+    const encoded = readFile(pkg.binaryPath)
+    runtime.budget.encoded(encoded.byteLength)
+    const bytes = await decompressFuiIfNeeded(encoded, signal, RUNTIME_LIMITS.inflatedBytes - inflatedBytes)
     inflatedBytes += bytes.byteLength
     packageItems += validatePackageMetadata(bytes, metadataBudget)
     checkBudget(packageItems, RUNTIME_LIMITS.nodes, "package_items")
@@ -207,14 +235,33 @@ async function loadArtifact(artifact: ArtifactManifest, files: PlayerRenderSourc
     runtime.packageIds.push(loaded.id)
     if (loaded.id !== pkg.packageId || loaded.name !== pkg.packageName) throw new Error(`FairyGUI 包身份不匹配：${pkg.binaryPath}`)
   }
-  await preloadArtifactFiles(artifact, readFile)
+  const byUrl = new Map(artifact.files.map(file => [artifactFileUrl(artifact.artifactId, file.path), file]))
+  const required = new Set<string>()
+  for (const packageId of runtime.packageIds) {
+    for (const item of fgui.UIPackage.getById(packageId).getItems()) {
+      if (![fgui.PackageItemType.Atlas, fgui.PackageItemType.Sound, fgui.PackageItemType.Misc, fgui.PackageItemType.Spine, fgui.PackageItemType.DragonBones].includes(item.type) || !item.file) continue
+      const url = new URL(item.file, location.href)
+      const file = url.origin === location.origin ? byUrl.get(url.pathname) : undefined
+      if (!file) throw new Error(`Artifact resource not found: ${item.file}`)
+      item.file = artifactFileUrl(artifact.artifactId, file.path)
+      required.add(file.path)
+    }
+  }
+  runtime.requiredFiles = [...required]
+  for (const filePath of required) {
+    const file = byUrl.get(artifactFileUrl(artifact.artifactId, filePath))!
+    runtime.budget.encoded(file.size)
+    if (file.mimeType.startsWith("audio/")) runtime.budget.audio(file.size)
+  }
   runtime.artifactId = artifact.artifactId
+  runtime.rootPackageId = source.packageId
   runtime.manifest = artifact
 }
 
 async function preloadArtifactFiles(artifact: ArtifactManifest, readFile: (path: string) => Uint8Array<ArrayBuffer>) {
-  for (const file of artifact.files) {
-    if (/(?:\.fui|_fui\.bytes)$/i.test(file.path)) continue
+  const metadata = new Map(artifact.files.map(file => [file.path, file]))
+  for (const filePath of runtime.requiredFiles) {
+    const file = metadata.get(filePath)!
     const url = artifactFileUrl(artifact.artifactId, file.path)
     runtime.loaderUrls.add(url)
     const signal = AbortSignal.any([runtime.loading.signal, AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
@@ -230,10 +277,11 @@ async function preloadArtifactFiles(artifact: ArtifactManifest, readFile: (path:
       const texture = await loadRuntimeTexture(blobUrl, signal)
       Laya.loader.cacheRes(url, texture)
     } else if (file.mimeType.startsWith("audio/")) {
-      // ponytail: native audio decoding still has no PCM/duration budget (batch 11).
       const blobUrl = URL.createObjectURL(new Blob([bytes], { type: file.mimeType }))
       runtime.blobUrls.push(blobUrl)
-      runtime.loaderUrls.add(blobUrl)
+      const audio = new Audio()
+      runtime.audios.set(blobUrl, audio)
+      await prepareRuntimeAudio(audio, blobUrl, signal)
       for (const packageId of runtime.packageIds) {
         for (const item of fgui.UIPackage.getById(packageId).getItems()) {
           if (item.file === url) item.file = blobUrl
@@ -271,28 +319,6 @@ function validatePackageMetadata(bytes: Uint8Array<ArrayBuffer>, budget: Observa
   const items = buffer.getInt16()
   checkBudget(items, RUNTIME_LIMITS.nodes, "package_items")
   return items
-}
-
-function sortPackages(packages: ArtifactPackage[]) {
-  const byId = new Map(packages.map((pkg) => [pkg.packageId, pkg]))
-  const sorted: ArtifactPackage[] = []
-  const visited = new Set<string>()
-  const visiting = new Set<string>()
-  const visit = (pkg: ArtifactPackage, depth = 1) => {
-    checkBudget(depth, RUNTIME_LIMITS.depth, "package_depth")
-    if (visiting.has(pkg.packageId)) throw new Error("Artifact package dependency cycle")
-    if (visited.has(pkg.packageId)) return
-    visiting.add(pkg.packageId)
-    for (const dependency of pkg.dependencies) {
-      const target = byId.get(dependency)
-      if (target) visit(target, depth + 1)
-    }
-    visiting.delete(pkg.packageId)
-    visited.add(pkg.packageId)
-    sorted.push(pkg)
-  }
-  packages.forEach((pkg) => visit(pkg))
-  return sorted
 }
 
 function validateSource(source: PlayerRenderSource) {
@@ -501,11 +527,20 @@ function resetArtifact() {
   runtime.loading.abort()
   runtime.loading = new AbortController()
   clearCurrent()
+  for (const audio of runtime.audios.values()) {
+    audio.pause()
+    audio.removeAttribute("src")
+    audio.load()
+  }
+  runtime.audios.clear()
   for (const packageId of runtime.packageIds.reverse()) {
     try { fgui.UIPackage.removePackage(packageId) } catch { /* already removed */ }
   }
   runtime.packageIds = []
   runtime.artifactId = ""
+  runtime.rootPackageId = ""
+  runtime.resourcesLoaded = false
+  runtime.requiredFiles = []
   runtime.manifest = null
   for (const texture of runtime.ownedTextures) { try { texture.destroy?.() } catch {} }
   runtime.ownedTextures = []

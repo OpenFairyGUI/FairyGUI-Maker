@@ -73,6 +73,6 @@ export type PlayerRenderSource = {
   artifact: ArtifactManifest
   packageId: string
   componentId: string
-  /** Parent-owned bytes transferred on first load; omitted while the runtime retains this artifact. */
+  /** Verified bytes: package binaries for prepare, required resources for render; omitted on reuse. */
   files?: Array<{ path: string; data: ArrayBuffer }>
 }

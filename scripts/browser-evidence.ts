@@ -16,6 +16,8 @@ export function expectedDiagnostic(d: BrowserDiagnostic): string | undefined {
     if (/\/api\/render-sessions\/[^/]+(?:\/commands)?$/.test(url)) return "cancelled session read/poll"
     if (/\/assets\/image-probe.worker-[\w-]+\.js$/.test(url)) return "cancelled runtime bootstrap"
     if (d.phase === "runtime-navigation" && /\/api\/artifacts\/[^/]+\/files\/active\.(svg|html|js)$/.test(url)) return "active content downloaded instead of navigated"
+    if (d.phase === "runtime-budgets" && /^blob:null\/[\da-f-]+$/.test(url) && d.resourceType === "media" && d.navigation === false
+      && /^http:\/\/127\.0\.0\.1:\d+\/player-runtime\.html$/.test(d.frameUrl ?? "")) return "budget test explicitly unloads streaming audio"
   }
   if (d.kind === "requestfailed" && d.method === "DELETE" && d.message === "net::ERR_ABORTED"
     && /\/api\/render-sessions\/[^/]+$/.test(url)) return "best-effort renderer teardown (Host timeout/TTL remains authoritative)"

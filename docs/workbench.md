@@ -62,7 +62,7 @@ FairyGUI 视觉渲染发生在真实浏览器环境中。Workbench 不在 Node �
 
 Player 使用另一份 iframe runtime。Dashboard 或 Player 页由用户显式选择一个发布目录，浏览器只在本次导入中读取文件并上传给 Host；目录句柄不持久化，Host 也不获得源目录写权限。Host 校验安全相对路径、文件数和容量、`.fui` / `_fui.bytes` magic、包 ID、依赖与组件目录，为每个文件计算 SHA-256，并按整体 digest 固化到本地 Artifact Store。同内容复用字节，每次导入独立记录名称、来源和时间；源目录之后发生变化不会修改既有 Artifact。
 
-Player 的父页面按 `artifactId + digest` 读取 manifest 和资源，校验大小与 SHA-256 后通过 MessageChannel 转移字节；iframe 预加载图集，再以原生 `fgui.UIPackage` 注册包并创建组件，不直接请求 Host 文件 API，也不经过 Viewer 的 UAM renderer。Player 与 Viewer 共用 Host Broker、Renderer 交付循环、MessageChannel envelope、白名单 operation、observation 和 capture 契约。
+Player 的父页面按 `artifactId + digest` 读取 manifest，先校验并转移所选包及其依赖包的 FUI；iframe 用原生 `fgui.UIPackage` 注册包并返回需要的资源文件名，父页面再校验大小与 SHA-256、转移这些资源，最后创建组件。未选包不下载、不解码；不直接请求 Host 文件 API，也不经过 Viewer 的 UAM renderer。Player 与 Viewer 共用 Host Broker、Renderer 交付循环、MessageChannel envelope、白名单 operation、observation 和 capture 契约。
 
 Agent 不直接操作 iframe 或 Canvas。它只向 Host 提交语义命令，并读取结构化观察结果。
 
@@ -78,7 +78,7 @@ Agent 不直接操作 iframe 或 Canvas。它只向 Host 提交语义命令，�
 | 交互语义 | Maker 解释 UAM Controller/Gear/Transition 与常用控件 | 发布 runtime 执行原生 Controller/Gear/Transition 与控件行为 |
 | 持久化 | 工程和临时运行态都不写回；session 仅 Host 内存 | Artifact 内容寻址并持久化；session 仍仅 Host 内存 |
 
-当前共享协议为 v6，分成两层：Host 与 Workbench 页面通过 `/api/renderers`、命令长轮询、结果 ACK 和 interaction 上报通信；Renderer 与不透明源 iframe 通过绑定父窗口、来源和一次性 nonce 的 `MessageChannel` 通信。Host 命令统一为 `render / update / view / observe / capture`，Renderer 再分别转换为 Viewer 的 `render` 或 Player 的 `render-artifact`，因此共享控制面不会把两种 renderer 混为一套。Workbench 控件不持有可直接修改 iframe 的 FrameSession。
+当前共享协议为 v7，分成两层：Host 与 Workbench 页面通过 `/api/renderers`、命令长轮询、结果 ACK 和 interaction 上报通信；Renderer 与不透明源 iframe 通过绑定父窗口、来源和一次性 nonce 的 `MessageChannel` 通信。Host 命令统一为 `render / update / view / observe / capture`，Renderer 再分别转换为 Viewer 的 `render` 或 Player 的 `prepare-artifact / render-artifact / unload-artifact`，因此共享控制面不会把两种 renderer 混为一套。Workbench 控件不持有可直接修改 iframe 的 FrameSession。
 
 对应实现边界：`src/web/lib/viewer.ts` 与 `src/runtime/viewer-runtime.ts` 负责工程态；`src/web/lib/player.ts`、`src/runtime/player-runtime.ts` 与 `src/server/artifacts.ts` 负责发布态；`src/web/lib/renderer-frame.ts` 负责父页面共用的 MessagePort 请求与命令转发；`src/server/viewer.ts` 负责两者共用的 Render Session Broker 和 MCP 工具。
 
@@ -148,6 +148,7 @@ Viewer 与 Player 复用 `src/runtime/resource-budget.ts`，上传成功不代�
 | 单次 fetch + 解压或图片加载 | 15 秒；流最多 16,384 块，逐块检查实际字节；重连/离开页面中止加载 |
 | 单张图片 / 截图 | 宽高各最多 8,192，面积最多 8,388,608 像素 |
 | 已解码图片的 RGBA 估算 / 纹理句柄 | 累计 128 MiB / 1,024 个（包含 atlas 子纹理、MovieClip 帧、位图字体字形） |
+| Player 音频 | 单文件 8 MiB、累计 32 MiB、32 个音频；单段最多 30 秒、最多 8 个同时播放，同一段仅一个 voice |
 | 场景 | 最多 5,000 个实际创建对象，组件/显示树深度最多 64；重复引用按展开后的实例计数 |
 | Observation | 一次结果合计最多 5,000 个对象节点、10,000 个条目（含 Controller/Page/Transition）、64 层；单字符串 16,384 个 UTF-16 code unit，所有字符串累计 1,048,576 个 |
 | 源元数据 | 同样限制字符串、数组和总条目；结构深度 128。Player 在原生包解析前检查字符串表，所有包累计最多 10,000 个字符串表条目、5,000 个资源 |
@@ -156,7 +157,7 @@ PNG 在任何解码器运行前检查 IHDR；PNG/JPEG 的完整校验复用 Core
 
 Player 仍使用原生 `UIPackage`，在工厂、组件构造与纹理创建边界计数；不另写一套 FUI 组件解析器，也不改动冻结的 vendor 文件。构造失败会恢复原生 constructing 计数并回收部分实例。Observation 超限明确失败，不截断、更不把不完整树伪装为完整结果；批量 operation 的子结果与末尾 observation 共用同一预算。
 
-这些是输入与资源句柄预算，不是浏览器进程的硬内存沙箱：纹理估算不含驱动/mipmap/字体排版等额外开销；音频不再预解码，PCM 时长预算和组件级按需资源闭包仍未实现。ACK/outbox 由批次 12 提供，Broker 状态统一见批次 13；iframe 权限隔离见批次 16。
+这些是输入与资源句柄预算，不是浏览器进程的硬内存沙箱：纹理估算不含驱动/mipmap/字体排版等额外开销。T3 已实现包级依赖闭包，不对包内组件字节码再建解析器；包内保留 Controller/Transition/动态 `ui://` 可能用到的资源。音频使用原生 HTML 流式媒体，先检查 metadata 时长，不走 Web Audio 整段 PCM 解码缓存；切换包/失败/卸载会暂停媒体、清空 src、撤销 Blob。实际浏览器解码器及 GPU/VRAM 内存仍未验证。压力门禁和测量证据见 [T3](./memory-stress.md)。ACK/outbox 由批次 12 提供，Broker 状态统一见批次 13；iframe 权限隔离见批次 16。
 
 验证：`test/runtime-budget.test.ts` 覆盖压缩炸弹、绝对/累计输出限制、流中断/超时/块数、图像尺寸、纹理、节点、Observation 与稀疏元数据；`pnpm test:browser` 中的 `scripts/runtime-budget-smoke.ts` 验证真实 Viewer/Player 的超深/展开超量场景、巨型 PNG/SVG、MovieClip 与原生 atlas 子纹理上限、正常 PNG/JPEG/WebP/SVG、Observation 拒绝、重连后的迟到解码回收及 Artifact A→B→正常场景的缓存释放。
 
@@ -280,7 +281,7 @@ Viewer 与 Player 均使用 `sandbox="allow-scripts"`，不再授予 `allow-same
 
 保留单个 Host 端口，采用浏览器原生的不透明源隔离，而不是新增第二个带权限的服务。Cookie 本身不按端口隔离，单纯换到另一个 `127.0.0.1` 端口并不足够，参见 [HTTP Cookie 规范](https://httpwg.org/http-extensions/draft-ietf-httpbis-rfc6265bis.html#section-8.5)。这不是浏览器进程或操作系统沙箱，不限制已获本机文件权限的程序。
 
-- **握手**：每次连接导航到新 Document，URL fragment 带随机 nonce。父页面只接受该 Window 的 `origin: "null"` 和匹配 nonce 的 pong；runtime 只接受 `event.source === parent`、固定父来源、协议 v6、匹配 nonce 和唯一 MessagePort。首次连接同步锁定，错误 nonce、兄弟窗口、旧文档 nonce 和重放不能替换端口。对不透明源发送时必须用 `targetOrigin: "*"`，身份验证不能省略。nonce 不是 Host 凭证。
+- **握手**：每次连接导航到新 Document，URL fragment 带随机 nonce。父页面只接受该 Window 的 `origin: "null"` 和匹配 nonce 的 pong；runtime 只接受 `event.source === parent`、固定父来源、协议 v7、匹配 nonce 和唯一 MessagePort。首次连接同步锁定，错误 nonce、兄弟窗口、旧文档 nonce 和重放不能替换端口。对不透明源发送时必须用 `targetOrigin: "*"`，身份验证不能省略。nonce 不是 Host 凭证。
 - **资源**：Viewer 继续转移选中组件闭包的 ArrayBuffer；Player 父页面先检查文件数、单文件 128 MiB、总编码 256 MiB 预算，再逐文件有界读取、校验大小和 SHA-256、禁止重定向并支持取消，首次成功加载后同一 Artifact 不重复转移。失败后的下一次 render 重新加载。runtime 只使用虚拟缓存键和自身创建的 Blob URL；原生包音频文件也映射到 Blob，不恢复 Host URL 读取。
 - **图片 Worker**：父页面读取安装包内的受信任 Worker 代码（最多 256 KiB），随连接传入；runtime 用原生 Blob Worker 验证图片，并在成功、失败或取消时终止 Worker、由创建方撤销 URL。既不在 iframe 内请求 Host，也不依赖不透明源 Worker 撤销父方 URL。
 - **网络与主动内容**：runtime CSP 只允许安装包脚本、Blob/data 图片和字体、Blob 音频/Worker/连接，禁止 Host/API 网络连接、表单与外部 frame/object。仅启动时枚举的构建文件和三个固定供应商脚本可匿名 CORS 读取，不开放 Source/Artifact/MCP/审批 API；runtime 入口不执行 token-to-Cookie bootstrap。受保护路由拒绝 `Origin: null` 和浏览器 cross-site/same-site Fetch Metadata 请求，CLI 无该请求头时仍需 Bearer。Source 与 Artifact 文件统一返回 octet-stream、attachment、nosniff、`default-src 'none'; sandbox`，HTML/SVG/JS 导航只能下载。
@@ -480,7 +481,7 @@ type UpdateRenderSessionInput = {
 }
 ```
 
-当前 v6 不暴露 `settle`；命令结果只确认对应 runtime 已执行本次操作。`idle`、条件等待与事件断言留给后续 `run_ui_scenario`，不提前塞入单次更新接口。
+当前 v7 不暴露 `settle`；命令结果只确认对应 runtime 已执行本次操作。`idle`、条件等待与事件断言留给后续 `run_ui_scenario`，不提前塞入单次更新接口。
 
 约束：
 

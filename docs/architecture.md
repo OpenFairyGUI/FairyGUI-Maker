@@ -53,7 +53,7 @@ FairyGUI-Maker/
 ├─ src/server/                Node Host、MCP、Artifact Store、Render Broker
 ├─ src/web/                   React Maker Workbench、Project Source Client、Renderer Client
 ├─ src/runtime/               Viewer 与 Player 的独立 iframe runtime
-├─ src/viewer-protocol.ts     共用的 render session/runtime 协议（v6）
+├─ src/viewer-protocol.ts     共用的 render session/runtime 协议（v7）
 ├─ src/runtime-channel.ts     不透明源 iframe 的 nonce/MessageChannel 握手
 ├─ src/artifact-protocol.ts   Artifact manifest 与 Player source 契约
 ├─ .agents/skills/            通用/Codex Agent Skill
@@ -148,7 +148,7 @@ Viewer 与 Player 是两条独立渲染链路：
 | 行为语义 | Maker 的 UAM 交互适配层；不推断工程中未表达的业务脚本 | 发布 runtime 的原生 Controller、Gear、Transition 和控件行为 |
 | 持久化边界 | 不发布、不生成 artifact、不写回工程 | Artifact 内容寻址且不可变；运行态更新不改写 Artifact |
 
-两者共用 Host Render Session Broker、协议 v6、父页面 HTTP 交付循环（`renderer-delivery.ts`）、MessagePort 请求与命令转发（`renderer-frame.ts`）、白名单 operation、observation、人工交互上报和 PNG capture；工程 Scene 编译、Artifact 校验加载及两种 iframe renderer 实现保持独立，不互相降级。Workbench 控件与 Agent 经过同一个 Broker；MessageChannel 仅供 Renderer 内部使用，语义版本与视图版本独立校验。按需整理范围与自动化替代入口见 [Workbench 批次 20](./workbench.md#215-按需整理批次-20)。
+两者共用 Host Render Session Broker、协议 v7、父页面 HTTP 交付循环（`renderer-delivery.ts`）、MessagePort 请求与命令转发（`renderer-frame.ts`）、白名单 operation、observation、人工交互上报和 PNG capture；工程 Scene 编译、Artifact 校验加载及两种 iframe renderer 实现保持独立，不互相降级。Workbench 控件与 Agent 经过同一个 Broker；MessageChannel 仅供 Renderer 内部使用，语义版本与视图版本独立校验。按需整理范围与自动化替代入口见 [Workbench 批次 20](./workbench.md#215-按需整理批次-20)。Player 在原有通道内先 `prepare-artifact` 注册所选包依赖闭包，由原生解析器返回资源文件名，再 `render-artifact` 转移对应资源；`unload-artifact` 统一处理失败回收，不增加 Host RPC 或修改 Artifact 持久化格式。详见 [T3 压力验收](./memory-stress.md)。
 
 第一种视觉 runtime 固定为 LayaAir 3.3.10 与配套 FairyGUI Web runtime，并运行在不透明源 iframe（`sandbox="allow-scripts"`，Host 同时提供 CSP sandbox）。Viewer iframe 只接收 Project Source Client 编译的结构化 `ViewerScene` 及所选组件依赖资产，不获得目录句柄或整个工程。Maker 自己维护 Viewer 的 UAM Scene compiler 和直接对象构造；FairyGUI Editor Online 只作为工程态 Canvas 行为与视觉效果的参考。Player 父页面按 manifest 有界读取、校验并转移 Artifact 字节，独立 runtime 调用原生 `fgui.UIPackage.addPackage/createObject`；两种 iframe 都不获得 Host Cookie、MCP/审批 token 或 Source/API 访问权限。父窗口/来源/一次性 nonce 绑定、Blob Worker、主动内容下载响应头和实际浏览器验证见 [Workbench 批次 16](./workbench.md#211-iframe-隔离批次-16)。压缩 `.fui` 在浏览器中用标准 `DecompressionStream('deflate-raw')` 解压后加载，不恢复旧 `RawInflate` 生成物。
 

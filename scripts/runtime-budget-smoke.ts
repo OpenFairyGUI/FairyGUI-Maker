@@ -5,10 +5,11 @@ import { deflateRawSync } from "node:zlib"
 import { Document, liftDocumentToUamProject, normalizeUamProject, ProjectType } from "@openfairygui/core"
 import { NodeIO } from "@openfairygui/core/node"
 import type { BrowserContext, Frame } from "playwright"
-import type { ArtifactManifest } from "../src/artifact-protocol"
+import type { ArtifactManifest, PlayerRenderSource } from "../src/artifact-protocol"
 import { type ViewerCommand, type ViewerScene } from "../src/viewer-protocol"
 import { compileViewerScene } from "../src/web/lib/viewer"
 import { openTestRuntime } from "./runtime-isolation-smoke"
+import { RUNTIME_LIMITS } from "../src/runtime/resource-budget"
 
 const revision = "runtime-budget-smoke"
 
@@ -30,8 +31,8 @@ function makeDocument(shape: "normal" | "deep" | "wide") {
   } else if (shape === "wide") {
     const child = document.createComponent("Repeated").setId("REPEAT01").setSize(100, 100)
     pkg.addResource(child)
-    for (let i = 0; i < 80; i++) child.addChild(document.createGGraph("leaf").setId(`leaf${i}`).setSize(1, 1))
-    for (let i = 0; i < 70; i++) root.addChild(document.createGComponent("instance").setId(`instance${i}`).setSrc(child.getId()))
+    for (let i = 0; i < 100; i++) child.addChild(document.createGGraph("leaf").setId(`leaf${i}`).setSize(1, 1))
+    for (let i = 0; i < 100; i++) root.addChild(document.createGComponent("instance").setId(`instance${i}`).setSrc(child.getId()))
   } else {
     root.addChild(document.createGTextField("title").setId("TITLE001").setText("Budget smoke").setSize(100, 30))
     root.addChild(document.createGGraph("marker").setId("MARKER01").setXY(10, 60).setSize(20, 20).setGraphType(1).setFillColor("#e879f9"))
@@ -202,12 +203,19 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
 
     const io = new NodeIO()
     const files = new Map<string, Buffer>()
-    for (const [id, document] of [["normal", normal], ["deep", deep], ["wide", wide], ["audio", sound], ["image-a", texturedDocument(1, png)], ["textures", texturedDocument(1024, png)]] as const) {
+    const other = makeDocument("normal")
+    const otherPackage = other.getRoot().listPackages()[0].setId("OTHER001").setName("Other")
+    const dependent = makeDocument("normal")
+    const dependentPackage = dependent.getRoot().listPackages()[0]
+    dependentPackage.addDependency(dependent.createPackage(otherPackage.getName()).setId(otherPackage.getId()))
+    dependentPackage.listComponents()[0].addChild(dependent.createGComponent("external").setId("external").setSrc("MAIN0001").setPackageId("OTHER001"))
+    for (const [id, document] of [["normal", normal], ["dependent", dependent], ["other", other], ["deep", deep], ["wide", wide], ["audio", sound], ["image-a", texturedDocument(256, png)], ["textures", texturedDocument(1024, png)]] as const) {
       const target = path.join(publishDir, `budget-${id}.fui`)
       await io.writeBinary(document, target, { compressed: true })
       files.set(id, await readFile(target))
     }
     files.set("image-b", files.get("image-a")!)
+    files.set("giant", files.get("image-a")!)
     const header = Buffer.alloc(33)
     header.writeUInt32BE(0x46475549); header.writeInt32BE(2, 4); header[8] = 1
     files.set("bomb", Buffer.concat([header, deflateRawSync(Buffer.alloc(1024 * 1024))]))
@@ -215,17 +223,18 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     const player = await openTestRuntime(playerPage, "player", artifact.digest)
     await trackBlobs(player)
     assert.equal(await player.evaluate('Laya.loader.load("https://invalid.example/unbudgeted.png")'), null, "unvalidated Player image bypassed the resource gate")
-    const render = (id: string, image?: Buffer) => request(player, { kind: "render-artifact", source: {
+    const renderSource = (id: string, image?: Buffer, audio = wav): PlayerRenderSource => ({
       packageId: "SMOKE001", componentId: "MAIN0001", artifact: {
         ...artifact, artifactId: `budget-${id}`,
         files: [{ path: "Smoke.fui", size: (files.get(id) ?? files.get("normal")!).length, sha256: "0".repeat(64), mimeType: "application/octet-stream" },
-          ...(id === "audio" ? [{ path: "Smoke_SOUND001.wav", size: wav.length, sha256: "0".repeat(64), mimeType: "audio/wav" }] : []),
+          ...(id === "audio" ? [{ path: "Smoke_SOUND001.wav", size: audio.length, sha256: "0".repeat(64), mimeType: "audio/wav" }] : []),
           ...(image ? [{ path: "Smoke_atlas0.png", size: image.length, sha256: "0".repeat(64), mimeType: "image/png" }] : [])],
       },
       files: [{ path: "Smoke.fui", data: new Uint8Array(files.get(id) ?? files.get("normal")!).buffer },
-        ...(id === "audio" ? [{ path: "Smoke_SOUND001.wav", data: new Uint8Array(wav).buffer }] : []),
+        ...(id === "audio" ? [{ path: "Smoke_SOUND001.wav", data: new Uint8Array(audio).buffer }] : []),
         ...(image ? [{ path: "Smoke_atlas0.png", data: new Uint8Array(image).buffer }] : [])],
-    } })
+    })
+    const render = (id: string, image?: Buffer, audio = wav) => request(player, { kind: "render-artifact", source: renderSource(id, image, audio) })
     await playerPage.locator("#runtime-harness").evaluate((frame) => { frame.style.top = "5000px" })
     accepted(await render("normal"))
     accepted(await request(player, { kind: "capture" }))
@@ -248,6 +257,25 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     accepted(await render("audio"))
     assert.match(await player.evaluate('fgui.UIPackage.getById("SMOKE001").getItemById("SOUND001").file'), /^blob:/)
     assert.equal(await player.evaluate('fetch(fgui.UIPackage.getById("SMOKE001").getItemById("SOUND001").file).then(response => response.arrayBuffer()).then(bytes => bytes.byteLength)'), wav.length)
+    assert.equal(await player.evaluate('fgui.GRoot.inst.playOneShotSound("https://invalid.example/outside.wav")'), false)
+    // Observe real HTML media creation/cleanup; it must not use native Web Audio PCM loading.
+    await player.evaluate(`(() => {
+      const load = Laya.loader.load.bind(Laya.loader);
+      window.audioPcmLoads = 0;
+      Laya.loader.load = (...args) => { if (args[1] === Laya.Loader.SOUND) window.audioPcmLoads++; return load(...args); };
+      window.playedAudio = [];
+      const play = HTMLMediaElement.prototype.play;
+      HTMLMediaElement.prototype.play = function () { window.playedAudio.push(this); return play.call(this); };
+      fgui.GRoot.inst.playOneShotSound(fgui.UIPackage.getById("SMOKE001").getItemById("SOUND001").file);
+    })()`)
+    accepted(await render("normal"))
+    assert.equal(await player.evaluate("window.audioPcmLoads"), 0)
+    assert.equal(await player.evaluate("window.playedAudio.length > 0 && window.playedAudio.every(audio => audio.paused && !audio.getAttribute('src'))"), true)
+    const longWav = Buffer.alloc(44 + 31 * 8000 * 2)
+    wav.copy(longWav)
+    longWav.writeUInt32LE(longWav.length - 8, 4); longWav.writeUInt32LE(longWav.length - 44, 40)
+    rejected(await render("audio", undefined, longWav), /audio_duration_ms/)
+    await assertClean(player)
     accepted(await render("normal"))
     await assertClean(player)
     rejected(await request(player, { kind: "apply-operations", operations: repeatedOperations }), /observation_nodes/)
@@ -255,7 +283,92 @@ export async function runtimeBudgetSmoke(context: BrowserContext, origin: string
     rejected(await request(player, { kind: "observe" }), /observation_string/)
     accepted(await render("normal"))
     accepted(await request(player, { kind: "observe" }))
+    const dependencySource: PlayerRenderSource = {
+      ...renderSource("dependent"),
+      artifact: { ...artifact, artifactId: "dependency-closure", packages: [
+        { ...artifact.packages[0], dependencies: ["OTHER001"] },
+        { ...artifact.packages[0], packageId: "OTHER001", packageName: "Other", binaryPath: "Other.fui", dependencies: [] },
+        { ...artifact.packages[0], packageId: "UNUSED00", packageName: "Unused", binaryPath: "Unused.fui", dependencies: [] },
+      ], files: [
+        { path: "Smoke.fui", size: files.get("dependent")!.length, sha256: "0".repeat(64), mimeType: "application/octet-stream" },
+        { path: "Other.fui", size: files.get("other")!.length, sha256: "0".repeat(64), mimeType: "application/octet-stream" },
+        { path: "Unused.fui", size: 128 * 1024 * 1024, sha256: "0".repeat(64), mimeType: "application/octet-stream" },
+      ] },
+      files: [
+        { path: "Smoke.fui", data: new Uint8Array(files.get("dependent")!).buffer },
+        { path: "Other.fui", data: new Uint8Array(files.get("other")!).buffer },
+      ],
+    }
+    accepted(await request(player, { kind: "render-artifact", source: dependencySource }))
+    assert.equal(await player.evaluate('fgui.GRoot.inst.getChildAt(0).getChild("external").getChild("title").text'), "Budget smoke")
+    assert.equal(await player.evaluate('!!fgui.UIPackage.getById("UNUSED00")'), false)
+    accepted(await request(player, { kind: "render-artifact", source: { ...dependencySource, packageId: "OTHER001", files: dependencySource.files!.filter(file => file.path === "Other.fui") } }))
+    assert.equal(await player.evaluate('!!fgui.UIPackage.getById("SMOKE001")'), false, "switching root package retained the previous closure")
+    // Measure the actual isolated renderer, not the Workbench parent V8 heap.
+    const cdp = await context.newCDPSession(player)
+    const heap = async (gc = false) => {
+      if (gc) await cdp.send("HeapProfiler.collectGarbage")
+      const usage = await cdp.send("Runtime.getHeapUsage")
+      const native = await player.evaluate<{ resources: number; cacheEntries: number; cpuBytes: number; gpuEstimatedBytes: number; blobs: number; packages: number }>(`({ resources: Object.keys(Laya.Resource._idResourcesMap).length,
+        cacheEntries: Object.keys(Laya.Loader.loadedMap).length, cpuBytes: Laya.Resource.cpuMemory,
+        gpuEstimatedBytes: Laya.Resource.gpuMemory, blobs: window.budgetBlobs.size,
+        packages: Object.keys(fgui.UIPackage._instById).length })`)
+      return { jsHeapBytes: usage.usedSize, backingStorageBytes: usage.backingStorageSize, ...native }
+    }
+    const peak = await heap()
+    const samples = []
+    for (let cycle = 1; cycle <= 100; cycle++) {
+      const source = renderSource(cycle % 2 ? "image-a" : "image-b", png)
+      const prepared = await request(player, { kind: "prepare-artifact", source: { ...source, files: source.files!.filter(file => file.path.endsWith(".fui")) } })
+      accepted(prepared)
+      assert.deepEqual(prepared.value.files, ["Smoke_atlas0.png"])
+      accepted(await request(player, { kind: "render-artifact", source: { ...source, files: source.files!.filter(file => !file.path.endsWith(".fui")) } }))
+      const current = await heap()
+      for (const key of Object.keys(current) as Array<keyof typeof current>) peak[key] = Math.max(peak[key], current[key])
+      assert.equal(current.blobs, 1)
+      if (cycle % 10 === 0) {
+        accepted(await request(player, { kind: "unload-artifact" }))
+        const retained = await heap(true)
+        assert.equal(retained.blobs, 0)
+        assert.equal(retained.packages, 0)
+        samples.push({ cycle, ...retained })
+        console.log(`Player memory cycle ${cycle}/100: ${(retained.jsHeapBytes / 1024 / 1024).toFixed(2)} MiB JS heap`)
+      }
+    }
+    const first = samples[0], last = samples.at(-1)!
+    assert.ok(last.jsHeapBytes - first.jsHeapBytes < 4 * 1024 * 1024, "Player retained JS heap grew by more than 4 MiB")
+    assert.ok(last.backingStorageBytes - first.backingStorageBytes < 1024 * 1024, "Player retained backing stores grew by more than 1 MiB")
+    assert.ok(last.jsHeapBytes - samples[4].jsHeapBytes < 1024 * 1024, "Player did not plateau in the final 50 cycles")
+    for (const sample of samples) {
+      assert.equal(sample.resources, first.resources, "native resources did not return to the warmed baseline")
+      assert.equal(sample.cacheEntries, first.cacheEntries, "loader cache entries grew across A/B loads")
+      assert.equal(sample.gpuEstimatedBytes, first.gpuEstimatedBytes, "engine texture estimate did not return to baseline")
+    }
+    await cdp.detach()
+    await assertClean(player)
+    accepted(await render("normal"))
+
+    // Decode 128 MiB of RGBA, reject the next image before decoding, then recover.
+    const largePng = await viewer.evaluate<string>(`(() => { const canvas = document.createElement("canvas"); canvas.width = 4096; canvas.height = 2048; return canvas.toDataURL("image/png").split(",")[1]; })()`)
+    const largeImages = (count: number) => ({ ...base, assets: Array.from({ length: count }, (_, i) => {
+      const asset = withAsset(Buffer.from(largePng, "base64")).assets[0];
+      return { ...asset, resource: { ...asset.resource, id: `large${i}` } };
+    }) })
+    await viewer.evaluate(`(() => {
+      window.stressTextures = [];
+      const load = fgui.AssetProxy.inst.load.bind(fgui.AssetProxy.inst);
+      fgui.AssetProxy.inst.load = async (...args) => { const texture = await load(...args); window.stressTextures.push(texture); return texture; };
+    })()`)
+    accepted(await request(viewer, { kind: "render", scene: largeImages(4) }))
+    const decodedEstimate = await viewer.evaluate<number>("window.stressTextures.reduce((bytes, texture) => bytes + texture.width * texture.height * 4, 0)")
+    assert.equal(decodedEstimate, RUNTIME_LIMITS.decodedPixelBytes)
+    rejected(await request(viewer, { kind: "render", scene: largeImages(5) }), /decoded_pixel_bytes/)
+    accepted(await request(viewer, { kind: "render", scene: base }))
+    const recoveredEstimate = await viewer.evaluate<number>("window.stressTextures.filter(texture => !texture.destroyed).reduce((bytes, texture) => bytes + texture.width * texture.height * 4, 0)")
+    assert.equal(await viewer.evaluate("window.stressTextures.length === 8 && window.stressTextures.every(texture => texture.destroyed === true)"), true, "replacement/failure did not destroy all decoded textures")
+    assert.equal(recoveredEstimate, 0, "decoded texture handles survived replacement/failure")
     assert.deepEqual(errors, [], "budget failures escaped the command error boundary")
-    return { fuiBomb: true, giantImages: true, textures: true, sceneNodes: true, sceneDepth: true, observation: true, recoveryAndCleanup: true, offscreenCapture: true, offscreenResizedPixels: true, nonceHandshake: true, audioBlob: true }
+    return { fuiBomb: true, giantImages: true, textures: true, sceneNodes: true, sceneDepth: true, observation: true, recoveryAndCleanup: true, offscreenCapture: true, offscreenResizedPixels: true, nonceHandshake: true, audioBlob: true,
+      memory: { cycles: 100, subtexturesPerLoad: 256, dependencyClosure: true, peak, samples, decodedRgbaBudget: RUNTIME_LIMITS.decodedPixelBytes, decodedEstimate, recoveredEstimate, actualGpuMemory: "unverified; the engine GPU counter can stay zero and is not driver/VRAM measurement" } }
   } finally { await viewerPage.close(); await playerPage.close() }
 }

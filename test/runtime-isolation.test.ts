@@ -91,7 +91,7 @@ test("parent Artifact transfer enforces budgets, size, digest, cancellation and 
   await assert.rejects(readArtifactFiles({ ...artifact, files: [{ ...file, size: 2 }] }, signal), /stream_bytes/)
   const reads = requests.length
   await assert.rejects(readArtifactFiles({ ...artifact, files: [{ ...file, size: RUNTIME_LIMITS.fileBytes + 1 }] }, signal), /file_bytes/)
-  await assert.rejects(readArtifactFiles({ ...artifact, files: Array(3).fill({ ...file, size: RUNTIME_LIMITS.fileBytes }) }, signal), /encoded_bytes/)
+  await assert.rejects(readArtifactFiles({ ...artifact, files: Array.from({ length: 3 }, (_, i) => ({ ...file, path: `${i}.fui`, size: RUNTIME_LIMITS.fileBytes })) }, signal), /encoded_bytes/)
   await assert.rejects(readArtifactFiles(artifact, AbortSignal.abort()), /abort/i)
   assert.equal(requests.length, reads, "invalid budgets/cancellation must fail before reading bytes")
   fetchMock.mock.mockImplementation(async () => new Response("denied", { status: 403 }))

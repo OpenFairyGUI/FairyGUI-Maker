@@ -10,6 +10,11 @@ export const RUNTIME_LIMITS = {
   imagePixels: 8 * 1024 * 1024,
   decodedPixelBytes: 128 * 1024 * 1024,
   textures: 1_024,
+  audioFileBytes: 8 * 1024 * 1024,
+  audioEncodedBytes: 32 * 1024 * 1024,
+  audioClips: 32,
+  audioDurationMs: 30_000,
+  audioVoices: 8,
   nodes: 5_000,
   depth: 64,
   stringLength: 16_384,
@@ -90,6 +95,16 @@ export class ResourceBudget {
   decodedPixelBytes = 0
   textures = 0
   nodes = 0
+  audioEncodedBytes = 0
+  audioClips = 0
+
+  audio(bytes: number) {
+    checkBudget(bytes, RUNTIME_LIMITS.audioFileBytes, "audio_file_bytes")
+    checkBudget(this.audioEncodedBytes + bytes, RUNTIME_LIMITS.audioEncodedBytes, "audio_encoded_bytes")
+    checkBudget(this.audioClips + 1, RUNTIME_LIMITS.audioClips, "audio_clips")
+    this.audioEncodedBytes += bytes
+    this.audioClips++
+  }
 
   encoded(bytes: number) {
     checkBudget(bytes, RUNTIME_LIMITS.fileBytes, "file_bytes")

@@ -215,7 +215,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 |---|---|
 | Node.js | `>=22.18`；CI 覆盖 Node 22 与 24 |
 | OpenFairyGUI | `@openfairygui/core/backend/mcp` `0.3.1` |
-| MCP | Streamable HTTP；Viewer protocol v6 |
+| MCP | Streamable HTTP；Viewer protocol v7 |
 | Viewer / Player runtime | 冻结的 LayaAir 3.3.10 + FairyGUI Web runtime |
 | 浏览器 | 当前稳定版 Chrome 与 Edge；自动门禁使用 Chromium |
 
@@ -229,6 +229,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 pnpm install --frozen-lockfile
 pnpm build
 pnpm test
+pnpm test:memory
 ```
 
 `pnpm build` 执行 TypeScript 检查，并分别构建 React Workbench 与可直接由 Node.js 运行的 Host。完整导入、runtime 隔离与预览使用构建后的 Host 页面（默认端口 3847）；修改构建后重启 Host，以更新静态文件白名单：
@@ -238,6 +239,8 @@ pnpm dev:host
 ```
 
 `pnpm dev:web` 仅用于可信源码的前端 UI 调试，不代替 Host 的安全响应头和隔离预览验收。
+
+`pnpm test:memory` 验证 Node 的 Bundle、Base64、5,000 图片、50,000 引用与密集 Override 压力；`pnpm test:browser` 包含 Player 100 次 A/B 加载/卸载、图片解码上限和音频回收。测量方法、门禁阈值与未验证的 GPU 指标见 [T3 内存压力验收](./docs/memory-stress.md)。
 
 完整发布门禁还会安装真实 npm tarball 并启动其中的 CLI，以及在 Chromium 中验证 Viewer/Player 像素 Golden、Import Draft Visual Evidence 与交付/隔离故障回归：
 
