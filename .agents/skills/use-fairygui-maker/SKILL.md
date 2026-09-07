@@ -33,10 +33,10 @@ Use the registered OpenFairyGUI MCP prompts when the client exposes them. They d
 ## Inspect or edit a project
 
 1. Call `openfairygui_backend_open_session` with the authorized `projectPath` and record the returned `sessionId`.
-2. Call `openfairygui_backend_get_session`. Read the current revision, UAM project, stable resource IDs, and diagnostics.
+2. Call `openfairygui_backend_get_session` for revision/dirty/save metadata and `openfairygui_backend_get_project_outline` for stable resource and node IDs. Published Backend 0.3.1 does not expose current entity properties or full UAM through these calls; property readback is tracked in [OpenFairyGUI #129](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/129). If a change depends on an unknown current value, report this limitation rather than guessing.
 3. Plan the smallest UAM operation batch supported by the current contract. Do not invent selector or operation grammar at the MCP layer.
 4. Call `openfairygui_backend_apply_transaction` with `sessionId`, the observed `expectedRevision`, and the operation batch.
-5. Fetch the session again and verify both the new revision and the intended model change.
+5. Fetch the session and outline again to verify the new revision and any observable identity changes; call `openfairygui_backend_validate_session` for structural diagnostics. These checks do not verify changed text, geometry, or other properties in Backend 0.3.1. Report property readback as unavailable; do not claim a model change was independently verified just because the transaction succeeded.
 6. Before `openfairygui_backend_save_session`, ensure the user has requested persistence or overwriting. An explicit edit-and-save request allows requesting a Host grant; a read-only or preview request does not. Chat authorization alone does not bypass the Host gate.
 7. Always send the observed `expectedRevision`, including for force-save or materialization. On `save_approval_required`, report the request ID, target, revision, options and Workbench `approvalPath`; ask the Host owner to confirm there using their separate approval token. Keep the backend session open while awaiting this decision. Do not obtain, read, print or supply that token yourself, approve via REST/browser automation, or bypass the gate using filesystem tools or another backend.
 8. After owner confirmation, retry the identical tool arguments once. Grants expire five minutes after request creation and are consumed before execution, even on failed or uncertain writes. Re-read state after failure; never silently request and approve another grant. Changed revision/options, closure, rejection or revocation require a fresh request and owner decision. Preserve backend partial-save/error envelopes; a consumed grant does not prove success.
@@ -65,6 +65,8 @@ Then:
 Use the MCP `image/png` content attached to render and capture results; do not copy or parse raw screenshot Base64. For component evidence, never substitute a browser page screenshot: it includes Workbench chrome and is not bound to `stateVersion`. Capture the whole browser only when the task is specifically auditing the Workbench interface itself.
 
 Viewer updates never change the `.fairy` project. Persist project changes only through a backend revision-checked transaction and save.
+
+Viewer reads saved files or the CLI's frozen snapshot, not pending Backend edits. There is no public Backend-revision preview bridge in 0.3.1; this is tracked in [OpenFairyGUI #130](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/130). Do not read private runtime fields, mirror Backend transactions, or save solely to work around this limitation. After an explicitly requested and approved save, refresh the browser source or restart the CLI snapshot before validating the saved result.
 
 ## Validate a published Artifact in Player
 

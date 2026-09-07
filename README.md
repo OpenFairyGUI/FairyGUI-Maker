@@ -199,6 +199,8 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 
 ## 当前状态与边界
 
+- 已发布 Backend `0.3.1` 的 `get_session` 返回会话元数据，`get_project_outline` 返回稳定身份；当前属性读取需等待 [OpenFairyGUI #129](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/129) 的正式接口发布。事务成功和 revision 变化不能代替属性读回验证。
+- Viewer 尚不读取 Backend 未保存的会话 revision；公开预览快照接口跟踪 [OpenFairyGUI #130](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/130)。当前只能在用户明确要求并批准保存后，刷新文件来源验证已保存结果。Maker 不反射上游私有状态或维护第二套事务模型。
 - Host 只绑定 `127.0.0.1`，并校验 Host、Origin 和访问令牌。
 - 同一 Host 最多保留 32 个 MCP session；客户端应正常发送 MCP `DELETE` 关闭不再使用的 session。
 - Host 强制执行一次性保存授权；仅持有 MCP token 或普通 Workbench Cookie 不能批准保存。授权状态仅存内存，最多保留 128 条记录。
