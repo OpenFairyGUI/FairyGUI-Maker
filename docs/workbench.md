@@ -639,7 +639,7 @@ REST handler 与 MCP tools 调用同一组应用函数，不分别实现发布�
 | `list_viewer_components` | 列出 Viewer 工程、稳定入口及当前 renderer 上报的 package/component ID；未打开 Viewer 时提示 `browserRequired` |
 | `render_component_preview` | 在已打开 Viewer 渲染工程组件；可同时返回 PNG |
 | `inspect_project_assets` | 返回固定 revision 的资源健康摘要；传入 package/resource ID 时返回该资源的 incoming/outgoing 引用和问题 |
-| `list_artifact_components` | 列出不可变 Artifact 及其 package/component ID |
+| `list_artifact_components` | 分页列出不可变 Artifact 摘要；指定 artifactId 后分页读取 package/component ID |
 | `open_artifact_player` | 返回 Player URL 和当前 render session（若页面已打开） |
 | `render_artifact_component` | 在已打开 Player 通过原生 `UIPackage` 渲染组件；可同时返回 PNG |
 | `update_render_session` | 应用白名单 operation，返回新的 state version 或版本冲突 |
@@ -670,6 +670,10 @@ Viewer / Player 当前没有新增自定义 MCP resource。Artifact manifest 和
 ### T6：诊断、可信度与按需维护
 
 分析快照、REST GET/PUT 返回和 MCP `inspect_project_assets` 的摘要/单资源结果统一声明 `analysisOwner: "browser"`、`trust: "advisory"`，即使项目源快照由 Host 持有，分析仍由浏览器完成。Host 校验结构、预算、稳定 ID、引用计数与 revision，不重算哈希/引用或担保结论。schemaVersion 仍为 1：旧上传可省略这两个字段，Host 补上固定值；伪称 `host` / `verified` 会被拒绝。单资源问题也受 `limit` 限制，并返回 `issuesTotal` / `issuesTruncated`，避免大量 URL 诊断撑大 Agent 响应。
+
+`inspect_project_assets` 和 `list_artifact_components` 接受 `limit: 1–500`（默认 100）与 `cursor`。保持原查询条件，携带上一页 `nextCursor` 继续，直到返回 `null`；快照或查询条件变化返回 `cursor_invalid_or_stale`，应从第一页重查。资源单项查询对 issues、incoming、outgoing 同步翻页，各自保留 total；顶层 total 是三者最大长度。问题摘要最多展示 20 个 resourceKeys，但提供绑定快照的 `issueId`：改用 `{projectId, issueId, limit, cursor?}` 可完整分页读取该问题关联的 resourceKeys，不与 packageId/resourceId 混用。重新扫描后旧 issueId 返回 `issue_invalid_or_stale`。
+
+Artifact 查询未指定 artifactId 时返回分页摘要（含 packageCount/componentCount），不内嵌完整组件。选定 artifactId 后返回分页 packages/components；同一包可出现在多页，按 packageId 合并。catalog 的 total 按组件计数，空包占一个目录项以保留发现能力。游标也绑定来源声明和完整目录，防止重复导入更新标签时混用旧页；Host 不再把可发现 Artifact 截断为最近 100 个。
 
 - `invalid-url`：无法解析的 `ui://` 值保留来源路径和关联资源，不再静默丢弃，也不混入 missing 计数。当前只解析 8 位包 ID 加资源 ID 的形式；名称路径式 URL 属于尚未解析，不宣称所有此类 URL 在原生 runtime 中非法。项目 settings 问题没有资源 key，仍显示在工程问题清单。
 - `unreachable`：从所有导出资源与项目 settings 出发，遍历跨包引用、Controller/Transition URL 和 branchItemIds，标记未到达的私有组件；私有循环不会因有入站引用而漏报。未使用非组件资源仍沿用原有零入站语义，未扩展为自动清理策略。

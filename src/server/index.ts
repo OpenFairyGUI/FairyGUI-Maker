@@ -809,7 +809,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
         renderBroker,
         (projectId) => projects.get(projectId),
         (artifactId) => artifactStore.get(artifactId),
-        () => artifactStore.list(100).map(({ artifactId }) => artifactStore.get(artifactId)!),
+        () => artifactStore.list(artifactStore.count()).map(({ artifactId }) => artifactStore.get(artifactId)!),
         () => [...projects.values()],
         (projectId) => assetAnalyses.get(projectId),
       )

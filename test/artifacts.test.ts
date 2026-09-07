@@ -4,6 +4,8 @@ import { link, mkdir, mkdtemp, open, readFile, readdir, rename, rm, symlink, unl
 import { tmpdir } from "node:os"
 import path from "node:path"
 import test from "node:test"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { Document } from "@openfairygui/core"
 import { NodeIO } from "@openfairygui/core/node"
 import { ARTIFACT_VERIFICATION, type ArtifactBlob, type ArtifactManifest } from "../src/artifact-protocol"
@@ -29,6 +31,42 @@ async function pending(store: ArtifactStore, files: Map<string, Buffer>, name = 
   for (const [name, data] of files) await store.writeImportFile(created.importId, name, data)
   return created.importId
 }
+
+test("Host MCP discovers artifacts beyond the previous 100-item cap", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "maker-artifact-pagination-"))
+  const store = new ArtifactStore(root)
+  const client = new Client({ name: "artifact-pagination-test", version: "1.0.0" })
+  let host: Awaited<ReturnType<typeof startMakerHost>> | undefined
+  try {
+    const files = await fixture(root)
+    await store.init()
+    const expected = new Set<string>()
+    for (let index = 0; index < 101; index++) {
+      files.set("nested/data.bin", Buffer.from(`artifact ${index}`))
+      const artifact = await store.completeImport(await pending(store, files), "http://localhost")
+      expected.add(artifact!.artifactId)
+    }
+    host = await startMakerHost({ port: 0, dataDir: root })
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${host.origin}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${host.token}` } } }))
+    const found: string[] = []
+    let cursor: string | null = null
+    do {
+      const result = await client.callTool({ name: "list_artifact_components", arguments: { limit: 100, ...(cursor ? { cursor } : {}) } })
+      const page = JSON.parse((result.content as { text: string }[])[0].text)
+      assert.equal(page.total, 101)
+      found.push(...page.artifacts.map((artifact: { artifactId: string }) => artifact.artifactId))
+      cursor = page.nextCursor
+      assert.ok(found.length <= 101)
+    } while (cursor)
+    assert.equal(found.length, 101)
+    assert.deepEqual(new Set(found), expected)
+  } finally {
+    await client.close()
+    await host?.close()
+    await store.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test("Artifact HTTP keeps distinct import records, bounded summaries/catalog pages and idempotent completion across restart", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "maker-artifact-records-"))

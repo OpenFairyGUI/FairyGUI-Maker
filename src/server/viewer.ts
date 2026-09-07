@@ -584,6 +584,14 @@ function wireFingerprint(value: unknown) {
   ))).digest("hex")
 }
 
+const cursorSchema = z.string().regex(/^[a-f0-9]{64}:[0-9]{1,15}$/)
+
+function queryPage(fingerprint: string, cursor: string | undefined, limit: number, total: number) {
+  const offset = cursor ? Number(cursor.split(":")[1]) : 0
+  if (cursor && (!cursor.startsWith(`${fingerprint}:`) || !Number.isSafeInteger(offset) || offset >= total)) return null
+  return { offset, total, nextCursor: offset + limit < total ? `${fingerprint}:${offset + limit}` : null }
+}
+
 export function registerViewerMcpTools(
   server: McpServer,
   broker: ViewerRenderBroker,
@@ -690,16 +698,18 @@ export function registerViewerMcpTools(
 
   server.registerTool("inspect_project_assets", {
     title: "Inspect FairyGUI project assets",
-    description: "Read browser-owned, advisory Asset Manager analysis for a fixed revision, or inspect references for one stable package/resource ID. Host validates structure, not the analysis conclusions; this is not proof that resources can be safely deleted.",
+    description: "Page browser-owned advisory issues or one resource's references. Repeat identical selectors with nextCursor until null; use issueId to page all affected resource keys. Cursors bind the analysis snapshot. This is not proof that resources can be safely deleted.",
     inputSchema: z.object({
       projectId: z.string().min(1),
       packageId: z.string().regex(ASSET_RESOURCE_ID_PATTERN).optional(),
       resourceId: z.string().regex(ASSET_RESOURCE_ID_PATTERN).optional(),
       direction: z.enum(["incoming", "outgoing", "both"]).default("both"),
       limit: z.number().int().min(1).max(500).default(100),
+      cursor: cursorSchema.optional(),
+      issueId: cursorSchema.optional().describe("Read all resource keys for a snapshot-bound issueId returned by an earlier inspection."),
     }),
     annotations: { readOnlyHint: true },
-  }, async ({ projectId, packageId, resourceId, direction, limit }) => {
+  }, async ({ projectId, packageId, resourceId, direction, limit, cursor, issueId }) => {
     const project = getProject(projectId)
     if (!project) return toolResult({ ok: false, code: "project_not_found", projectId }, true)
     const analysis = getAssetAnalysis(projectId)
@@ -717,17 +727,29 @@ export function registerViewerMcpTools(
       return toolResult({ ok: false, code: "invalid_resource_selector", message: "packageId and resourceId must be provided together." }, true)
     }
 
+    const snapshot = wireFingerprint(analysis)
+    const fingerprint = wireFingerprint({ snapshot, projectId, packageId, resourceId, direction, issueId })
+    const common = { ok: true, projectId, sourceRevision: analysis.sourceRevision, analysisOwner: analysis.analysisOwner, trust: analysis.trust, assetManagerUrl: project.assetManagerUrl }
+    const invalidCursor = () => toolResult({ ok: false, code: "cursor_invalid_or_stale", message: "Restart this query without a cursor; its snapshot or selector changed." }, true)
+    if (issueId) {
+      if (packageId || resourceId) return toolResult({ ok: false, code: "invalid_resource_selector", message: "Use issueId without packageId/resourceId." }, true)
+      const issueIndex = Number(issueId.split(":")[1])
+      const issue = analysis.issues[issueIndex]
+      if (!issueId.startsWith(`${snapshot}:`) || !issue) return toolResult({ ok: false, code: "issue_invalid_or_stale" }, true)
+      const page = queryPage(fingerprint, cursor, limit, issue.resourceKeys.length)
+      if (!page) return invalidCursor()
+      return toolResult({ ...common, ...page, issue: compactAssetIssue(issue, issueId), resourceKeys: issue.resourceKeys.slice(page.offset, page.offset + limit), truncated: page.nextCursor !== null })
+    }
+
     if (!packageId || !resourceId) {
+      const page = queryPage(fingerprint, cursor, limit, analysis.issues.length)
+      if (!page) return invalidCursor()
       return toolResult({
-        ok: true,
-        projectId,
-        sourceRevision: analysis.sourceRevision,
-        analysisOwner: analysis.analysisOwner,
-        trust: analysis.trust,
-        assetManagerUrl: project.assetManagerUrl,
+        ...common,
+        ...page,
         summary: summarizeAssetAnalysis(analysis),
-        issues: analysis.issues.slice(0, limit).map(compactAssetIssue),
-        truncated: analysis.issues.length > limit,
+        issues: analysis.issues.slice(page.offset, page.offset + limit).map((issue, index) => compactAssetIssue(issue, `${snapshot}:${page.offset + index}`)),
+        truncated: page.nextCursor !== null,
       })
     }
 
@@ -735,44 +757,53 @@ export function registerViewerMcpTools(
     const resource = analysis.resources.find((candidate) => candidate.key === key)
     if (!resource) return toolResult({ ok: false, code: "resource_not_found", projectId, packageId, resourceId }, true)
     const resourceByKey = new Map(analysis.resources.map((candidate) => [candidate.key, candidate]))
-    const issues = analysis.issues.filter(({ resourceKeys }) => resourceKeys.includes(key))
+    const issues = analysis.issues.flatMap((issue, index) => issue.resourceKeys.includes(key) ? [{ issue, issueId: `${snapshot}:${index}` }] : [])
     const incoming = direction === "outgoing" ? [] : analysis.references.filter(({ targetKey }) => targetKey === key)
     const outgoing = direction === "incoming" ? [] : analysis.references.filter(({ sourceKey }) => sourceKey === key)
+    const page = queryPage(fingerprint, cursor, limit, Math.max(issues.length, incoming.length, outgoing.length))
+    if (!page) return invalidCursor()
     const compactReference = (reference: ProjectAssetAnalysis["references"][number]) => ({
       ...reference,
       source: reference.sourceKey === "project" ? { key: "project", name: "Project settings" } : resourceByKey.get(reference.sourceKey) ?? { key: reference.sourceKey, missing: true },
       target: resourceByKey.get(reference.targetKey) ?? { key: reference.targetKey, missing: true },
     })
     return toolResult({
-      ok: true,
-      projectId,
-      sourceRevision: analysis.sourceRevision,
-      analysisOwner: analysis.analysisOwner,
-      trust: analysis.trust,
-      assetManagerUrl: project.assetManagerUrl,
+      ...common,
+      ...page,
       resource,
-      issues: issues.slice(0, limit).map(compactAssetIssue),
+      issues: issues.slice(page.offset, page.offset + limit).map(({ issue, issueId }) => compactAssetIssue(issue, issueId)),
       issuesTotal: issues.length,
-      issuesTruncated: issues.length > limit,
+      issuesTruncated: issues.length > page.offset + limit,
       references: {
-        incoming: incoming.slice(0, limit).map(compactReference),
-        outgoing: outgoing.slice(0, limit).map(compactReference),
+        incoming: incoming.slice(page.offset, page.offset + limit).map(compactReference),
+        outgoing: outgoing.slice(page.offset, page.offset + limit).map(compactReference),
         incomingTotal: incoming.length,
         outgoingTotal: outgoing.length,
-        truncated: incoming.length > limit || outgoing.length > limit,
+        truncated: incoming.length > page.offset + limit || outgoing.length > page.offset + limit,
       },
     })
   })
 
   server.registerTool("list_artifact_components", {
     title: "List published FairyGUI artifact components",
-    description: "List immutable published-format artifacts and their native IDs. Host validates content, but source labels/project revisions are client declarations, not proof of a publish operation.",
-    inputSchema: z.object({ artifactId: z.string().min(1).optional() }),
+    description: "Page artifact summaries, then pass artifactId to page its package/component catalog. Repeat the same query with nextCursor until null. Host validates content; source labels are client declarations, not publishing proof.",
+    inputSchema: z.object({ artifactId: z.string().min(1).optional(), limit: z.number().int().min(1).max(500).default(100), cursor: cursorSchema.optional() }),
     annotations: { readOnlyHint: true },
-  }, async ({ artifactId }) => {
-    const artifacts = artifactId ? [getArtifact(artifactId)].filter((value): value is PlayerArtifact => value !== null) : listArtifacts()
+  }, async ({ artifactId, limit, cursor }) => {
+    const artifacts = artifactId ? [getArtifact(artifactId)].filter((value): value is PlayerArtifact => value !== null) : listArtifacts().sort((a, b) => a.artifactId.localeCompare(b.artifactId))
     if (artifactId && artifacts.length === 0) return toolResult({ ok: false, code: "artifact_not_found", artifactId }, true)
-    return toolResult({ ok: true, artifacts: artifacts.map(({ artifactId: id, playerUrl, digest, packages, source, verification }) => ({ artifactId: id, playerUrl, digest, packages, source, verification })) })
+    const fingerprint = wireFingerprint({ artifactId, artifacts })
+    const entries = artifactId ? artifacts[0].packages.flatMap((pkg) => (pkg.components.length ? pkg.components : [null]).map((component) => ({ pkg, component }))) : []
+    const page = queryPage(fingerprint, cursor, limit, artifactId ? entries.length : artifacts.length)
+    if (!page) return toolResult({ ok: false, code: "cursor_invalid_or_stale", message: "Restart this query without a cursor; its catalog or selector changed." }, true)
+    return toolResult({ ok: true, ...page, pageKind: artifactId ? "catalog" : "artifacts", artifacts: (artifactId ? artifacts : artifacts.slice(page.offset, page.offset + limit)).map(({ artifactId: id, playerUrl, digest, packages, source, verification }) => {
+      const selected = entries.slice(page.offset, page.offset + limit)
+      return {
+        artifactId: id, playerUrl, digest, source, verification,
+        packageCount: packages.length, componentCount: packages.reduce((count, pkg) => count + pkg.components.length, 0),
+        ...(artifactId ? { packages: [...new Set(selected.map(({ pkg }) => pkg))].map((pkg) => ({ ...pkg, components: selected.flatMap((entry) => entry.pkg === pkg && entry.component ? [entry.component] : []) })) } : {}),
+      }
+    }) })
   })
 
   server.registerTool("open_artifact_player", {
@@ -851,8 +882,9 @@ export function registerViewerMcpTools(
   })
 }
 
-function compactAssetIssue(issue: ProjectAssetAnalysis["issues"][number]) {
+function compactAssetIssue(issue: ProjectAssetAnalysis["issues"][number], issueId: string) {
   return {
+    issueId,
     kind: issue.kind,
     severity: issue.severity,
     label: issue.label,

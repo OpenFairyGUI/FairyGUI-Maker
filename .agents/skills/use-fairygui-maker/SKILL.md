@@ -71,7 +71,7 @@ Viewer reads saved files or the CLI's frozen snapshot, not pending Backend edits
 ## Validate a published Artifact in Player
 
 1. Start from a real published directory imported through Workbench or its authorized Artifact REST flow. Do not claim Maker published it; automatic publishing is not implemented.
-2. Call `list_artifact_components`, optionally with `artifactId`, and use the returned immutable `artifactId`, digest, package IDs, and component IDs.
+2. Call `list_artifact_components` to page artifact summaries, then pass `artifactId` to page its package/component catalog. Repeat the same selectors with `nextCursor` until it is `null`; `limit` is 1–500 (default 100). Use the returned immutable `artifactId`, digest, package IDs, and component IDs. On `cursor_invalid_or_stale`, restart that query without the cursor.
 3. Call `open_artifact_player`. If no render session exists, open the returned `playerUrl` in a real browser.
 4. Call `render_artifact_component` with stable IDs and `capture: true` when visual evidence is required.
 5. Use `get_render_observation`, `update_render_session`, and `capture_render_screenshot` with the returned render-session and state versions.
