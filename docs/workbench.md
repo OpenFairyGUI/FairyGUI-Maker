@@ -78,7 +78,7 @@ Agent 不直接操作 iframe 或 Canvas。它只向 Host 提交语义命令，�
 | 交互语义 | Maker 解释 UAM Controller/Gear/Transition 与常用控件 | 发布 runtime 执行原生 Controller/Gear/Transition 与控件行为 |
 | 持久化 | 工程和临时运行态都不写回；session 仅 Host 内存 | Artifact 内容寻址并持久化；session 仍仅 Host 内存 |
 
-Backend 会话还可通过 `open_session_preview` 或 Dashboard 的“预览会话”进入 Viewer。此来源使用公开 `readSessionState` / `readResourceBytes` 读取指定 revision 的未保存模型及所选组件资源；编辑、保存和关闭会话使旧 renderer 失效。Host 不另存权威 UAM。接口、预算及当前上游 MCP 组合阻断见[会话预览接入验收](./session-preview.md)。
+Backend 会话还可通过 `open_session_preview` 或 Dashboard 的“预览会话”进入 Viewer。此来源使用公开 `readSessionState` / `readResourceBytes` 读取指定 revision 的未保存模型及所选组件资源；编辑、保存和关闭会话使旧 renderer 失效。Host 不另存权威 UAM。接口、预算及读回、预览、授权保存的完整流程见[会话预览接入验收](./session-preview.md)。
 
 当前共享协议为 v7，分成两层：Host 与 Workbench 页面通过 `/api/renderers`、命令长轮询、结果 ACK 和 interaction 上报通信；Renderer 与不透明源 iframe 通过绑定父窗口、来源和一次性 nonce 的 `MessageChannel` 通信。Host 命令统一为 `render / update / view / observe / capture`，Renderer 再分别转换为 Viewer 的 `render` 或 Player 的 `prepare-artifact / render-artifact / unload-artifact`，因此共享控制面不会把两种 renderer 混为一套。Workbench 控件不持有可直接修改 iframe 的 FrameSession。
 
@@ -238,7 +238,7 @@ Host 同步校验身份和旧 revision：冲突 `409`，不自动重放；相同
 
 ### 2.10 Host Save Grant（批次 15）
 
-完整 Host 的共享 Runtime Proxy 拦截 `saveSession` 与 `materializeSession`，包括 `force: true`、`mode: "materializeCleanSession"` 的完整物化路径。`applyTransaction` 继续仅修改 backend 内存；第一次保存调用产生 Approval Request 并返回 MCP `isError: true` / `backendResult.ok: false` / `error.code: "save_approval_required"`，不会调用 backend 写方法。
+完整 Host 通过上游公开 `toolPolicies` 分别配置 `save_session` 与 `materialize_session`，包括 `force: true`、`mode: "materializeCleanSession"` 的完整物化路径。`beforeCall` 只检查并消费授权；返回 `undefined` 后由 MCP 调用原 Backend 一次。共享 Runtime Proxy 保留结果跟踪、关闭保护和预览失效，不再执行授权检查。`applyTransaction` 继续仅修改 Backend 内存；第一次保存调用产生 Approval Request，并通过声明的 `failureSchema` 返回 MCP `isError: true` / `backendResult.ok: false` / `error.code: "save_approval_required"`，不会调用 Backend 写方法。
 
 1. Agent 提交明确的 `sessionId + expectedRevision` 和保存选项。Host 额外要求 revision 必填，普通保存和 force-save 都不能省略。
 2. 所有者在 `/#save-approvals` 核对请求 ID、会话、revision、目标、force/mode/reason 与 operation SHA-256，再输入独立确认密钥选择批准或拒绝。
@@ -256,7 +256,9 @@ X-Maker-Approval-Token: <owner-only credential>
 { "decision": "approve" | "reject" | "revoke" }
 ```
 
-两条接口仍经过 Host/Origin 与原 bearer/HttpOnly Cookie 认证。决定接口另用恒定时间比较独立的所有者凭证；仅有 MCP token、普通 Cookie、伪造浏览器请求头或已知 grant ID 都不能创建授权。决定对象不存在返回 `404`，终态/过期/旧 revision 返回 `409`，凭证缺失或错误返回 `403`。不新增 MCP 批准工具，不改上游 MCP schema；grant 隐式绑定到规范化的固定操作字段，而不是靠 Agent 提交任意 grant ID。
+两条接口仍经过 Host/Origin 与原 bearer/HttpOnly Cookie 认证。决定接口另用恒定时间比较独立的所有者凭证；仅有 MCP token、普通 Cookie、伪造浏览器请求头或已知 grant ID 都不能创建授权。决定对象不存在返回 `404`，终态/过期/旧 revision 返回 `409`，凭证缺失或错误返回 `403`。不新增 MCP 批准工具；Host 失败仅扩展所选工具的输出分支，Backend 结果仍通过上游原有 schema。grant 隐式绑定到规范化的固定操作字段，而不是靠 Agent 提交任意 grant ID。
+
+会话不可用时，Host 返回 `save_session_unavailable` 并停止调用；不会在无法绑定会话的情况下放行写入。Host 指引通过公开 `instructions` 参数传入初始化握手，工具发现和注册生命周期由 MCP SDK 处理。
 
 `FAIRYGUI_MAKER_APPROVAL_TOKEN` 可由所有者在 Host 环境中配置（24–256 字符，不得与访问 token 相同）；未配置时每次启动随机生成，仅在完整模式的交互 stdout 中显示。非交互启动不输出随机密钥，没有预设独立凭证则无法批准，需要由所有者重新配置/交互启动。可信嵌入调用者可使用 `startMakerHost({ approvalToken })`，返回值也包含随机密钥；HTTP/MCP/status/list 不返回该密钥。Workbench 使用 password 输入，不把它放进 URL、Cookie、Storage 或 Query/Mutation 缓存，决定请求发出前清空输入。
 

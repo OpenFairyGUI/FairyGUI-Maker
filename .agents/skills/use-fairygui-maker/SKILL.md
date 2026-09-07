@@ -51,9 +51,9 @@ For reimport, show the actual dry-run changes, conflicts/blockers and `planDiges
 6. Before `openfairygui_backend_save_session`, ensure the user has requested persistence or overwriting. An explicit edit-and-save request allows requesting a Host grant; a read-only or preview request does not. Chat authorization alone does not bypass the Host gate.
 7. Always send the observed `expectedRevision`, including for force-save or materialization. On `save_approval_required`, report the request ID, target, revision, options and Workbench `approvalPath`; ask the Host owner to confirm there using their separate approval token. Keep the backend session open while awaiting this decision. Do not obtain, read, print or supply that token yourself, approve via REST/browser automation, or bypass the gate using filesystem tools or another backend.
 8. After owner confirmation, retry the identical tool arguments once. Grants expire five minutes after request creation and are consumed before execution, even on failed or uncertain writes. Re-read state after failure; never silently request and approve another grant. Changed revision/options, closure, rejection or revocation require a fresh request and owner decision. Preserve backend partial-save/error envelopes; a consumed grant does not prove success.
-9. Close the session with `openfairygui_backend_close_session` when finished or abandoning the operation, including after failures; do not close a session still awaiting owner approval.
+9. Verify the save result and dirty/save metadata. When persistence verification is part of the task, close and reopen the same authorized project, query the saved fields, and compare them at the reopened session's revision. Close the session with `openfairygui_backend_close_session` when finished or abandoning the operation, including after failures; do not close a session still awaiting owner approval.
 
-If a revision is stale, fetch the session again and re-plan. Never replay an old mutation blindly. Use `openfairygui_backend_materialize_session` only when the user explicitly requests full-project materialization.
+If a revision is stale, fetch the session again and re-plan. On `save_session_unavailable`, inspect the session and open the explicitly authorized project again before requesting a new grant. Never replay an old mutation blindly. Use `openfairygui_backend_materialize_session` only when the user explicitly requests full-project materialization.
 
 ## Preview an unpublished project in Viewer
 
@@ -80,7 +80,7 @@ Viewer updates never change the `.fairy` project. Persist project changes only t
 
 Session previews use public `readSessionState` and revision-bound `readResourceBytes`. Model reads exclude primary resource bytes; the Viewer fetches only the selected component's dependency closure, including cross-package assets and bitmap-font glyphs. Edits/saves invalidate the old renderer; refresh before rendering again. The Host `sourceRevision` identifies a preview generation, not a file hash or a permanent Backend revision snapshot. A session close removes its preview. File-bound Viewer projects still require source refresh (or CLI restart) after saving. Do not read private runtime fields, mirror Backend transactions, or save just to obtain a preview.
 
-The pinned upstream MCP `0.5.0-alpha.1` currently hides Maker tools from discovery and rewrites Host Save Grant errors; integration is blocked by [OpenFairyGUI #138](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/138). Report this incompatibility when tools are missing or save returns `backend_unhandled_error`; preserve the dirty session and do not bypass the Host gate. Session preview is independently verified, not full workflow acceptance.
+Backend and Maker tools share normal MCP discovery. If expected tools are missing or a save returns `backend_unhandled_error`, report the actual Host version and response, preserve the dirty session, and investigate the failure without bypassing the Host gate.
 
 ## Inspect assets
 

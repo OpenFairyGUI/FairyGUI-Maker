@@ -23,6 +23,12 @@ test("evidence gates reject a changed pixel, dimensions, unexpected browser fail
   const invalidated: BrowserDiagnostic = { phase: "import-iteration", kind: "http", status: 404, message: "GET 404", url: "http://localhost/api/render-sessions/render-id/commands" }
   assertDiagnostics([invalidated])
   assertDiagnostics([{ ...invalidated, phase: "session-preview" }])
+  assertDiagnostics([{ ...invalidated, phase: "save-grants" }])
+  assert.equal(expectedDiagnostic({ ...invalidated, phase: "save-grants", status: 500 }), undefined)
+  const approvalQuery: BrowserDiagnostic = { phase: "save-grants", kind: "requestfailed", method: "GET", url: "http://localhost/api/save-approvals", message: "net::ERR_ABORTED", resourceType: "fetch", navigation: false }
+  assertDiagnostics([approvalQuery])
+  assert.equal(expectedDiagnostic({ ...approvalQuery, message: "net::ERR_FAILED" }), undefined)
+  assert.equal(expectedDiagnostic({ ...approvalQuery, url: "http://localhost/api/sessions" }), undefined)
   assert.equal(expectedDiagnostic({ ...invalidated, phase: "session-preview", status: 500 }), undefined)
   assert.equal(expectedDiagnostic({ ...invalidated, url: "http://localhost/api/renderers" }), undefined)
   assert.equal(expectedDiagnostic({ ...invalidated, status: 500 }), undefined)

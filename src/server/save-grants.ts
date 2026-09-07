@@ -16,24 +16,28 @@ const saveInputs = {
   materializeSession: z.object({ ...commonInput, mode: z.literal("fullProject").optional(), reason: z.string().min(1).max(1_000).optional() }).strict(),
 }
 
-export type SaveApproval = {
-  approvalRequestId: string
-  sessionId: string
-  revision: number
-  operation: SaveOperation
-  canonicalProjectPath: string
-  targetPath: string | null
-  force: boolean
-  mode: string | null
-  reason: string | null
-  operationDigest: string
-  status: "pending" | "approved" | "consumed" | "rejected" | "revoked" | "expired" | "stale"
-  createdAt: string
-  expiresAt: string
-  approvalGrantId?: string
-  decidedAt?: string
-  consumedAt?: string
-}
+const saveApprovalSchema = z.strictObject({
+  approvalRequestId: z.string().uuid(), sessionId: commonInput.sessionId, revision: commonInput.expectedRevision,
+  operation: z.enum(["saveSession", "materializeSession"]), canonicalProjectPath: z.string().max(4_096),
+  targetPath: z.string().max(4_096).nullable(), force: z.boolean(), mode: z.string().nullable(), reason: z.string().max(1_000).nullable(),
+  operationDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  status: z.enum(["pending", "approved", "consumed", "rejected", "revoked", "expired", "stale"]),
+  createdAt: z.string().datetime(), expiresAt: z.string().datetime(), approvalGrantId: z.string().uuid().optional(),
+  decidedAt: z.string().datetime().optional(), consumedAt: z.string().datetime().optional(),
+})
+export type SaveApproval = z.infer<typeof saveApprovalSchema>
+
+export const saveGrantFailureSchema = z.strictObject({
+  ok: z.literal(false),
+  meta: z.strictObject({
+    requestId: z.string().uuid(), durationMs: z.number().nonnegative(), warnings: z.tuple([]), diagnostics: z.tuple([]),
+    stage: z.literal("runtime"), contractVersion: z.literal(BACKEND_CONTRACT_VERSION), capabilitySchemaVersion: z.literal(BACKEND_CAPABILITY_SCHEMA_VERSION),
+  }),
+  error: z.strictObject({
+    code: z.enum(["save_input_invalid", "save_target_invalid", "save_session_unavailable", "save_session_closing", "save_revision_stale", "save_approval_limit", "save_approval_required"]),
+    message: z.string(), approval: saveApprovalSchema.optional(), approvalPath: z.literal("/#save-approvals").optional(),
+  }),
+})
 
 export function hostBackendFailure(code: string, message: string, approval?: SaveApproval) {
   return {
@@ -53,7 +57,7 @@ export class HostSaveGrants {
   private readonly requests = new Map<string, SaveApproval>()
   private readonly closing = new Map<string, number>()
 
-  constructor(private readonly runtime: Pick<OpenFairyGuiBackendRuntime, "getSession" | "saveSession" | "materializeSession">) {}
+  constructor(private readonly runtime: Pick<OpenFairyGuiBackendRuntime, "getSession">) {}
 
   list() {
     this.prune()
@@ -101,12 +105,12 @@ export class HostSaveGrants {
     return { approval: { ...request } }
   }
 
-  execute(operation: SaveOperation, input: unknown) {
+  authorize(operation: SaveOperation, input: unknown) {
     const parsed = saveInputs[operation].safeParse(input)
     if (!parsed.success) return hostBackendFailure("save_input_invalid", "Host saves require an explicit nonnegative expectedRevision and bounded save options. Read getSession and retry with supported arguments.")
     const { sessionId, expectedRevision: revision } = parsed.data
     const snapshot = this.runtime.getSession({ sessionId })
-    if (!snapshot.ok) return snapshot
+    if (!snapshot.ok) return hostBackendFailure("save_session_unavailable", "The session is unavailable; open the project before requesting save approval.")
     if (snapshot.data.canonicalProjectPath.length > 4_096) return hostBackendFailure("save_target_invalid", "The session target exceeds the Host approval path limit.")
     if (this.closing.has(sessionId)) return hostBackendFailure("save_session_closing", "The session is closing; no save can be approved.")
     if (snapshot.data.revision !== revision) return hostBackendFailure("save_revision_stale", "The session revision changed. Read getSession and re-plan before requesting approval.")
@@ -121,12 +125,10 @@ export class HostSaveGrants {
     const operationDigest = createHash("sha256").update(JSON.stringify(details)).digest("hex")
     let request = [...this.requests.values()].find((candidate) => active(candidate) && candidate.operationDigest === operationDigest)
     if (request?.status === "approved") {
-      // Consume synchronously before calling the backend: concurrent retries and failed/uncertain writes cannot reuse it.
+      // Consume synchronously; the MCP policy delegates the one Backend call after authorization.
       request.status = "consumed"
       request.consumedAt = new Date().toISOString()
-      return operation === "saveSession"
-        ? this.runtime.saveSession(parsed.data as z.infer<typeof saveInputs.saveSession>)
-        : this.runtime.materializeSession(parsed.data as z.infer<typeof saveInputs.materializeSession>)
+      return undefined
     }
     if (!request) {
       if (this.requests.size >= MAX_SAVE_APPROVALS) {

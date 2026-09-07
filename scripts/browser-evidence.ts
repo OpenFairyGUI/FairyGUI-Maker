@@ -26,7 +26,7 @@ export function expectedDiagnostic(d: BrowserDiagnostic): string | undefined {
   }
   if (d.kind === "requestfailed" && d.method === "DELETE" && d.message === "net::ERR_ABORTED"
     && /\/api\/render-sessions\/[^/]+$/.test(url)) return "best-effort renderer teardown (Host timeout/TTL remains authoritative)"
-  if (/^(delivery-|lifecycle-|project-revision$|import-iteration$|session-preview$)/.test(d.phase)
+  if (/^(delivery-|lifecycle-|project-revision$|import-iteration$|session-preview$|save-grants$)/.test(d.phase)
     && (d.kind === "http" && d.status === 404 || d.kind === "console.error" && /404/.test(d.message))
     && /\/api\/render-sessions\/[^/]+\/commands$/.test(url)) return "closed or invalidated session poll"
   if (d.phase === "import-iteration" && d.kind === "console.warning" && /\/viewer-runtime\.html$/.test(url)
@@ -38,6 +38,8 @@ export function expectedDiagnostic(d: BrowserDiagnostic): string | undefined {
       || d.kind === "http" && d.status === 503 || d.kind === "console.error" && /ERR_FAILED|503/.test(d.message))) return "injected delivery/ACK loss"
   if (d.phase === "save-grants" && /\/api\/save-approvals\/[^/]+\/decision$/.test(url)
     && (d.kind === "http" && d.status === 403 || d.kind === "console.error" && /403/.test(d.message))) return "ordinary token cannot approve saves"
+  if (d.phase === "save-grants" && d.kind === "requestfailed" && d.method === "GET" && /\/api\/save-approvals$/.test(url)
+    && d.message === "net::ERR_ABORTED" && d.resourceType === "fetch" && d.navigation === false) return "approval decision invalidates and replaces the background list query"
   const probeTarget = /http:\/\/127\.0\.0\.1:\d+\/(?:mcp|api\/(?:status|projects(?:\/[^/]+\/source-index)?|save-approvals(?:\/forged\/decision)?|artifacts\/[^/]+\/files\/Smoke\.fui))(?:[.'"\s]|$)/
   if (d.phase.startsWith("isolation-") && (d.kind === "console.error" || d.kind === "csp")
     && (/Unsafe attempt to initiate navigation|Blocked opening/.test(d.message)

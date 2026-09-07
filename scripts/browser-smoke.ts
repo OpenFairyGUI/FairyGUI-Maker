@@ -361,7 +361,7 @@ try {
   const runtimeNavigation = await evidence.step("runtime-navigation", () => runtimeNavigationSmoke(context, host!.origin, artifact))
   await evidence.step("import-recovery", () => importRecoverySmoke(context, host!.origin, evidence))
   await evidence.step("import-iteration", () => importIterationSmoke(context, host!.origin, evidence, (name, args) => callTool(host!.origin, sessionId, 904, name, args)))
-  const saveGrants = await evidence.step("save-grants", () => saveGrantSmoke(context, host!, publishDir))
+  const saveGrants = await evidence.step("save-grants", () => saveGrantSmoke(context, host!, publishDir, evidence.directory))
   if (!(await Promise.all(iframeCredentials)).every(Boolean)) throw new Error("Runtime iframe request carried Host credentials")
   evidence.verify()
   await context.close()

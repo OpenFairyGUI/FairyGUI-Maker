@@ -1,6 +1,6 @@
-# Backend 会话预览与 0.5.0-alpha.1 接入验收
+# Backend 会话预览与 0.5.0-alpha.2 接入验收
 
-2026-09-07：Maker 已固定安装公开发布的 `@openfairygui/core/backend/mcp@0.5.0-alpha.1`。字段读回和未保存会话预览已接入；完整 MCP/保存流程仍受 [OpenFairyGUI #138](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/138) 阻断。
+Maker 固定安装公开发布的 `@openfairygui/core/backend/mcp@0.5.0-alpha.2`。字段读回、未保存会话预览、Host 授权保存及重开读回使用同一 Backend 会话链路。[OpenFairyGUI #138](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/138) 所需的工具发现、Host 失败分支及公共指引参数已接入。
 
 ## 使用
 
@@ -8,6 +8,7 @@
 2. Dashboard 活跃工程会话行点击“预览会话”；MCP 等价入口是 `open_session_preview({sessionId, expectedRevision})`。
 3. 打开返回的 `project.viewerUrl`。浏览器注册 renderer 后，复用 `list_viewer_components`、`render_component_preview`、observation、capture 和 `run_ui_scenario`。
 4. Backend 修改或保存使旧 renderer 失效；点击“刷新工程”读取新版本。页面显示真实 Backend revision 和 dirty 状态。关闭会话会删除对应预览。
+5. 用户请求保存时，以明确的 `expectedRevision` 调用 save/materialize。所有者在 Workbench 确认后，重试完全相同的参数一次；保存成功后检查结果及 dirty/save 状态。需要持久化验收时，关闭、重开同一授权工程，读回保存字段并核对重开 revision。
 
 `open_session_preview` 不保存、不请求 Save Grant，不把临时 Viewer 操作写回 Backend。文件目录绑定与 CLI 快照仍有自己的刷新规则。Asset Manager 需要完整资源扫描，因此不接受按组件加载字节的会话预览。
 
@@ -21,28 +22,34 @@ Host 只保留会话 ID、revision、dirty/save 元数据及 Viewer 绑定，不
 
 Host 的 `sourceRevision` 是绑定 ID、预览代次和 Backend 元数据的身份摘要，**不是文件内容 hash**。保存可能不增加 Backend edit revision，仍会递增预览代次并使旧 renderer 失效。旧版本模型和资源不保留；会话恢复或关闭后不能复活旧预览。
 
+## MCP 与授权边界
+
+Host 通过公共 `instructions` 提供 Agent 指引，通过 `toolPolicies` 为 save/materialize 分别声明 Host 失败 schema。授权存储只读取会话元数据，在 `beforeCall` 同步消费完整操作、revision 和选项绑定的授权；返回 `undefined` 后由 MCP 调用 Backend 一次。会话不可用时返回 `save_session_unavailable`，不放行写入。
+
+原运行时结果跟踪仍负责 dirty/save 元数据、关闭保护及预览失效。Host 失败在进入 Backend 前停止；授权后的 Backend 结果继续通过上游权威 schema，保留 revision 队列、路径、磁盘与事务边界。读取及预览不需要 Save Grant。
+
 ## 可复现验收
 
 ```powershell
 pnpm build
-node --import tsx --test test/session-preview.test.ts test/viewer-scene.test.ts
+node --import tsx --test test/session-preview.test.ts test/viewer-scene.test.ts test/save-grants.test.ts test/backend-files.test.ts
 node --import tsx scripts/session-preview-smoke.ts
+pnpm test
+pnpm test:browser
 ```
 
 真实浏览器使用临时合成工程：读回 `Before` → 预览红色跨包图片 → Backend 事务改为 `Unsaved after` 和蓝色图片 → query 读回 revision 1 → 旧 renderer 失效 → 刷新并捕获新画面 → 浏览器 reload → 关闭会话。两个 PNG 各检测到 1024 个目标色像素；未使用资源不下载，磁盘 XML/PNG 保持原样。证据输出至 `test-results/session-preview/`，也纳入常规 `test:browser`。
 
-`5dce753` 时的完整执行结果：
+完整浏览器序列还会预览未保存文本 → 所有者确认 → MCP 保存一次 → 旧 renderer 失效 → 刷新后读取相同 Backend edit revision 的已保存状态 → 捕获文本 PNG → 关闭并重开磁盘工程 → query 读回保存字段。证据位于本次 `test-results/browser/run-*/` 的 `report.json`、`save-preview-dirty.png` 与 `save-preview-clean.png`。
 
-| 检查 | 结果 |
+| 验收项 | 覆盖 |
 |---|---|
-| TypeScript、生产 Web/Host 构建 | 通过；保留现有主包体积告警，新版 Backend 常量导入另有动态/静态导入提示 |
-| Node 全量 | 147/149 通过；`save-grants.test.ts`、`backend-files.test.ts` 的真实 Host 保存响应断言失败 |
-| 专项接口、依赖闭包及浏览器诊断门禁 | 10/10 通过 |
-| 浏览器完整序列 | 24/25 通过；最终 `save-grants` 阶段复现上游响应错误；报告中无非预期浏览器诊断 |
-| 内存门禁 | 5/5 通过；Player 100 次组件切换后的 JS heap 约 11.5 MiB |
+| 公开 MCP 组合 | 初始化指引、连接后新增工具及注册句柄生命周期、安装包文档资源与 prompts |
+| 完整 Host 发现 | Backend 入口与全部 12 个 Maker 工具 |
+| 保存授权 | 独立所有者凭证、完整选项绑定、并发仅一次、失败消耗、撤销/拒绝/过期、同 ID 重开失效 |
+| Backend 写入边界 | revision 队列、目标路径、磁盘及 Host 私有目录隔离 |
+| 会话预览 | 模型与资源 revision 一致、跨包资源、字体依赖、编辑/保存/关闭失效、PNG 及保存后重开读回 |
 
-浏览器报告为 `test-results/browser/run-rT4qpl/report.json`，内存报告为 `test-results/memory/node-1788775092022.json`。过程中修正了既有烟测的网络事件等待：Player 已停止却可能收不到 Playwright 的 404 response 事件；现按真实停止界面及重连后新旧 session 身份验证，未放宽运行时错误或保存授权断言。
+浏览器诊断仍拒绝服务端错误和非预期异常。保存引起的旧 renderer commands 404，以及授权决定触发 React Query 替换后台列表查询的 `GET /api/save-approvals` / `net::ERR_ABORTED`，只在对应阶段和端点识别为预期结果；连接失败或其他端点错误不豁免。
 
-后续补充了真实 Host 的 `tools/list` 门禁，要求同时发现 Backend 编辑/读回/保存入口及全部 12 个 Maker 工具。保存浏览器烟测增加关闭、重开磁盘工程、确认 clean 状态、读回保存字段，并核对读回 revision 与重开 revision 一致的断言。当前专项命令 `node --import tsx --test test/session-preview.test.ts test/save-grants.test.ts test/backend-files.test.ts` 为 5/8 通过：新增工具发现测试及原有两项保存测试失败；类型检查通过。重开读回分支仍被前面的保存响应错误阻断，尚未完成实测。
-
-必须保留的失败门禁：上游工厂 `tools/list` 只返回自身 20 个 Backend 工具，Maker 后注册工具按名称可调用但无法发现；严格 output schema 把 `save_approval_required` 等 Host 结果改成 `backend_unhandled_error`。真实 Host 工具发现和保存测试会失败，不能跳过、伪造成功或通过私有注册表补丁解决。等待上游公开 Host 组合接口发布后，再验收完整工具发现、一次授权保存及保存后重开读回；当前结果不代表整个升级可发布。
+2026-09-07 当前工作区验收：类型检查与生产构建通过，Node 151/151、内存 5/5、完整 Chromium 25/25 通过。浏览器报告为 `test-results/browser/run-PzzptY/report.json`，无非预期诊断；内存报告为 `test-results/memory/node-1788793377866.json`。Player 100 次切换后 JS heap 约 11.33 MiB；该数值不代表物理 GPU 内存。构建保留现有主包体积及动态/静态导入提示。

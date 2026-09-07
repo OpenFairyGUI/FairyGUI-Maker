@@ -9,7 +9,7 @@ import { zValidator } from "@hono/zod-validator"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { createNodeBackendRuntime } from "@openfairygui/backend/node"
-import { createOpenFairyGuiMcpServer, type OpenFairyGuiBackendRuntime } from "@openfairygui/mcp"
+import { createOpenFairyGuiMcpServer, type OpenFairyGuiBackendRuntime, type OpenFairyGuiMcpToolPolicy } from "@openfairygui/mcp"
 import { Hono } from "hono"
 import { getCookie, setCookie } from "hono/cookie"
 import { HTTPException } from "hono/http-exception"
@@ -30,7 +30,7 @@ import { ArtifactStore, artifactSourceSchema } from "./artifacts"
 import { createHostBackendFileSystem } from "./backend-files"
 import { registerImportDraftApi } from "./import-drafts"
 import { createHostProjectSnapshot, type HostProjectSnapshot } from "./project-snapshot"
-import { HostSaveGrants, hostBackendFailure } from "./save-grants"
+import { HostSaveGrants, hostBackendFailure, saveGrantFailureSchema } from "./save-grants"
 import { uploadLimits } from "./upload-limits"
 import { UploadError } from "../upload"
 import {
@@ -312,8 +312,7 @@ function createTrackedRuntime(runtime: OpenFairyGuiBackendRuntime, sessions: Map
         }
         const fail = () => finish(hostBackendFailure("backend_unhandled_error", "Backend tool execution failed."))
         try {
-          const result = property === "saveSession" || property === "materializeSession"
-            ? saveGrants.execute(property, args[0]) : value.apply(target, args)
+          const result = value.apply(target, args)
           if (result && typeof result.then === "function") return result.then(finish, fail).finally(() => { if (closingId) saveGrants.endClose(closingId) })
           if (closingId) saveGrants.endClose(closingId)
           return finish(result)
@@ -715,6 +714,14 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     allowedProjectRoots: [allowedProjectRoot], fileSystem: await createHostBackendFileSystem(dataDir),
   })
   const saveGrants = new HostSaveGrants(backend)
+  const savePolicy = (operation: "saveSession" | "materializeSession"): OpenFairyGuiMcpToolPolicy => ({
+    failureSchema: saveGrantFailureSchema,
+    beforeCall(input) {
+      const failure = saveGrants.authorize(operation, input)
+      if (failure) trackBackendResult(backendSessions, backendActivity, operation, input, failure)
+      return failure
+    },
+  })
   const runtime = createTrackedRuntime(backend, backendSessions, backendActivity, saveGrants, (method, input, result) => {
     if (!result?.ok || !["openSession", "openProjectSession", "applyTransaction", "saveSession", "materializeSession", "closeSession"].includes(method)) return
     const sessionId = result.data?.sessionId ?? input?.sessionId
@@ -904,11 +911,10 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
       })
       const server = viewOnly
         ? new McpServer({ name: "fairygui-maker", version: PACKAGE_VERSION }, { instructions: VIEW_ONLY_INSTRUCTIONS })
-        : createOpenFairyGuiMcpServer({ runtime, name: "fairygui-maker", version: PACKAGE_VERSION })
-      if (!viewOnly) {
-        // ponytail: the upstream factory has no instructions option; remove this pin-specific assignment once it does.
-        Reflect.set(server.server, "_instructions", HOST_INSTRUCTIONS)
-      }
+        : createOpenFairyGuiMcpServer({ runtime, name: "fairygui-maker", version: PACKAGE_VERSION, instructions: HOST_INSTRUCTIONS, toolPolicies: {
+          openfairygui_backend_save_session: savePolicy("saveSession"),
+          openfairygui_backend_materialize_session: savePolicy("materializeSession"),
+        } })
       registerViewerMcpTools(
         server,
         renderBroker,

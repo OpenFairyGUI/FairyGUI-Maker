@@ -4,12 +4,35 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import test from "node:test"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { BackendRuntime } from "@openfairygui/backend"
+import { createOpenFairyGuiMcpServer } from "@openfairygui/mcp"
 import { Resvg } from "@resvg/resvg-js"
 import { Document, liftDocumentToUamProject } from "@openfairygui/core"
 import { startMakerHost } from "../src/server/index"
 import { VIEWER_PROTOCOL_VERSION } from "../src/viewer-protocol"
+
+test("published factory exposes instructions, late Host tools, documentation and prompts", async () => {
+  const server = createOpenFairyGuiMcpServer({ runtime: new BackendRuntime(), instructions: "Published Host guidance" })
+  const client = new Client({ name: "published-composition-test", version: "1" })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  try {
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
+    assert.equal(client.getInstructions(), "Published Host guidance")
+    const probe = server.registerTool("host_probe", {}, async () => ({ content: [{ type: "text", text: "ok" }] }))
+    assert.ok((await client.listTools()).tools.some(({ name }) => name === "host_probe"))
+    assert.deepEqual((await client.callTool({ name: "host_probe", arguments: {} })).content, [{ type: "text", text: "ok" }])
+    probe.disable()
+    assert.ok(!(await client.listTools()).tools.some(({ name }) => name === "host_probe"))
+    probe.enable()
+    assert.ok((await client.listTools()).tools.some(({ name }) => name === "host_probe"))
+    probe.remove()
+    assert.ok(!(await client.listTools()).tools.some(({ name }) => name === "host_probe"))
+    assert.ok((await client.readResource({ uri: "openfairygui://docs/workflow" })).contents.length > 0)
+    assert.ok((await client.getPrompt({ name: "openfairygui_save_session" })).messages.length > 0)
+  } finally { await client.close(); await server.close() }
+})
 
 test("full Host discovers Maker preview tools alongside Backend tools", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "maker-mcp-discovery-"))
