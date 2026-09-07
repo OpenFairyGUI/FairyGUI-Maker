@@ -13,6 +13,7 @@ import type { Diagnostic, ImportDocument, ImportNode } from './model';
 import { parseImportJson, stringifyImportJson } from './json';
 import {
   MAKER_IMPORT_STATE,
+  digestReimportPath,
   parseDesignSource,
   readBundleDirectory,
   sourceNodeIds,
@@ -34,6 +35,7 @@ export const MAX_IMPORT_SOURCE_BYTES = 530 * 1024 * 1024;
 export const MAX_VISUAL_EVIDENCE_BYTES = 16 * 1024 * 1024;
 const MAX_SOURCE_FILES = 5_000;
 const SOURCE_LOCATOR = 'source-locator.json';
+const MATERIALIZE_ATTEMPT = 'materialize-attempt.json';
 const require = createRequire(import.meta.url);
 const { version: MAKER_VERSION } = require('../../package.json') as { version: string };
 
@@ -264,6 +266,22 @@ export class ImportDraftError extends Error {
   }
 }
 
+const materializeAttemptSchema = z.object({
+  expectedRevision: z.number().int().positive(),
+  outputDirectory: z.string().min(1),
+  contentDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  at: dateString,
+}).strict();
+export type MaterializeAttempt = z.infer<typeof materializeAttemptSchema>;
+
+export class MaterializeRecoveryError extends ImportDraftError {
+  readonly code = 'materialize_recovery_required';
+  readonly committed = true;
+  constructor(readonly attempt: MaterializeAttempt) {
+    super(`Project was committed to ${attempt.outputDirectory}, but its Draft receipt could not be saved. Retry materialize for this target to verify and recover the result.`, 409);
+  }
+}
+
 type ParsedSnapshot = {
   document: ImportDocument;
   imageBindings: Record<string, ConversionImageBinding>;
@@ -335,13 +353,15 @@ export class ImportDraftStore {
     buildPlan: FairyBuildPlanV2 | null;
     outline: ImportDraftOutline | null;
     semanticOverlay: MakerSemanticOverlayV1 | null;
+    materializeAttempt: MaterializeAttempt | null;
   } | null> {
     const draft = this.drafts.get(draftId);
     if (!draft) return null;
     const snapshot = draft.source ? await this.readParsedSnapshot(draftId) : null;
     const outline = snapshot ? outlineDocument(snapshot.document) : null;
     const planning = snapshot ? await this.readPlanning(draft, snapshot.document) : null;
-    return { draft: structuredClone(draft), buildPlan: planning?.buildPlan ?? null, outline, semanticOverlay: planning?.semanticOverlay ?? null };
+    return { draft: structuredClone(draft), buildPlan: planning?.buildPlan ?? null, outline, semanticOverlay: planning?.semanticOverlay ?? null,
+      materializeAttempt: draft.status === 'compiled' ? await this.readMaterializeAttempt(draftId) : null };
   }
 
   async create(sourcePathInput: string): Promise<ImportDraftV1> {
@@ -616,37 +636,57 @@ export class ImportDraftStore {
     });
   }
 
-  async materialize(draftId: string, expectedRevision: number, outputPath: string): Promise<{ draft: ImportDraftV1; result: DesignImportResult }> {
+  async materialize(draftId: string, expectedRevision: number, outputPath: string): Promise<{ draft: ImportDraftV1; result: DesignImportResult; recovered: boolean }> {
     return this.mutate(async () => {
-      const draft = this.requireDraft(draftId, expectedRevision, ['compiled']);
+      const draft = this.requireCurrentDraft(draftId, ['compiled', 'materialized']);
       if (!draft.source || !draft.generated) throw new ImportDraftError('Import draft is incomplete', 409);
       const outputDirectory = path.resolve(outputPath);
       if (!path.basename(outputDirectory)) throw new ImportDraftError('Materialize target must be a named directory');
-      if (await lstat(outputDirectory).then(() => true, (error: NodeJS.ErrnoException) => {
-        if (error.code === 'ENOENT') return false;
-        throw error;
-      })) throw new ImportDraftError('Materialize target already exists (EEXIST)', 409);
-
-      const temporary = path.join(path.dirname(outputDirectory), `.${path.basename(outputDirectory)}.maker-${randomUUID()}`);
-      try {
-        await copyRegularDirectory(path.join(this.resolveDraftRoot(draftId), 'generated', 'project'), temporary);
-        assertValidUamProject(await readProjectAsUam(
-          new NodeIO(),
-          path.join(temporary, draft.generated.fairyFile),
-          { hydrateResourceBytes: true },
-        ));
-        await rename(temporary, outputDirectory);
-      } catch (error) {
-        await rm(temporary, { recursive: true, force: true });
-        throw error;
+      let attempt = await this.readMaterializeAttempt(draftId);
+      const replay = draft.status === 'materialized' && attempt?.expectedRevision === expectedRevision
+        && attempt.outputDirectory === outputDirectory && draft.materialized?.outputDirectory === outputDirectory;
+      if (!replay) this.requireDraft(draftId, expectedRevision);
+      const generatedPath = path.join(this.resolveDraftRoot(draftId), 'generated', 'project');
+      const contentDigest = await digestReimportPath(generatedPath);
+      const recovered = await pathExists(outputDirectory);
+      if (recovered) {
+        if (!attempt || attempt.outputDirectory !== outputDirectory || attempt.contentDigest !== contentDigest) {
+          throw new ImportDraftError('Materialize target already exists (EEXIST); no matching materialize attempt', 409);
+        }
+        if (await digestReimportPath(outputDirectory) !== attempt.contentDigest) {
+          throw new ImportDraftError('Materialize target has changed; recovery will not overwrite it', 409);
+        }
+      } else {
+        if (draft.status === 'materialized') throw new ImportDraftError('Materialized target is missing; recovery will not recreate it', 409);
+        if (attempt && attempt.outputDirectory !== outputDirectory && await pathExists(attempt.outputDirectory)) {
+          throw new ImportDraftError(`First recover the previous materialize target: ${attempt.outputDirectory}`, 409);
+        }
+        attempt = { expectedRevision, outputDirectory, contentDigest, at: new Date().toISOString() };
+        // Persist the exact request before committing any target files, including across Host restarts.
+        await writeJson(path.join(this.resolveDraftRoot(draftId), MATERIALIZE_ATTEMPT), attempt);
+        const temporary = path.join(path.dirname(outputDirectory), `.${path.basename(outputDirectory)}.maker-${randomUUID()}`);
+        try {
+          await copyRegularDirectory(generatedPath, temporary);
+          assertValidUamProject(await readProjectAsUam(new NodeIO(), path.join(temporary, draft.generated.fairyFile), { hydrateResourceBytes: true }));
+          if (await digestReimportPath(temporary) !== contentDigest) throw new ImportDraftError('Generated project changed during materialization', 409);
+          if (await pathExists(outputDirectory)) throw new ImportDraftError('Materialize target already exists (EEXIST)', 409);
+          await rename(temporary, outputDirectory);
+        } catch (error) {
+          await rm(temporary, { recursive: true, force: true });
+          throw error;
+        }
       }
-
-      const at = new Date().toISOString();
-      const updated = await this.update(draft, 'materialized', {
-        materialized: { outputDirectory, at },
-      });
+      let updated = draft;
+      if (draft.status !== 'materialized') {
+        try {
+          updated = await this.update(draft, 'materialized', { materialized: { outputDirectory, at: attempt!.at } });
+        } catch {
+          throw new MaterializeRecoveryError(attempt!);
+        }
+      }
       return {
         draft: updated,
+        recovered,
         result: {
           source: draft.source,
           outputDirectory,
@@ -658,6 +698,15 @@ export class ImportDraftStore {
         },
       };
     });
+  }
+
+  private async readMaterializeAttempt(draftId: string): Promise<MaterializeAttempt | null> {
+    try {
+      return materializeAttemptSchema.parse(await readJson(path.join(this.resolveDraftRoot(draftId), MATERIALIZE_ATTEMPT)));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
   }
 
   async delete(draftId: string, expectedRevision: number): Promise<void> {
@@ -900,12 +949,20 @@ async function writeJson(filePath: string, value: unknown): Promise<void> {
     await writeFile(temporary, stringifyImportJson(value), { flag: 'wx' });
     await rename(temporary, filePath);
   } finally {
-    await rm(temporary, { force: true });
+    // Cleanup cannot turn a completed metadata rename into a failed commit.
+    await rm(temporary, { force: true }).catch(() => undefined);
   }
 }
 
 async function readJson<T>(filePath: string): Promise<T> {
   return parseImportJson(await readFile(filePath, 'utf8')) as T;
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  return lstat(filePath).then(() => true, (error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  });
 }
 
 async function copyRegularDirectory(source: string, target: string): Promise<void> {

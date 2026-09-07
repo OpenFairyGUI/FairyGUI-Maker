@@ -12,6 +12,8 @@ export type BrowserDiagnostic = { phase: string; kind: string; message: string; 
 // Exceptions describe the deliberate fault, not an entire page/phase. Everything is still saved.
 export function expectedDiagnostic(d: BrowserDiagnostic): string | undefined {
   const url = d.url
+  if (d.phase === "import-recovery" && /\/api\/import-drafts\/draft_[\da-f-]+\/materialize$/.test(url)
+    && (d.kind === "http" && d.status === 409 || d.kind === "console.error" && /409/.test(d.message))) return "injected materialize metadata failure after target commit"
   if (d.phase === "workbench-route-fault" && d.kind === "console.error"
     && /^TypeError: Cannot read properties of null \(reading 'draftId'\)/.test(d.message)
     && /\/assets\/workbench-[\w-]+\.js$/.test(url)) return "injected null draft exercises the feature route render boundary"

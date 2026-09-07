@@ -21,6 +21,7 @@ import { browserEvidenceSmoke } from "./browser-evidence-smoke"
 import { importTextSmoke } from "./import-text-smoke"
 import { semanticFidelitySmoke } from "./semantic-fidelity-smoke"
 import { workbenchRoutesSmoke } from "./workbench-routes-smoke"
+import { importRecoverySmoke } from "./import-recovery-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -353,6 +354,7 @@ try {
   const projectRevision = await evidence.step("project-revision", () => projectRevisionSmoke(context, host!.origin, evidence.directory))
   const saveGrants = await evidence.step("save-grants", () => saveGrantSmoke(context, host!, publishDir))
   const runtimeNavigation = await evidence.step("runtime-navigation", () => runtimeNavigationSmoke(context, host!.origin, artifact))
+  await evidence.step("import-recovery", () => importRecoverySmoke(context, host!.origin, evidence))
   if (!(await Promise.all(iframeCredentials)).every(Boolean)) throw new Error("Runtime iframe request carried Host credentials")
   evidence.verify()
   await context.close()

@@ -6,11 +6,56 @@ import test from 'node:test';
 import { NodeIO } from '@openfairygui/core/node';
 import { readProjectAsUam } from '@openfairygui/core/uam';
 
-import { ImportDraftError, ImportDraftStore } from '../../src/design-import/draft-store';
+import { ImportDraftError, ImportDraftStore, MaterializeRecoveryError } from '../../src/design-import/draft-store';
+import { digestReimportPath } from '../../src/design-import/node';
 import { MAKER_IMPORT_GENERATED_SNAPSHOT } from '../../src/design-import/import-state';
 
 const fixture = path.join(process.cwd(), 'test', 'fixtures', 'design-import', 'basic-shapes.fig');
 const exists = (filePath: string) => access(filePath).then(() => true, () => false);
+
+test('materialize reports committed files and recovers the exact result after metadata failure and restart', async (t) => {
+  const parent = await mkdtemp(path.join(tmpdir(), 'maker-materialize-recovery-'));
+  const dataDir = path.join(parent, 'data');
+  const output = path.join(parent, 'output');
+  try {
+    const store = new ImportDraftStore(dataDir);
+    await store.init();
+    let draft = await store.create(fixture);
+    draft = await store.parse(draft.draftId, draft.revision);
+    draft = (await store.plan(draft.draftId, draft.revision)).draft;
+    draft = await store.compile(draft.draftId, draft.revision);
+    const fault = t.mock.method(store as any, 'update', async () => { throw new Error('metadata EIO'); });
+    await assert.rejects(store.materialize(draft.draftId, draft.revision, output), (error: unknown) => {
+      assert.ok(error instanceof MaterializeRecoveryError);
+      assert.equal(error.committed, true);
+      assert.equal(error.code, 'materialize_recovery_required');
+      assert.equal(error.attempt.outputDirectory, output);
+      return true;
+    });
+    fault.mock.restore();
+    assert.ok(await exists(path.join(output, draft.generated!.fairyFile)));
+    assert.equal(store.get(draft.draftId)!.revision, draft.revision);
+    const originalDigest = await digestReimportPath(output);
+    const restarted = new ImportDraftStore(dataDir);
+    await restarted.init();
+    assert.equal((await restarted.getDetail(draft.draftId))!.materializeAttempt!.outputDirectory, output);
+    await assert.rejects(restarted.materialize(draft.draftId, draft.revision, path.join(parent, 'other')), /First recover/);
+    const extraFile = path.join(output, 'user-note.txt');
+    await writeFile(extraFile, 'keep this user edit');
+    await assert.rejects(restarted.materialize(draft.draftId, draft.revision, output), /target has changed/);
+    assert.equal(await readFile(extraFile, 'utf8'), 'keep this user edit');
+    await rm(extraFile);
+    const recovered = await restarted.materialize(draft.draftId, draft.revision, output);
+    assert.equal(recovered.recovered, true);
+    assert.equal(recovered.draft.status, 'materialized');
+    assert.equal(recovered.draft.revision, draft.revision + 1);
+    assert.equal(await digestReimportPath(output), originalDigest);
+    assert.deepEqual(await restarted.materialize(draft.draftId, draft.revision, output), recovered, 'lost success response is idempotent');
+    assert.equal((await restarted.getDetail(draft.draftId))!.materializeAttempt, null);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
 
 test('import drafts isolate source, compile in Maker data, materialize atomically, and reload', async () => {
   const parent = await mkdtemp(path.join(tmpdir(), 'fairygui-maker-draft-'));

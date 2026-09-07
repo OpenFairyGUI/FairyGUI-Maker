@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import type { RegisteredProjectData } from "@/lib/api"
-import type { ImportDraftOutlineNode, ImportDraftV1, ImportVisualEvidenceV1 } from "../design-import/draft-store"
+import type { ImportDraftOutlineNode, ImportDraftV1, ImportVisualEvidenceV1, MaterializeAttempt } from "../design-import/draft-store"
 import type { FairyBuildPlanV2 } from "../design-import/plan"
 import type { MakerSemanticOverlayV1, SemanticTarget } from "../design-import/semantic-overlay"
 import { compareVisualBlobs } from "@/lib/visual-evidence"
@@ -20,6 +20,7 @@ type DraftDetail = {
   semanticOverlay: MakerSemanticOverlayV1 | null
   preview: RegisteredProjectData | null
   previewError: string | null
+  materializeAttempt: MaterializeAttempt | null
 }
 
 type UploadFile = { file: File; path: string }
@@ -125,7 +126,7 @@ export function ImportDraftPage({ draftId, renderPreview }: { draftId: string; r
   const queryKey = ["import-drafts", draftId]
   const detail = useQuery({ queryKey, queryFn: () => requestJson<DraftDetail>(`/api/import-drafts/${encodeURIComponent(draftId)}`) })
   const action = useMutation({
-    mutationFn: async (input: { kind: "parse" | "plan" | "compile" | "materialize" | "delete" | "mapping"; revision: number; nodeId?: string; target?: SemanticTarget }) => {
+    mutationFn: async (input: { kind: "parse" | "plan" | "compile" | "materialize" | "delete" | "mapping"; revision: number; nodeId?: string; target?: SemanticTarget; targetPath?: string }) => {
       if (input.kind === "delete") {
         await requestEmpty(`/api/import-drafts/${encodeURIComponent(draftId)}?expectedRevision=${input.revision}`, { method: "DELETE" })
         return null
@@ -146,7 +147,7 @@ export function ImportDraftPage({ draftId, renderPreview }: { draftId: string; r
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           expectedRevision: input.revision,
-          ...(input.kind === "materialize" ? { targetPath } : {}),
+          ...(input.kind === "materialize" ? { targetPath: input.targetPath ?? targetPath } : {}),
           ...(input.kind === "plan" && detail.data?.draft.status === "planned" && detail.data.buildPlan ? {
             rootIds: detail.data.buildPlan.packages.flatMap((pkg) => pkg.components.filter((root) => root.exported).map((root) => root.sourceNodeId)),
           } : {}),
@@ -157,11 +158,14 @@ export function ImportDraftPage({ draftId, renderPreview }: { draftId: string; r
       if (input.kind === "delete") window.location.assign("/design-import")
       else await queryClient.invalidateQueries({ queryKey })
     },
+    onError: async (_error, input) => {
+      if (input.kind === "materialize") await queryClient.invalidateQueries({ queryKey })
+    },
   })
 
   if (detail.isPending) return <Loading label="正在读取 Import Draft…" />
   if (detail.isError) return <Card className="border-destructive/40"><CardContent className="py-12 text-center text-sm text-destructive">{errorMessage(detail.error)}</CardContent></Card>
-  const { draft, buildPlan, outline, semanticOverlay, preview, previewError } = detail.data
+  const { draft, buildPlan, outline, semanticOverlay, preview, previewError, materializeAttempt } = detail.data
   const busy = action.isPending
 
   return (
@@ -207,6 +211,10 @@ export function ImportDraftPage({ draftId, renderPreview }: { draftId: string; r
       {draft.status === "compiled" ? (
         <Card>
           <CardHeader><CardTitle>Materialize</CardTitle><CardDescription>目标必须是尚不存在的新目录；写入采用临时目录校验后原子改名。</CardDescription></CardHeader>
+          {materializeAttempt ? <CardContent className="space-y-3" role="status">
+            <p className="text-sm">上次物化的目标可能已经写入：<code>{materializeAttempt.outputDirectory}</code>。核对后可恢复完成状态；目标内容若已改变会停止，不会覆盖。</p>
+            <Button disabled={busy} onClick={() => action.mutate({ kind: "materialize", revision: draft.revision, targetPath: materializeAttempt.outputDirectory })}>核对并完成上次物化</Button>
+          </CardContent> : null}
           <CardContent className="flex flex-wrap items-end gap-3">
             <label className="grid min-w-[280px] flex-1 gap-1.5 text-sm"><span className="text-muted-foreground">Maker Host 本机绝对路径</span><input value={targetPath} onChange={(event) => setTargetPath(event.target.value)} placeholder="E:\\Projects\\ImportedUI" className="h-9 rounded-md border bg-background px-3 outline-none focus-visible:ring-2 focus-visible:ring-ring" /></label>
             <Button disabled={busy || !targetPath.trim()} onClick={() => action.mutate({ kind: "materialize", revision: draft.revision })}><CheckCircle2 />Materialize</Button>

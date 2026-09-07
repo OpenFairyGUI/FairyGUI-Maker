@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import {
   ImportDraftError,
+  MaterializeRecoveryError,
   MAX_IMPORT_SOURCE_BYTES,
   MAX_VISUAL_EVIDENCE_BYTES,
   visualEvidenceSchema,
@@ -237,8 +238,11 @@ function readOnly(c: { json: (value: { error: string }, status: 403) => Response
 }
 
 function draftError(c: { json: (value: { error: string }, status: 400 | 404 | 408 | 409 | 413 | 503) => Response }, error: unknown) {
+  const payload = error instanceof MaterializeRecoveryError
+      ? { error: error.message, code: error.code, committed: error.committed, ...error.attempt }
+      : { error: error instanceof Error ? error.message : String(error) };
   return c.json(
-    { error: error instanceof Error ? error.message : String(error) },
+    payload,
     error instanceof ImportDraftError || error instanceof UploadError ? error.status : 400,
   );
 }
