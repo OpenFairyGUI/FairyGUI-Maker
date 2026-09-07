@@ -1,3 +1,7 @@
+# 历史提案：设计源到 FairyGUI（已归档）
+
+> 原 `project.md`，于 T6（2026-09-07）归档；以下原文仅保留设计背景，不代表当前实现或开发承诺。当前边界以 [架构](../architecture.md)、[Workbench](../workbench.md)、[导入保真](../import-fidelity.md) 和 [安全重导入](../reimport.md) 为准。
+
 # 结论
 
 可以实现，而且你现在的 **OpenFairyGUI + FairyGUI Editor Online** 已经拥有最重要的工程底座。

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { Resvg } from '@resvg/resvg-js';
 import { ProjectReader, ProjectWriter } from '@openfairygui/core/project-io';
 import { readProjectAsUam, writeProjectFromUam } from '@openfairygui/core/uam';
-import { MemoryFileSystem } from '../../src/design-import/memory-fs';
+import { MemoryFileSystem, type FidelityReport, type FontResolution, type ImportInteractionIntent } from '../../src/design-import';
 import { compilePlanToUam } from '../../src/design-import/convert';
 import { planDocument } from '../../src/design-import/plan';
 import { parseImportFixture, serializeImportFixture } from '../../src/design-import/fixture';
@@ -19,7 +19,7 @@ test('fidelity plan changes fonts, native button states, layout, rasters and sou
   const library = { ...fidelityFrame('library', [fidelityText('library-title', 'Library replacement')]), sourceType: 'component' as const };
   document.pages.push({ id: 'components', name: 'Components', roots: [original, library] });
   root.children.push({ ...fidelityShape('instance', '#ffffff'), kind: 'instance', componentId: 'original', overrides: [] });
-  root.interactions = [{ trigger: 'ON_CLICK', action: 'NAVIGATE', source: '{"destinationId":"checkout"}' }];
+  root.interactions = [{ trigger: 'ON_CLICK', action: 'NAVIGATE', source: '{"destinationId":"checkout"}' } satisfies ImportInteractionIntent];
   overlay.nodes.instance = { target: 'component', componentKey: 'Primary', rationale: 'User mapping' };
   overlay.componentLibrary = { Primary: 'library' };
   overlay.nodes.layout = { target: 'auto', layout: 'bake', rationale: 'User mapping' };
@@ -27,6 +27,9 @@ test('fidelity plan changes fonts, native button states, layout, rasters and sou
   const plan = planDocument(roundTrippedSource, { rootIds: ['screen'], semanticOverlay: overlay });
   assert.deepEqual(plan.packages[1].components.map((item) => item.sourceNodeId), ['library']);
   const result = compilePlanToUam(roundTrippedSource, plan);
+  const fidelity: FidelityReport = result.report.fidelity!;
+  const font: FontResolution = fidelity.fonts[0];
+  assert.ok(font.required);
   const all = result.project.packages.flatMap((pkg) => pkg.resources);
   const component = (id: string) => {
     const resource = all.find((item) => item.id === result.ids[`${id}:resource`]);

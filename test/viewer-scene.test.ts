@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 
 import type { UamComponentResource, UamDisplayNode, UamProject } from "@openfairygui/core"
-import { analyzeProjectAssets, summarizeAssetAnalysis } from "../src/asset-analysis"
+import { analyzeProjectAssets, assetResourceKey, collectUamResourceReferences, summarizeAssetAnalysis } from "../src/asset-analysis"
 import { compileViewerScene, type ViewerProjectBundle } from "../src/web/lib/viewer"
 
 test("Viewer Scene compiles the raw UAM dependency closure without published artifacts", () => {
@@ -63,6 +63,7 @@ test("Asset Manager reports references, broken links, unused resources, exact du
     node({ kind: "image", id: "missing", resource: { resourceId: "missing1" } }),
   ])
   const conflictA = { ...asset("image", "same0001", new Uint8Array([1])), name: "Icon", path: "/same/" }
+  root.exported = true
   const conflictB = { ...asset("image", "same0002", new Uint8Array([2])), name: "icon", path: "/same/" }
   const project = {
     projectId: "fairygui-project",
@@ -93,6 +94,70 @@ test("Asset Manager reports references, broken links, unused resources, exact du
   assert.equal(summary.conflictGroups, 1)
   assert.ok(summary.unusedResources >= 4)
   assert.deepEqual(new Set(analysis.issues.map(({ kind }) => kind)), new Set(["missing", "unused", "duplicate", "conflict"]))
+})
+
+test("Asset Manager diagnoses unparseable Fairy URLs without turning them into missing resources", async () => {
+  const root = component("root0001", [node({ kind: "text", id: "text", font: "ui://abc", text: "A" })])
+  root.exported = true
+  Object.assign(root.component.properties, { icon: "ui://pkg00001bad/id", valid: "ui://pkg00001missing1" })
+  const project = {
+    settings: { defaultFont: "ui://", packageNameUrl: "ui://Main/Root" },
+    packages: [{ id: "pkg00001", name: "Main", resources: [root] }],
+  } as unknown as UamProject
+  const analysis = await analyzeProjectAssets(project, { projectId: "project", sourceRevision: "revision" })
+  assert.equal(analysis.analysisOwner, "browser")
+  assert.equal(analysis.trust, "advisory")
+  assert.equal(summarizeAssetAnalysis(analysis).invalidUrls, 4)
+  assert.equal(summarizeAssetAnalysis(analysis).missingReferences, 1)
+  assert.deepEqual(analysis.references.map(({ targetKey }) => targetKey), ["pkg00001/missing1"])
+  const invalid = analysis.issues.filter(({ kind }) => kind === "invalid-url")
+  assert.equal(invalid.filter(({ resourceKeys }) => resourceKeys.length === 0).length, 2)
+  assert.ok(invalid.some(({ detail, resourceKeys }) => detail.includes("node:text/font") && resourceKeys[0] === "pkg00001/root0001"))
+  assert.ok(invalid.some(({ detail }) => detail.includes("project:settings/defaultFont")))
+  const viewerWarnings: string[] = []
+  collectUamResourceReferences("pkg00001", root, (_path, url) => viewerWarnings.push(url))
+  assert.deepEqual(viewerWarnings, ["ui://abc", "ui://pkg00001bad/id"])
+})
+
+test("private component reachability follows exported/settings roots, branches, cross-package links, and cycles", async () => {
+  const ref = (resourceId: string, packageId?: string) => node({ kind: "component", id: resourceId, resource: { resourceId, packageId } })
+  const root = component("root0001", [ref("live0001", "pkg00002")])
+  root.exported = true
+  root.branchItemIds = ["branch01"]
+  Object.assign(root.component, {
+    controllers: [{ actions: [{ icon: "ui://pkg00001control1" }] }],
+    transitions: [{ items: [{ value: "ui://pkg00001trans001" }] }],
+  })
+  const project = {
+    settings: { root: "ui://pkg00001setting1" },
+    packages: [
+      { id: "pkg00001", name: "Main", resources: [root, component("branch01", []), component("control1", []), component("trans001", []),
+        component("setting1", [ref("setting2")]), component("setting2", [ref("setting1")]),
+        component("dead0001", [ref("dead0002")]), component("dead0002", [ref("dead0001")]), component("alone001", [])] },
+      { id: "pkg00002", name: "Shared", resources: [component("live0001", [ref("live0002")]), component("live0002", [ref("live0001")])] },
+    ],
+  } as unknown as UamProject
+  const analysis = await analyzeProjectAssets(project, { projectId: "project", sourceRevision: "revision" })
+  assert.equal(summarizeAssetAnalysis(analysis).unreachableComponents, 3)
+  assert.deepEqual(analysis.issues.filter(({ kind }) => kind === "unreachable").flatMap(({ resourceKeys }) => resourceKeys).sort(),
+    ["pkg00001/alone001", "pkg00001/dead0001", "pkg00001/dead0002"])
+  assert.equal(analysis.resources.find(({ resourceId }) => resourceId === "dead0001")!.incomingReferences, 1)
+  assert.equal(analysis.issues.some(({ kind }) => kind === "missing"), false)
+})
+
+test("Asset Manager rejects ambiguous or duplicate stable IDs", async () => {
+  assert.equal(assetResourceKey("pkg_0001", "resource-1"), "pkg_0001/resource-1")
+  for (const id of ["", "a/b", "a b", "a?b", "a".repeat(129)]) {
+    assert.throws(() => assetResourceKey(id, "id"), /ID/)
+    assert.throws(() => assetResourceKey("pkg00001", id), /ID/)
+  }
+  const project = { packages: [{ id: "pkg00001", name: "Main", resources: [component("same", []), component("same", [])] }] } as unknown as UamProject
+  await assert.rejects(analyzeProjectAssets(project, { projectId: "project", sourceRevision: "revision" }), /ID 重复/)
+})
+
+test("Asset Manager bounds malformed URL diagnostics before hashing", async () => {
+  const project = { packages: [], settings: { urls: Array(50_001).fill("ui://bad") } } as unknown as UamProject
+  await assert.rejects(analyzeProjectAssets(project, { projectId: "project", sourceRevision: "revision" }), /最多记录 50000 个问题/)
 })
 
 function component(id: string, displayList: UamDisplayNode[]) {

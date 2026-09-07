@@ -20,6 +20,12 @@ test("evidence gates reject a changed pixel, dimensions, unexpected browser fail
   assert.equal(expectedDiagnostic({ ...intentional, status: 500 }), undefined)
   assert.equal(expectedDiagnostic({ ...intentional, phase: "viewer-golden" }), undefined)
   assert.equal(expectedDiagnostic({ ...intentional, url: "http://localhost/assets/runtime.js" }), undefined)
+  const routeFault: BrowserDiagnostic = { phase: "workbench-route-fault", kind: "console.error", message: "TypeError: Cannot read properties of null (reading 'draftId')", url: "http://localhost/assets/workbench-abc.js" }
+  assertDiagnostics([routeFault])
+  assert.equal(expectedDiagnostic({ ...routeFault, kind: "pageerror" }), undefined)
+  assert.equal(expectedDiagnostic({ ...routeFault, phase: "workbench-route-recovered" }), undefined)
+  assert.equal(expectedDiagnostic({ ...routeFault, message: "TypeError: other render failure" }), undefined)
+  assert.equal(expectedDiagnostic({ ...routeFault, url: "http://localhost/assets/viewerRuntime-abc.js" }), undefined)
   const teardown: BrowserDiagnostic = { phase: "lifecycle-viewer", kind: "requestfailed", method: "DELETE", message: "net::ERR_ABORTED", url: "http://localhost/api/render-sessions/render-id" }
   assert.ok(expectedDiagnostic(teardown))
   assert.equal(expectedDiagnostic({ ...teardown, message: "net::ERR_FAILED" }), undefined)

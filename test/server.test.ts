@@ -175,6 +175,12 @@ test("Maker Host protects Maker Workbench and accepts an MCP session", async () 
         label: "Bag: 1 unused",
         detail: "Unexported resource with zero incoming references.",
         resourceKeys: ["rbw1tv9t/image001"],
+      }, {
+        kind: "invalid-url",
+        severity: "error",
+        label: "Synthetic browser diagnostic",
+        detail: "The Host validates this claim structurally, not semantically.",
+        resourceKeys: ["rbw1tv9t/image001"],
       }],
     }
     assert.equal((await fetch(`${host.origin}/api/projects/${createdProject.projectId}/asset-analysis`, {
@@ -191,6 +197,32 @@ test("Maker Host protects Maker Workbench and accepts an MCP session", async () 
       headers: { Authorization: `Bearer ${token}` },
     }).then((response) => response.json())
     assert.equal(registeredAnalysis.analysis.resources[0].resourceId, "image001")
+    assert.equal(registeredAnalysis.analysis.analysisOwner, "browser", "legacy v1 uploads remain advisory")
+    assert.equal(registeredAnalysis.analysis.trust, "advisory")
+    for (const invalid of [
+      { ...assetAnalysis, analysisOwner: "host" },
+      { ...assetAnalysis, trust: "verified" },
+      { ...assetAnalysis, resources: [{ ...assetAnalysis.resources[0], packageId: "rbw1/tv9t", key: "rbw1/tv9t/image001" }] },
+      { ...assetAnalysis, resources: [{ ...assetAnalysis.resources[0], resourceId: "image/001", key: "rbw1tv9t/image/001" }] },
+      { ...assetAnalysis, references: [{ sourceKey: "project", targetKey: "pkg/res/ambiguous", path: "settings" }] },
+    ]) {
+      assert.equal((await fetch(`${host.origin}/api/projects/${createdProject.projectId}/asset-analysis`, {
+        method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(invalid),
+      })).status, 400)
+    }
+    // New diagnostic kinds round-trip through the same v1 endpoint; claims are not Host-verified.
+    for (const kind of ["invalid-url", "unreachable"]) {
+      const response = await fetch(`${host.origin}/api/projects/${createdProject.projectId}/asset-analysis`, {
+        method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ ...assetAnalysis, resources: [{ ...assetAnalysis.resources[0], kind: "component" }],
+          issues: [{ ...assetAnalysis.issues[0], kind }], analysisOwner: "browser", trust: "advisory" }),
+      })
+      assert.equal(response.status, 200)
+      assert.equal((await response.json()).analysis.issues[0].kind, kind)
+    }
+    assert.equal((await fetch(`${host.origin}/api/projects/${createdProject.projectId}/asset-analysis`, {
+      method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(assetAnalysis),
+    })).status, 200)
 
     const rendererResponse = await fetch(`${host.origin}/api/renderers`, {
       method: "POST",
@@ -267,13 +299,28 @@ test("Maker Host protects Maker Workbench and accepts an MCP session", async () 
         jsonrpc: "2.0",
         id: "asset-inspection",
         method: "tools/call",
-        params: { name: "inspect_project_assets", arguments: { projectId: createdProject.projectId, packageId: "rbw1tv9t", resourceId: "image001" } },
+        params: { name: "inspect_project_assets", arguments: { projectId: createdProject.projectId, packageId: "rbw1tv9t", resourceId: "image001", limit: 1 } },
       }),
     }).then((response) => response.json())
     const assetInspection = JSON.parse(assetInspectionResult.result.content[0].text)
     assert.equal(assetInspection.resource.resourceId, "image001")
     assert.equal(assetInspection.references.incomingTotal, 0)
     assert.equal(assetInspection.issues[0].kind, "unused")
+    assert.equal(assetInspection.issues.length, 1)
+    assert.equal(assetInspection.issuesTotal, 2)
+    assert.equal(assetInspection.issuesTruncated, true)
+    assert.equal(assetInspection.analysisOwner, "browser")
+    assert.equal(assetInspection.trust, "advisory")
+    const summaryResult = await fetch(`${host.origin}/mcp`, {
+      method: "POST",
+      headers: { Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Mcp-Session-Id": sessionId, "MCP-Protocol-Version": "2025-11-25" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: "asset-summary", method: "tools/call", params: { name: "inspect_project_assets", arguments: { projectId: createdProject.projectId } } }),
+    }).then((response) => response.json())
+    const assetSummary = JSON.parse(summaryResult.result.content[0].text)
+    assert.equal(assetSummary.analysisOwner, "browser")
+    assert.equal(assetSummary.trust, "advisory")
+    assert.equal(assetSummary.summary.invalidUrls, 1)
+    assert.equal(assetSummary.summary.unreachableComponents, 0)
 
     const toolCall = fetch(`${host.origin}/mcp`, {
       method: "POST",

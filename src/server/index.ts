@@ -20,6 +20,8 @@ import {
   ASSET_ANALYSIS_MAX_REFERENCES,
   ASSET_ANALYSIS_MAX_RESOURCES,
   ASSET_ANALYSIS_SCHEMA_VERSION,
+  ASSET_ISSUE_KINDS,
+  ASSET_RESOURCE_ID_PATTERN,
   type ProjectAssetAnalysis,
 } from "../asset-analysis"
 import { ImportDraftStore } from "../design-import/draft-store"
@@ -139,16 +141,19 @@ const projectRegistrationSchema = z.object({
   sourceRevision: z.string().regex(/^[a-f0-9]{64}$/),
 })
 
-const assetResourceKeySchema = z.string().min(3).max(300).refine((value) => value.includes("/"), "Resource key must contain package and resource IDs")
+const assetResourceKeySchema = z.string().regex(/^[A-Za-z0-9_-]{1,128}\/[A-Za-z0-9_-]{1,128}$/)
 const assetAnalysisSchema = z.object({
   schemaVersion: z.literal(ASSET_ANALYSIS_SCHEMA_VERSION),
+  // Accept older v1 uploads, but never allow a caller to claim Host verification.
+  analysisOwner: z.literal("browser").default("browser"),
+  trust: z.literal("advisory").default("advisory"),
   projectId: z.string().min(1).max(128),
   sourceRevision: z.string().min(1).max(128),
   resources: z.array(z.object({
     key: assetResourceKeySchema,
-    packageId: z.string().min(1).max(128),
+    packageId: z.string().regex(ASSET_RESOURCE_ID_PATTERN),
     packageName: z.string().min(1).max(256),
-    resourceId: z.string().min(1).max(128),
+    resourceId: z.string().regex(ASSET_RESOURCE_ID_PATTERN),
     kind: z.enum(["image", "sound", "misc", "swf", "font", "movieClip", "spine", "dragonBones", "component"]),
     name: z.string().min(1).max(256),
     path: z.string().max(1_024),
@@ -165,7 +170,7 @@ const assetAnalysisSchema = z.object({
     path: z.string().min(1).max(2_048),
   }).strict()).max(ASSET_ANALYSIS_MAX_REFERENCES),
   issues: z.array(z.object({
-    kind: z.enum(["missing", "unused", "duplicate", "conflict"]),
+    kind: z.enum(ASSET_ISSUE_KINDS),
     severity: z.enum(["error", "warning"]),
     label: z.string().min(1).max(1_000),
     detail: z.string().min(1).max(2_000),

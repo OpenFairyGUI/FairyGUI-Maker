@@ -14,7 +14,7 @@ import {
   type RenderCommandResult,
 } from "../viewer-protocol"
 import type { ArtifactManifest } from "../artifact-protocol"
-import { assetResourceKey, summarizeAssetAnalysis, type ProjectAssetAnalysis } from "../asset-analysis"
+import { ASSET_RESOURCE_ID_PATTERN, assetResourceKey, summarizeAssetAnalysis, type ProjectAssetAnalysis } from "../asset-analysis"
 
 const MAX_RENDER_REQUESTS_PER_SESSION = 256
 const RENDER_SESSION_TTL_MS = 5 * 60_000
@@ -690,11 +690,11 @@ export function registerViewerMcpTools(
 
   server.registerTool("inspect_project_assets", {
     title: "Inspect FairyGUI project assets",
-    description: "Read a fixed-revision Asset Manager summary or inspect incoming and outgoing references for one stable package/resource ID.",
+    description: "Read browser-owned, advisory Asset Manager analysis for a fixed revision, or inspect references for one stable package/resource ID. Host validates structure, not the analysis conclusions; this is not proof that resources can be safely deleted.",
     inputSchema: z.object({
       projectId: z.string().min(1),
-      packageId: z.string().min(1).optional(),
-      resourceId: z.string().min(1).optional(),
+      packageId: z.string().regex(ASSET_RESOURCE_ID_PATTERN).optional(),
+      resourceId: z.string().regex(ASSET_RESOURCE_ID_PATTERN).optional(),
       direction: z.enum(["incoming", "outgoing", "both"]).default("both"),
       limit: z.number().int().min(1).max(500).default(100),
     }),
@@ -722,6 +722,8 @@ export function registerViewerMcpTools(
         ok: true,
         projectId,
         sourceRevision: analysis.sourceRevision,
+        analysisOwner: analysis.analysisOwner,
+        trust: analysis.trust,
         assetManagerUrl: project.assetManagerUrl,
         summary: summarizeAssetAnalysis(analysis),
         issues: analysis.issues.slice(0, limit).map(compactAssetIssue),
@@ -733,6 +735,7 @@ export function registerViewerMcpTools(
     const resource = analysis.resources.find((candidate) => candidate.key === key)
     if (!resource) return toolResult({ ok: false, code: "resource_not_found", projectId, packageId, resourceId }, true)
     const resourceByKey = new Map(analysis.resources.map((candidate) => [candidate.key, candidate]))
+    const issues = analysis.issues.filter(({ resourceKeys }) => resourceKeys.includes(key))
     const incoming = direction === "outgoing" ? [] : analysis.references.filter(({ targetKey }) => targetKey === key)
     const outgoing = direction === "incoming" ? [] : analysis.references.filter(({ sourceKey }) => sourceKey === key)
     const compactReference = (reference: ProjectAssetAnalysis["references"][number]) => ({
@@ -744,9 +747,13 @@ export function registerViewerMcpTools(
       ok: true,
       projectId,
       sourceRevision: analysis.sourceRevision,
+      analysisOwner: analysis.analysisOwner,
+      trust: analysis.trust,
       assetManagerUrl: project.assetManagerUrl,
       resource,
-      issues: analysis.issues.filter(({ resourceKeys }) => resourceKeys.includes(key)).map(compactAssetIssue),
+      issues: issues.slice(0, limit).map(compactAssetIssue),
+      issuesTotal: issues.length,
+      issuesTruncated: issues.length > limit,
       references: {
         incoming: incoming.slice(0, limit).map(compactReference),
         outgoing: outgoing.slice(0, limit).map(compactReference),

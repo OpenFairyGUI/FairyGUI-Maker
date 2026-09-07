@@ -20,6 +20,7 @@ import { createBrowserEvidence, goldenUpdateEnabled, saveVisualGolden } from "./
 import { browserEvidenceSmoke } from "./browser-evidence-smoke"
 import { importTextSmoke } from "./import-text-smoke"
 import { semanticFidelitySmoke } from "./semantic-fidelity-smoke"
+import { workbenchRoutesSmoke } from "./workbench-routes-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -149,6 +150,7 @@ try {
   const page = await context.newPage()
   evidence.phase("workbench-import")
   await page.goto(`${host.origin}/design-import?token=${token}`, { waitUntil: "domcontentloaded" })
+  const workbenchRoutes = await evidence.step("workbench-routes", () => workbenchRoutesSmoke(context, host!.origin, evidence))
   const semanticFidelity = await evidence.step("semantic-fidelity", () => semanticFidelitySmoke(context, host!.origin, publishDir, evidence, goldens,
     (name, args) => callTool(host!.origin, sessionId, 200, name, args)))
   evidence.phase("workbench-import")
@@ -348,7 +350,7 @@ try {
   const playerLifecycle = await evidence.step("lifecycle-player", () => rendererLifecycleSmoke(page, playerDelivery.reconnectedSessionId,
     (name, args) => callTool(host!.origin, sessionId, 71, name, args)))
   const runtimeBudgets = await evidence.step("runtime-budgets", () => runtimeBudgetSmoke(page.context(), host!.origin, artifact, publishDir))
-  const projectRevision = await evidence.step("project-revision", () => projectRevisionSmoke(context, host!.origin))
+  const projectRevision = await evidence.step("project-revision", () => projectRevisionSmoke(context, host!.origin, evidence.directory))
   const saveGrants = await evidence.step("save-grants", () => saveGrantSmoke(context, host!, publishDir))
   const runtimeNavigation = await evidence.step("runtime-navigation", () => runtimeNavigationSmoke(context, host!.origin, artifact))
   if (!(await Promise.all(iframeCredentials)).every(Boolean)) throw new Error("Runtime iframe request carried Host credentials")
@@ -362,7 +364,7 @@ try {
   })
   // Golden changes are explicit and happen only after all functional/diagnostic checks pass.
   if (updateGoldens) for (const golden of goldens) await writeFile(golden.golden, golden.actual)
-  await evidence.finish("passed", { environment, goldenUpdate: updateGoldens }, [])
+  await evidence.finish("passed", { environment, goldenUpdate: updateGoldens, workbenchRoutes }, [])
   process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, deterministicPlan: true, artifactUpload: true, artifactPersistence: true, mapping: true, visualEvidence: true, viewer: true, player: true, semanticFidelity, viewerState, playerState, viewerDelivery, playerDelivery, viewerLifecycle, playerLifecycle, runtimeBudgets, projectRevision, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 4 + semanticFidelity.goldens, artifactId: artifact.artifactId }) + "\n")
 } catch (error) {
   await evidence.finish("failed", { environment }, browser?.contexts().flatMap((context) => context.pages()) ?? [], error)

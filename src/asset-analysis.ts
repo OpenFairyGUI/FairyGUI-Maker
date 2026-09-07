@@ -3,6 +3,8 @@ import type { UamAssetResource, UamComponentResource, UamProject, UamResource } 
 export const ASSET_ANALYSIS_SCHEMA_VERSION = 1 as const
 export const ASSET_ANALYSIS_MAX_RESOURCES = 5_000
 export const ASSET_ANALYSIS_MAX_REFERENCES = 50_000
+export const ASSET_RESOURCE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/
+export const ASSET_ISSUE_KINDS = ["missing", "unused", "duplicate", "conflict", "invalid-url", "unreachable"] as const
 
 export type AssetResource = {
   key: string
@@ -27,7 +29,7 @@ export type AssetReference = {
 }
 
 export type AssetIssue = {
-  kind: "missing" | "unused" | "duplicate" | "conflict"
+  kind: typeof ASSET_ISSUE_KINDS[number]
   severity: "error" | "warning"
   label: string
   detail: string
@@ -36,6 +38,8 @@ export type AssetIssue = {
 
 export type ProjectAssetAnalysis = {
   schemaVersion: typeof ASSET_ANALYSIS_SCHEMA_VERSION
+  analysisOwner: "browser"
+  trust: "advisory"
   projectId: string
   sourceRevision: string
   resources: AssetResource[]
@@ -76,6 +80,7 @@ export async function analyzeProjectAssets(
         throw new Error(`Asset Manager 最多分析 ${ASSET_ANALYSIS_MAX_RESOURCES} 个资源。`)
       }
       const key = assetResourceKey(pkg.id, resource.id)
+      if (resourceByKey.has(key)) throw new Error(`Asset Manager 资源 ID 重复：${key}`)
       const bytes = resource.kind === "component" ? null : resource.sourceBytes ?? null
       const entry: AssetResource = {
         key,
@@ -98,6 +103,19 @@ export async function analyzeProjectAssets(
   }
 
   const references: AssetReference[] = []
+  const issues: AssetIssue[] = []
+  const invalidUrl = (sourceKey: string) => (path: string, value: string) => {
+    if (issues.length >= ASSET_ANALYSIS_MAX_REFERENCES) {
+      throw new Error(`Asset Manager 最多记录 ${ASSET_ANALYSIS_MAX_REFERENCES} 个问题。`)
+    }
+    issues.push({
+      kind: "invalid-url",
+      severity: "error",
+      label: `无法解析 Fairy URL ${value.slice(0, 120)}`,
+      detail: `位置：${path.slice(0, 1_600)}；分析器仅支持 ui:// + 8 位包 ID + 资源 ID，不会将无法解析的 URL 计入断链。`,
+      resourceKeys: sourceKey === "project" ? [] : [sourceKey],
+    })
+  }
   const addReference = (sourceKey: string, targetPackageId: string, targetResourceId: string, path: string) => {
     if (references.length >= ASSET_ANALYSIS_MAX_REFERENCES) {
       throw new Error(`Asset Manager 最多分析 ${ASSET_ANALYSIS_MAX_REFERENCES} 条资源引用。`)
@@ -112,12 +130,15 @@ export async function analyzeProjectAssets(
 
   collectFairyUrls(project.settings, "project:settings", (packageId, resourceId, path) => (
     addReference("project", packageId, resourceId, path)
-  ))
+  ), invalidUrl("project"))
   for (const pkg of project.packages) {
     for (const resource of pkg.resources) {
       const sourceKey = assetResourceKey(pkg.id, resource.id)
-      for (const reference of collectUamResourceReferences(pkg.id, resource)) {
+      for (const reference of collectUamResourceReferences(pkg.id, resource, invalidUrl(sourceKey))) {
         addReference(sourceKey, reference.packageId, reference.resourceId, reference.path)
+      }
+      for (const id of resource.branchItemIds ?? []) {
+        if (id) addReference(sourceKey, pkg.id, id, `resource:${sourceKey}/branch-item`)
       }
     }
   }
@@ -130,7 +151,6 @@ export async function analyzeProjectAssets(
     }
   }
 
-  const issues: AssetIssue[] = []
   const missing = new Map<string, AssetReference[]>()
   for (const reference of references) {
     if (resourceByKey.has(reference.targetKey)) continue
@@ -183,6 +203,32 @@ export async function analyzeProjectAssets(
     })
   }
 
+  // Reachability, not incoming counts: a private cycle is still unreachable.
+  const outgoing = new Map<string, string[]>()
+  for (const { sourceKey, targetKey } of references) {
+    const targets = outgoing.get(sourceKey) ?? []
+    targets.push(targetKey)
+    outgoing.set(sourceKey, targets)
+  }
+  const reachable = new Set(["project", ...resources.filter(({ exported }) => exported).map(({ key }) => key)])
+  for (const key of reachable) for (const target of outgoing.get(key) ?? []) reachable.add(target)
+  const unreachableByPackage = new Map<string, AssetResource[]>()
+  for (const resource of resources) {
+    if (resource.kind !== "component" || reachable.has(resource.key)) continue
+    const group = unreachableByPackage.get(resource.packageId) ?? []
+    group.push(resource)
+    unreachableByPackage.set(resource.packageId, group)
+  }
+  for (const entries of unreachableByPackage.values()) {
+    issues.push({
+      kind: "unreachable",
+      severity: "warning",
+      label: `${entries[0].packageName}: ${entries.length} 个不可达私有组件`,
+      detail: "从导出资源和项目设置出发，沿已识别引用不可达（包括私有循环）。动态加载、外部引用和无法解析的 URL 不在证明范围内，不代表可以安全删除。",
+      resourceKeys: entries.map(({ key }) => key),
+    })
+  }
+
   const duplicates = new Map<string, AssetResource[]>()
   for (const resource of resources) {
     if (!resource.sha256 || !resource.byteLength) continue
@@ -203,8 +249,9 @@ export async function analyzeProjectAssets(
   }
 
   resources.sort((left, right) => left.packageName.localeCompare(right.packageName) || displayAssetPath(left).localeCompare(displayAssetPath(right)))
+  if (issues.length > ASSET_ANALYSIS_MAX_REFERENCES) throw new Error(`Asset Manager 最多记录 ${ASSET_ANALYSIS_MAX_REFERENCES} 个问题。`)
   issues.sort((left, right) => left.kind.localeCompare(right.kind) || left.label.localeCompare(right.label))
-  return { schemaVersion: ASSET_ANALYSIS_SCHEMA_VERSION, ...source, resources, references, issues }
+  return { schemaVersion: ASSET_ANALYSIS_SCHEMA_VERSION, ...source, analysisOwner: "browser", trust: "advisory", resources, references, issues }
 }
 
 export function summarizeAssetAnalysis(analysis: ProjectAssetAnalysis) {
@@ -213,6 +260,8 @@ export function summarizeAssetAnalysis(analysis: ProjectAssetAnalysis) {
     resources: analysis.resources.length,
     references: analysis.references.length,
     missingReferences: analysis.references.filter(({ targetKey }) => !resourceKeys.has(targetKey)).length,
+    invalidUrls: analysis.issues.filter(({ kind }) => kind === "invalid-url").length,
+    unreachableComponents: new Set(analysis.issues.filter(({ kind }) => kind === "unreachable").flatMap(({ resourceKeys }) => resourceKeys)).size,
     unusedResources: new Set(analysis.issues.filter(({ kind }) => kind === "unused").flatMap(({ resourceKeys }) => resourceKeys)).size,
     duplicateGroups: analysis.issues.filter(({ kind }) => kind === "duplicate").length,
     conflictGroups: analysis.issues.filter(({ kind }) => kind === "conflict").length,
@@ -220,6 +269,9 @@ export function summarizeAssetAnalysis(analysis: ProjectAssetAnalysis) {
 }
 
 export function assetResourceKey(packageId: string, resourceId: string) {
+  if (!ASSET_RESOURCE_ID_PATTERN.test(packageId) || !ASSET_RESOURCE_ID_PATTERN.test(resourceId)) {
+    throw new Error("Asset Manager 包和资源 ID 必须是 1–128 位字母、数字、下划线或连字符。")
+  }
   return `${packageId}/${resourceId}`
 }
 
@@ -248,6 +300,8 @@ function collectComponentReferences(
     collectFairyUrls(node, path, add, onInvalidUrl)
   }
   collectFairyUrls(component.component.properties, `${componentPath}/properties`, add, onInvalidUrl)
+  collectFairyUrls(component.component.controllers, `${componentPath}/controllers`, add, onInvalidUrl)
+  collectFairyUrls(component.component.transitions, `${componentPath}/transitions`, add, onInvalidUrl)
 }
 
 function collectAssetReferences(packageId: string, resource: UamAssetResource, add: AddReference) {
@@ -278,7 +332,7 @@ function collectFairyUrls(
   if (typeof value === "string") {
     if (!value.startsWith("ui://")) return
     const body = value.slice(5)
-    if (body.length >= 9) add(body.slice(0, 8), body.slice(8), path)
+    if (body.length >= 9 && ASSET_RESOURCE_ID_PATTERN.test(body.slice(0, 8)) && ASSET_RESOURCE_ID_PATTERN.test(body.slice(8))) add(body.slice(0, 8), body.slice(8), path)
     else onInvalidUrl(path, value)
     return
   }

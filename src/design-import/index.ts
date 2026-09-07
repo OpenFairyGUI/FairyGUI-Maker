@@ -60,6 +60,7 @@ export {
   type ImportImage,
   type ImportInstance,
   type ImportInstanceOverride,
+  type ImportInteractionIntent,
   type ImportLayout,
   type ImportNode,
   type ImportPage,
@@ -73,6 +74,8 @@ export {
   parseImportFixture,
   serializeImportFixture,
 } from './fixture';
+export type { FidelityReport, FontResolution } from './fidelity';
+// Compatibility export for existing source consumers; implementation remains in memory-fs.
 export { MemoryFileSystem } from './memory-fs';
 export {
   MAKER_IMPORT_BUNDLE_MANIFEST,

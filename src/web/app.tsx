@@ -5,6 +5,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
 } from "@tanstack/react-router"
 import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table"
 import { useVirtualizer } from "@tanstack/react-virtual"
@@ -45,7 +46,7 @@ import {
 } from "@/components/ui/card"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { DesignImportPage, ImportDraftPage, type VisualCaptureInfo } from "@/design-import"
+import type { VisualCaptureInfo } from "@/design-import"
 import { SaveApprovalsCard } from "@/save-approvals"
 import { createProject, deleteProject, getArtifact, getArtifacts, getProject, getProjects, getSessions, getStatus, registerProjectAssetAnalysis, type RegisteredProjectData } from "@/lib/api"
 import { importPublishedFolder } from "@/lib/artifacts"
@@ -82,6 +83,8 @@ const projectsQuery = {
   },
 }
 const artifactsQuery = { queryKey: ["artifacts"], queryFn: getArtifacts }
+const DesignImportPage = lazyRouteComponent(() => import("@/design-import"), "DesignImportPage")
+const ImportDraftPage = lazyRouteComponent(() => import("@/design-import"), "ImportDraftPage")
 
 type SessionRow = {
   id: string
@@ -821,11 +824,6 @@ function ProjectAssetManager({ project }: { project: RegisteredProjectData }) {
     staleTime: Infinity,
   })
 
-  useEffect(() => {
-    if (!analysis.data?.resources.length) return
-    setSelectedKey((current) => analysis.data.resources.some(({ key }) => key === current) ? current : analysis.data.resources[0].key)
-  }, [analysis.data])
-
   const issueKeys = useMemo(() => new Set(analysis.data?.issues
     .filter((issue) => health === "all" || issue.kind === health)
     .flatMap(({ resourceKeys }) => resourceKeys) ?? []), [analysis.data, health])
@@ -836,6 +834,10 @@ function ProjectAssetManager({ project }: { project: RegisteredProjectData }) {
       && (!query || `${resource.packageName}/${displayAssetPath(resource)} ${resource.kind} ${resource.resourceId}`.toLocaleLowerCase().includes(query))
     )) ?? []
   }, [analysis.data, filter, health, issueKeys])
+
+  useEffect(() => {
+    setSelectedKey((current) => resources.some(({ key }) => key === current) ? current : resources[0]?.key ?? "")
+  }, [resources])
 
   if (analysis.isFetching) return <div><ViewerLoading message={scanProgress || "正在读取工程并计算资源哈希与引用…"} /><Button variant="outline" onClick={() => { setScanCancelled(true); void queryClient.cancelQueries({ queryKey: ["asset-analysis", project.projectId] }) }}>取消扫描</Button></div>
   if (scanCancelled) return <div role="status">扫描已取消。<Button onClick={() => void analysis.refetch()}>重新扫描</Button></div>
@@ -863,11 +865,13 @@ function ProjectAssetManager({ project }: { project: RegisteredProjectData }) {
         <div className="flex flex-wrap gap-2"><Badge variant="outline">AGENT READY</Badge><Button variant="outline" onClick={() => void analysis.refetch()} disabled={analysis.isFetching}><RefreshCw className={analysis.isFetching ? "animate-spin" : ""} />重新扫描</Button></div>
       </section>
 
+      <p role="note" className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">浏览器分析 · 仅供参考（{result.analysisOwner} / {result.trust}）。Host 仅校验结构与版本，未独立验证引用和结论；动态加载、外部引用可能未被识别，不能据此自动删除资源。</p>
+
       <section aria-label="资源分析摘要" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="Resources" value={String(summary.resources)} detail={`${result.resources.filter(({ kind }) => kind === "component").length} components`} />
         <MetricCard label="References" value={String(summary.references)} detail="Incoming + outgoing occurrences" />
-        <MetricCard label="Broken" value={String(summary.missingReferences)} detail="Missing target references" />
-        <MetricCard label="Health" value={String(result.issues.length)} detail={`${summary.unusedResources} unused · ${summary.duplicateGroups} duplicate groups · ${summary.conflictGroups} conflicts`} />
+        <MetricCard label="Broken" value={String(summary.missingReferences)} detail={`${summary.invalidUrls} invalid URLs (not counted as missing)`} />
+        <MetricCard label="Health" value={String(result.issues.length)} detail={`${summary.unusedResources} unused · ${summary.unreachableComponents} unreachable · ${summary.duplicateGroups} duplicate groups · ${summary.conflictGroups} conflicts`} />
       </section>
 
       <Card className="overflow-hidden">
@@ -877,7 +881,7 @@ function ProjectAssetManager({ project }: { project: RegisteredProjectData }) {
               <div className="grid shrink-0 gap-2 border-b p-3 sm:grid-cols-[minmax(0,1fr)_150px]">
                 <label className="relative min-w-0"><Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="搜索资源" aria-label="搜索 Asset Manager 资源" className="h-9 w-full rounded-md border bg-background pl-9 pr-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" /></label>
                 <select value={health} onChange={(event) => setHealth(event.target.value as typeof health)} aria-label="筛选资源健康状态" className="h-9 rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                  <option value="all">全部资源</option><option value="missing">断链来源</option><option value="unused">未使用</option><option value="duplicate">完全重复</option><option value="conflict">名称冲突</option>
+                  <option value="all">全部资源</option><option value="missing">断链来源</option><option value="invalid-url">无法解析 URL</option><option value="unreachable">不可达私有组件</option><option value="unused">未使用</option><option value="duplicate">完全重复</option><option value="conflict">名称冲突</option>
                 </select>
               </div>
               <AssetResourceList resources={resources} selectedKey={selectedKey} onSelect={setSelectedKey} />
@@ -888,10 +892,10 @@ function ProjectAssetManager({ project }: { project: RegisteredProjectData }) {
       </Card>
 
       <Card>
-        <CardHeader className="border-b"><CardTitle>工程问题</CardTitle><CardDescription>问题只提供定位与影响信息；当前版本不会自动删除、重命名或合并资源。</CardDescription><CardAction><Badge variant={summary.missingReferences || summary.conflictGroups ? "destructive" : "secondary"}>{result.issues.length}</Badge></CardAction></CardHeader>
+        <CardHeader className="border-b"><CardTitle>工程问题</CardTitle><CardDescription>问题只提供定位与影响信息；项目设置中的 URL 问题只在此列出，不对应单个资源。当前版本不会自动删除、重命名或合并资源。</CardDescription><CardAction><Badge variant={result.issues.some(({ severity }) => severity === "error") ? "destructive" : "secondary"}>{result.issues.length}</Badge></CardAction></CardHeader>
         <CardContent>
           {visibleIssues.length ? <div className="divide-y">{visibleIssues.map((issue, index) => <AssetIssueRow key={`${issue.kind}:${issue.label}:${index}`} issue={issue} resourceByKey={resourceByKey} />)}</div> : <div className="grid min-h-32 place-items-center text-sm text-muted-foreground">没有发现资源健康问题</div>}
-          {result.issues.length > visibleIssues.length ? <p className="mt-4 text-xs text-muted-foreground">仅显示前 {visibleIssues.length} 项；完整结果可通过 Agent 查询。</p> : null}
+          {result.issues.length > visibleIssues.length ? <p className="mt-4 text-xs text-muted-foreground">仅显示前 {visibleIssues.length} 项；可通过 Agent 按资源查询影响与截断信息。</p> : null}
         </CardContent>
       </Card>
     </div>
@@ -922,9 +926,10 @@ function AssetResourceDetail({ resource, resourceByKey, incoming, outgoing, issu
   issues: AssetIssue[]
 }) {
   if (!resource) return <section className="grid min-h-64 place-items-center p-8 text-sm text-muted-foreground">选择一个资源查看引用详情</section>
+  const issueKinds = [...new Set(issues.map(({ kind }) => kind))]
   return (
     <section className="min-w-0 overflow-auto p-5 lg:h-full" aria-label="资源详情">
-      <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="text-xs font-semibold uppercase tracking-[0.16em] text-blue-400">{resource.kind}</p><h2 className="mt-1 truncate text-xl font-semibold">{resource.name}</h2><p className="mt-1 truncate text-xs text-muted-foreground">{resource.packageName}/{displayAssetPath(resource)} · {resource.key}</p></div><div className="flex gap-2"><Badge variant={resource.exported ? "secondary" : "outline"}>{resource.exported ? "EXPORTED" : "INTERNAL"}</Badge>{issues.map(({ kind }, index) => <Badge key={`${kind}:${index}`} variant={kind === "missing" || kind === "conflict" ? "destructive" : "outline"}>{assetIssueKindLabel(kind)}</Badge>)}</div></div>
+      <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="text-xs font-semibold uppercase tracking-[0.16em] text-blue-400">{resource.kind}</p><h2 className="mt-1 truncate text-xl font-semibold">{resource.name}</h2><p className="mt-1 truncate text-xs text-muted-foreground">{resource.packageName}/{displayAssetPath(resource)} · {resource.key}</p></div><div className="flex flex-wrap gap-2"><Badge variant={resource.exported ? "secondary" : "outline"}>{resource.exported ? "EXPORTED" : "INTERNAL"}</Badge>{issueKinds.map((kind) => <Badge key={kind} variant={issues.some((issue) => issue.kind === kind && issue.severity === "error") ? "destructive" : "outline"}>{assetIssueKindLabel(kind)}</Badge>)}</div></div>
       <dl className="mt-5 grid gap-3 rounded-xl border bg-muted/15 p-4 text-sm sm:grid-cols-2"><div><dt className="text-xs text-muted-foreground">分支 / 路径</dt><dd className="mt-1 break-all">{resource.branch || "default"} · {resource.path || "/"}</dd></div><div><dt className="text-xs text-muted-foreground">源文件</dt><dd className="mt-1">{formatAssetBytes(resource.byteLength)}</dd></div><div className="sm:col-span-2"><dt className="text-xs text-muted-foreground">SHA-256</dt><dd className="mt-1 break-all font-mono text-xs">{resource.sha256 ?? "未提供可哈希的源字节"}</dd></div></dl>
       <div className="mt-6 grid gap-6 xl:grid-cols-2"><AssetReferenceList title={`Incoming (${incoming.length})`} references={incoming} direction="incoming" resourceByKey={resourceByKey} /><AssetReferenceList title={`Outgoing (${outgoing.length})`} references={outgoing} direction="outgoing" resourceByKey={resourceByKey} /></div>
     </section>
@@ -949,7 +954,7 @@ function AssetIssueRow({ issue, resourceByKey }: { issue: AssetIssue; resourceBy
 }
 
 function assetIssueKindLabel(kind: AssetIssue["kind"]) {
-  return { missing: "断链", unused: "未使用", duplicate: "重复", conflict: "冲突" }[kind]
+  return { missing: "断链", unused: "未使用", duplicate: "重复", conflict: "冲突", "invalid-url": "无法解析 URL", unreachable: "不可达私有组件" }[kind]
 }
 
 function formatAssetBytes(value: number | null) {
@@ -1322,7 +1327,16 @@ function ImportDraftRoutePage() {
   return <ImportDraftPage draftId={draftId} renderPreview={(project, onCapture) => <ProjectViewer project={project} compact onCapture={onCapture} />} />
 }
 
-export const router = createRouter({ routeTree, defaultPreload: "intent" })
+function FeatureRouteError() {
+  return <Card role="alert" className="border-destructive/40"><CardContent className="grid min-h-52 place-content-center gap-4 text-center"><h1 className="font-semibold">此功能页面发生错误</h1><p className="text-sm text-muted-foreground">可继续使用侧栏切换其他功能；重新加载将清除当前页面的未保存状态。</p><div className="flex justify-center gap-2"><Button variant="outline" onClick={() => window.location.reload()}>重新加载页面</Button><Button asChild><Link to="/">返回概览</Link></Button></div></CardContent></Card>
+}
+
+export const router = createRouter({
+  routeTree,
+  defaultPreload: "intent",
+  defaultPendingComponent: () => <ViewerLoading message="正在加载功能页面…" />,
+  defaultErrorComponent: FeatureRouteError,
+})
 
 declare module "@tanstack/react-router" {
   interface Register {

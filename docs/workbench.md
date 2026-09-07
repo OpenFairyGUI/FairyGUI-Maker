@@ -1,7 +1,7 @@
 # FairyGUI Maker Workbench 架构与技术栈基线
 
 状态：核心栈、Viewer 与 Artifact-first Player 第一版已落地
-更新时间：2026-09-04
+更新时间：2026-09-07
 
 本文记录 FairyGUI Maker 浏览器界面层 Maker Workbench 的架构基线和已确认技术选案。Hono、React、TanStack Router/Query/Table/Virtual、Zod、Radix、Pino、react-resizable-panels 与 shadcn/ui 已进入第一版运行链路。
 
@@ -14,7 +14,7 @@ Maker Workbench（下文简称 Workbench）是 FairyGUI Maker 由 Maker Host 提
 | Dashboard | 用户授权的 FairyGUI 工程、产物和运行任务 | 创建只读工程绑定，管理活跃及最近工程，展示 revision、权限、发布和诊断状态 |
 | Viewer | `projectId + revision + packageId + resourceId` | 预览工程态资源、组件结构和当前可投影效果 |
 | Player | `artifactId + runtimeProfile + componentId` | 加载发布态二进制与资源，执行回放、交互和连续 UI 测试 |
-| Asset Manager | 工程快照和 artifact manifest | 查询资源引用、反向引用、未使用、重复、冲突和发布映射 |
+| Asset Manager | 固定 revision 的工程快照 | 查询引用、断链、无法解析 URL、不可达私有组件、未使用、重复和冲突 |
 
 Viewer 与 Player 必须分开定义：Viewer 直接映射尚未发布的工程，不触发发布；只读约束工程写回，不禁止 render session 内的控件交互。遇到 UAM 或 runtime 暂不支持的语义时返回结构化 diagnostic。Player 只运行固定发布产物，不把工程态结果冒充发布结果。
 
@@ -666,6 +666,21 @@ Viewer / Player 当前没有新增自定义 MCP resource。Artifact manifest 和
 - 同包路径和名称冲突检查。
 
 首版界面使用资源列表、incoming/outgoing 详情和工程问题清单；`inspect_project_assets` 复用同一份 revision 快照供 Agent 查询。删除保护当前体现为影响信息，尚不开放删除、重命名、合并或引用重写。只有项目规模证明按需扫描或列表不足时，再增加增量索引或图形视图。
+
+### T6：诊断、可信度与按需维护
+
+分析快照、REST GET/PUT 返回和 MCP `inspect_project_assets` 的摘要/单资源结果统一声明 `analysisOwner: "browser"`、`trust: "advisory"`，即使项目源快照由 Host 持有，分析仍由浏览器完成。Host 校验结构、预算、稳定 ID、引用计数与 revision，不重算哈希/引用或担保结论。schemaVersion 仍为 1：旧上传可省略这两个字段，Host 补上固定值；伪称 `host` / `verified` 会被拒绝。单资源问题也受 `limit` 限制，并返回 `issuesTotal` / `issuesTruncated`，避免大量 URL 诊断撑大 Agent 响应。
+
+- `invalid-url`：无法解析的 `ui://` 值保留来源路径和关联资源，不再静默丢弃，也不混入 missing 计数。当前只解析 8 位包 ID 加资源 ID 的形式；名称路径式 URL 属于尚未解析，不宣称所有此类 URL 在原生 runtime 中非法。项目 settings 问题没有资源 key，仍显示在工程问题清单。
+- `unreachable`：从所有导出资源与项目 settings 出发，遍历跨包引用、Controller/Transition URL 和 branchItemIds，标记未到达的私有组件；私有循环不会因有入站引用而漏报。未使用非组件资源仍沿用原有零入站语义，未扩展为自动清理策略。
+- ID 只接受 1–128 位 `[A-Za-z0-9_-]`；`packageId/resourceId` 必须恰有一个分隔符。重复 key、额外斜杠或非法 ID 在分析/Host 边界拒绝。上限维持 5,000 资源、50,000 引用，并对问题条数设同等上限。
+- 页面展示 advisory 说明、新摘要计数、两种筛选及选中资源详情；筛选变更时详情跟随可见资源。不可达只针对已识别的静态引用，动态加载、外部引用和无法解析 URL 均不在证明范围内，不能据此判断安全删除。
+
+Feature Route 使用现有 TanStack Router 的错误边界，单页渲染异常不替换其他功能和侧栏；提供返回概览与显式重新加载，后者提示未保存状态会丢失。Design Import 两个页面通过现有模块按需加载，不另建通用错误/插件框架。Windows 生产构建基线的 Workbench 主包为 567.12 KB（gzip 173.83 KB）；改动后约 546 KB（gzip 168 KB），Design Import 独立块约 25.54 KB（gzip 8.22 KB），Dashboard 实测不提前请求此块。共享渲染/表格依赖仍使主块超过 500 KB；不通过调高告警阈值或机械拆文件掩盖它。
+
+旧 `project.md` 原文迁入 [历史提案](./archive/design-to-fairygui-proposal.md)，避免与当前架构并列充当事实来源；没有丢弃历史内容。源码 barrel 补齐导入交互和保真报告类型，保留 `MemoryFileSystem` 兼容导出；没有新增 npm SDK 或改动发布入口。贡献约定和 PR 检查项记录在仓库根目录与 `.github`。已在批次 20 移除的两份手工 Player 脚本不重复处理，`.claude` 和 `components.json` 保持不变。
+
+验证入口：`test/viewer-scene.test.ts`、`test/server.test.ts` 覆盖诊断图、非法 URL/ID、旧快照兼容与 MCP 信任声明；`scripts/project-revision-smoke.ts` 使用真实目录读取、扫描、筛选、reload/rescan 和 REST 回传验证诊断；`scripts/workbench-routes-smoke.ts` 检查按需请求、注入渲染异常、跨页导航与重新加载恢复。页面截图保存在同一次浏览器 evidence 目录；完整 Viewer/Player 与语义 Golden 不更新。
 
 ## 7. 技术栈选案
 

@@ -12,7 +12,7 @@ Maker 让人和 Agent 使用同一组稳定 ID、revision 与 render session 协
 
 - 让 Agent 检查、修改并按明确授权保存 `.fairy` 工程。
 - 在发布前通过 Viewer 预览当前工程组件，而不生成 `.fui`。
-- 查询工程资源引用、断链、未使用、完全重复与名称冲突。
+- 查询工程资源引用、断链、无法解析 URL、不可达私有组件、未使用、完全重复与名称冲突（浏览器分析，仅供参考）。
 - 通过 Player 加载真实 `.fui` / `_fui.bytes` 发布目录，验证原生运行时表现。
 - 获取结构化对象树、控件状态、Controller、Transition、交互记录和 Canvas PNG 证据。
 
@@ -295,6 +295,7 @@ GitHub CI 会在 Windows/Linux 与 Node.js 22/24 上执行 runtime 校验、构�
 
 ## 文档
 
+- [参与开发与验证约定](./CONTRIBUTING.md)
 - [产品定位与技术架构](./docs/architecture.md)
 - [Maker Workbench、Viewer、Player 与 render session 协议](./docs/workbench.md)
 - [第三方运行时与补充声明](./THIRD_PARTY_NOTICES.md)；生产构建还会生成并发行 `dist/web/THIRD_PARTY_LICENSES.md`

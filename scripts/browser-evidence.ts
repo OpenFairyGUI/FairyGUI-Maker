@@ -12,6 +12,9 @@ export type BrowserDiagnostic = { phase: string; kind: string; message: string; 
 // Exceptions describe the deliberate fault, not an entire page/phase. Everything is still saved.
 export function expectedDiagnostic(d: BrowserDiagnostic): string | undefined {
   const url = d.url
+  if (d.phase === "workbench-route-fault" && d.kind === "console.error"
+    && /^TypeError: Cannot read properties of null \(reading 'draftId'\)/.test(d.message)
+    && /\/assets\/workbench-[\w-]+\.js$/.test(url)) return "injected null draft exercises the feature route render boundary"
   if (d.kind === "requestfailed" && d.method === "GET" && d.message === "net::ERR_ABORTED") {
     if (/\/api\/render-sessions\/[^/]+(?:\/commands)?$/.test(url)) return "cancelled session read/poll"
     if (/\/assets\/image-probe.worker-[\w-]+\.js$/.test(url)) return "cancelled runtime bootstrap"
