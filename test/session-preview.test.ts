@@ -11,6 +11,34 @@ import { Document, liftDocumentToUamProject } from "@openfairygui/core"
 import { startMakerHost } from "../src/server/index"
 import { VIEWER_PROTOCOL_VERSION } from "../src/viewer-protocol"
 
+test("full Host discovers Maker preview tools alongside Backend tools", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "maker-mcp-discovery-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const host = await startMakerHost({ port: 0, dataDir: root })
+  const client = new Client({ name: "mcp-discovery-test", version: "1" })
+  const transport = new StreamableHTTPClientTransport(new URL(`${host.origin}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${host.token}` } } })
+  try {
+    await client.connect(transport)
+    const names = new Set<string>()
+    let cursor: string | undefined
+    do {
+      const page = await client.listTools({ cursor })
+      for (const tool of page.tools) names.add(tool.name)
+      cursor = page.nextCursor
+    } while (cursor)
+    const required = [
+      "openfairygui_backend_open_session", "openfairygui_backend_query_entity", "openfairygui_backend_apply_transaction", "openfairygui_backend_save_session",
+      "open_session_preview", "list_viewer_components", "render_component_preview", "update_render_session", "set_render_view", "inspect_project_assets",
+      "list_artifact_components", "open_artifact_player", "render_artifact_component", "get_render_observation", "capture_render_screenshot", "run_ui_scenario",
+    ]
+    assert.deepEqual(required.filter((name) => !names.has(name)), [], "all Host capabilities must be discoverable through tools/list")
+  } finally {
+    await transport.terminateSession().catch(() => undefined)
+    await client.close()
+    await host.close()
+  }
+})
+
 test("public session preview reads unsaved UAM and bytes at one revision and expires on edits/close", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "maker-session-preview-"))
   t.after(() => rm(root, { recursive: true, force: true }))

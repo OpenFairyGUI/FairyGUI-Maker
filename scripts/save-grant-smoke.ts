@@ -79,8 +79,20 @@ export async function saveGrantSmoke(context: BrowserContext, host: { origin: st
     await rejectRow.getByText("待确认", { exact: true }).waitFor()
     assert.equal((await act("拒绝", host.approvalToken, rejectRow)).status(), 200)
     await rejectRow.getByText("已拒绝", { exact: true }).waitFor()
+    assert.ok((await call("close_session", { sessionId })).ok)
+    sessionId = ""
+    const reopened = await call("open_session", { projectPath: projectRoot })
+    assert.ok(reopened.ok, JSON.stringify(reopened))
+    sessionId = reopened.data.sessionId
+    assert.equal(reopened.data.dirty, false)
+    const readback = await call("query_entity", { sessionId, target: {
+      kind: "displayNode", selector: { packageId: "SAVE0001", componentResourceId: "MAIN0001", displayNodeId: "TEXT0001" },
+    } })
+    assert.ok(readback.ok, JSON.stringify(readback))
+    assert.equal(readback.data.revision, reopened.data.revision)
+    assert.equal(readback.data.entity.properties.text, "Saved after approval")
     assert.deepEqual(errors, [])
-    return { ownerConfirmation: true, noWriteBeforeApproval: true, realDiskSave: true, singleUse: true, reload: true, revoke: true, reject: true }
+    return { ownerConfirmation: true, noWriteBeforeApproval: true, realDiskSave: true, singleUse: true, reload: true, revoke: true, reject: true, reopenReadback: true }
   } finally {
     if (sessionId) await call("close_session", { sessionId }).catch(() => undefined)
     await transport.terminateSession().catch(() => undefined)

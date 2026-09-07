@@ -31,7 +31,7 @@ node --import tsx scripts/session-preview-smoke.ts
 
 真实浏览器使用临时合成工程：读回 `Before` → 预览红色跨包图片 → Backend 事务改为 `Unsaved after` 和蓝色图片 → query 读回 revision 1 → 旧 renderer 失效 → 刷新并捕获新画面 → 浏览器 reload → 关闭会话。两个 PNG 各检测到 1024 个目标色像素；未使用资源不下载，磁盘 XML/PNG 保持原样。证据输出至 `test-results/session-preview/`，也纳入常规 `test:browser`。
 
-本轮完整执行结果：
+`5dce753` 时的完整执行结果：
 
 | 检查 | 结果 |
 |---|---|
@@ -43,4 +43,6 @@ node --import tsx scripts/session-preview-smoke.ts
 
 浏览器报告为 `test-results/browser/run-rT4qpl/report.json`，内存报告为 `test-results/memory/node-1788775092022.json`。过程中修正了既有烟测的网络事件等待：Player 已停止却可能收不到 Playwright 的 404 response 事件；现按真实停止界面及重连后新旧 session 身份验证，未放宽运行时错误或保存授权断言。
 
-必须保留的失败门禁：上游工厂 `tools/list` 只返回自身 20 个 Backend 工具，Maker 后注册工具按名称可调用但无法发现；严格 output schema 把 `save_approval_required` 等 Host 结果改成 `backend_unhandled_error`。已有真实 Host 保存测试会失败，不能跳过、伪造成功或通过私有注册表补丁解决。等待上游公开 Host 组合接口发布后，再验收完整工具发现、一次授权保存及保存后重开读回；当前结果不代表整个升级可发布。
+后续补充了真实 Host 的 `tools/list` 门禁，要求同时发现 Backend 编辑/读回/保存入口及全部 12 个 Maker 工具。保存浏览器烟测增加关闭、重开磁盘工程、确认 clean 状态、读回保存字段，并核对读回 revision 与重开 revision 一致的断言。当前专项命令 `node --import tsx --test test/session-preview.test.ts test/save-grants.test.ts test/backend-files.test.ts` 为 5/8 通过：新增工具发现测试及原有两项保存测试失败；类型检查通过。重开读回分支仍被前面的保存响应错误阻断，尚未完成实测。
+
+必须保留的失败门禁：上游工厂 `tools/list` 只返回自身 20 个 Backend 工具，Maker 后注册工具按名称可调用但无法发现；严格 output schema 把 `save_approval_required` 等 Host 结果改成 `backend_unhandled_error`。真实 Host 工具发现和保存测试会失败，不能跳过、伪造成功或通过私有注册表补丁解决。等待上游公开 Host 组合接口发布后，再验收完整工具发现、一次授权保存及保存后重开读回；当前结果不代表整个升级可发布。
