@@ -1,0 +1,88 @@
+{
+  "diagnostics": [],
+  "name": "MinimalExample",
+  "pages": [
+    {
+      "id": "page-main",
+      "name": "Demo",
+      "roots": [
+        {
+          "backgroundColor": "#f7f8fc",
+          "children": [
+            {
+              "asset": "assets/000001.svg",
+              "constraints": null,
+              "format": "svg",
+              "height": 32,
+              "id": "icon-check",
+              "kind": "image",
+              "layoutChild": true,
+              "mask": false,
+              "name": "Check",
+              "opacity": 1,
+              "rotation": 0,
+              "scaleX": 1,
+              "scaleY": 1,
+              "visible": true,
+              "width": 32,
+              "x": 24,
+              "y": 64
+            },
+            {
+              "align": "left",
+              "autoSize": "none",
+              "bold": false,
+              "color": "#172033",
+              "constraints": null,
+              "fontFamily": "Arial",
+              "fontSize": 24,
+              "height": 32,
+              "id": "title",
+              "italic": false,
+              "kind": "text",
+              "layoutChild": true,
+              "letterSpacing": 0,
+              "lineHeight": null,
+              "mask": false,
+              "name": "Title",
+              "opacity": 1,
+              "rotation": 0,
+              "runs": [],
+              "scaleX": 1,
+              "scaleY": 1,
+              "shadow": null,
+              "singleLine": true,
+              "strikethrough": false,
+              "text": "Hello Maker",
+              "underline": false,
+              "verticalAlign": "middle",
+              "visible": true,
+              "width": 224,
+              "x": 72,
+              "y": 64
+            }
+          ],
+          "clipContent": false,
+          "constraints": null,
+          "height": 160,
+          "id": "screen-main",
+          "kind": "frame",
+          "layout": null,
+          "layoutChild": true,
+          "mask": false,
+          "name": "Main",
+          "opacity": 1,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1,
+          "sourceType": "frame",
+          "variantProperties": {},
+          "visible": true,
+          "width": 320,
+          "x": 0,
+          "y": 0
+        }
+      ]
+    }
+  ]
+}

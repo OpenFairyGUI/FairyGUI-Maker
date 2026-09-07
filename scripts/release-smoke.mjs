@@ -185,6 +185,18 @@ try {
   if (!help.stdout.includes("fairygui-maker import") || !help.stdout.includes("fairygui-maker reimport") || !help.stdout.includes("view <project-path>") || !help.stdout.includes("--data-dir <path>") || !help.stdout.includes("FAIRYGUI_MAKER_APPROVAL_TOKEN")) throw new Error("Installed CLI help is incomplete")
   const version = await run(bin, ["--version"], { cwd: consumer })
   if (version.stdout.trim() !== expectedVersion) throw new Error(`Unexpected installed CLI version: ${version.stdout.trim()}`)
+  const example = path.join(installedRoot, "docs", "examples", "minimal-bundle")
+  const exampleData = path.join(tempRoot, "example-data")
+  const inspectedExample = JSON.parse((await run(bin, ["import", "inspect", example, "--data-dir", exampleData], { cwd: consumer })).stdout)
+  if (inspectedExample.draft.status !== "parsed" || inspectedExample.draft.generated !== null) throw new Error("Installed example inspect did not stay uncompiled")
+  const examplePlan = path.join(consumer, "example-plan.json")
+  await run(bin, ["import", "plan", example, "--out", examplePlan, "--data-dir", exampleData], { cwd: consumer })
+  if (JSON.parse(await readFile(examplePlan, "utf8")).schemaVersion !== 2) throw new Error("Installed example Plan is missing")
+  const dryExample = JSON.parse((await run(bin, ["import", example, "--dry-run", "--data-dir", exampleData], { cwd: consumer })).stdout)
+  if (dryExample.draft.status !== "compiled" || dryExample.draft.materialized !== null || dryExample.draft.generated.report.editableText !== 1) throw new Error("Installed example dry-run is incomplete")
+  const exampleResult = JSON.parse((await run(bin, ["import", example, "--out", path.join(consumer, "example-output"), "--data-dir", exampleData], { cwd: consumer })).stdout)
+  if (exampleResult.report.editableText !== 1 || exampleResult.report.imageBytes < 1) throw new Error("Installed Bundle example lost text or assets")
+  await access(exampleResult.fairyPath)
   const importedDirectory = path.join(consumer, "imported-fig")
   const imported = await run(bin, ["import", path.join(root, "test", "fixtures", "design-import", "basic-shapes.fig"), "--out", importedDirectory], { cwd: consumer })
   const importResult = JSON.parse(imported.stdout)
@@ -275,7 +287,7 @@ try {
   }
   await verifyArtifactPersistence(installedRoot, origin, headers)
   if ([token, approvalToken].some((secret) => stdout.includes(secret) || stderr.includes(secret))) throw new Error("Installed Host exposed a configured token in process output")
-  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), tarballSha256, runtimeFiles: installedLock.files.length, version: version.stdout.trim(), host: true, mcp: true, deterministicImport: true, saveGrants: true, runtimeIsolation: true, artifactPersistence: true }) + "\n")
+  process.stdout.write(JSON.stringify({ tarball: path.basename(tarball), tarballSha256, runtimeFiles: installedLock.files.length, version: version.stdout.trim(), portableSkills: true, bundleExample: true, host: true, mcp: true, deterministicImport: true, saveGrants: true, runtimeIsolation: true, artifactPersistence: true }) + "\n")
 } finally {
   if (host && host.exitCode === null) {
     const exited = new Promise((resolve) => host.once("exit", resolve))

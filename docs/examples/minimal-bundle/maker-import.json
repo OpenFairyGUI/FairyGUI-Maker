@@ -1,0 +1,33 @@
+{
+  "assets": [
+    {
+      "byteLength": 212,
+      "format": "svg",
+      "path": "assets/000001.svg",
+      "sha256": "4cf9309403e22fa320ce9fd2224e6d43e926391c36555437a620b5e2df9ac122"
+    }
+  ],
+  "bindings": [
+    {
+      "assetPath": "assets/000001.svg",
+      "pixelRatio": 1,
+      "scale9Grid": null,
+      "sourceNodeId": "icon-check",
+      "trimOffset": {
+        "x": 0,
+        "y": 0
+      }
+    }
+  ],
+  "document": {
+    "byteLength": 2289,
+    "path": "fixture.json",
+    "sha256": "2e1e6ad8f26b7be5166b38694436eaf182b424a3b823a5129cabe7f7a1058473"
+  },
+  "schemaVersion": 1,
+  "source": {
+    "kind": "raster",
+    "name": "sample-icon.svg",
+    "sha256": "4cf9309403e22fa320ce9fd2224e6d43e926391c36555437a620b5e2df9ac122"
+  }
+}

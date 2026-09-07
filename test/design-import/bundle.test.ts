@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readBundleDirectory } from '../../src/design-import/node';
+import { compilePlanToUam } from '../../src/design-import/convert';
+import { planDocument } from '../../src/design-import/plan';
 import {
   MAKER_IMPORT_BUNDLE_MANIFEST,
   makerImportSha256,
@@ -51,6 +54,19 @@ const document: ImportDocument = {
     }],
   }],
 };
+
+test('the shipped documentation bundle has valid exact bytes and compiles editable text plus an image', async () => {
+  const files = await readBundleDirectory('docs/examples/minimal-bundle');
+  const parsed = await parseMakerImportBundleV1(files);
+  assert.equal(parsed.manifest.source.sha256, await makerImportSha256(files['assets/000001.svg']));
+  assert.deepEqual(Object.keys(files).sort(), ['assets/000001.svg', 'fixture.json', 'maker-import.json']);
+  const plan = planDocument(parsed.document);
+  const compiled = compilePlanToUam(parsed.document, plan);
+  assert.equal(compiled.report.editableText, 1);
+  assert.ok(compiled.project.packages[0].resources.some((resource) => resource.kind === 'image'));
+  assert.ok(compiled.project.packages[0].resources.some((resource) => resource.kind === 'component'
+    && resource.component.displayList.some((node) => node.kind === 'text' && node.text === 'Hello Maker')));
+});
 
 test('round-trips deterministic Maker Import Bundle v1 files and rejects tampering', async () => {
   const sourceBytes = new TextEncoder().encode('source');

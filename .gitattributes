@@ -1,2 +1,4 @@
 # Vendored runtime checksums must be identical on Windows and Linux.
 /public/viewer-runtime/*.js -text
+# Bundle hashes cover exact source bytes, including JSON/SVG line endings.
+/docs/examples/minimal-bundle/** -text

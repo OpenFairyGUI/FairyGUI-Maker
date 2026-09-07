@@ -3,6 +3,23 @@
 Maker Import Bundle v1 是设计源进入 FairyGUI Maker 后的确定性、可校验交换格式。它复用现有
 ImportDocument，不定义第二套设计模型，也不包含 Agent 推断的 Button、GList 或 Controller 语义。
 
+## 可直接运行的完整示例
+
+安装包随附 [minimal-bundle](./examples/minimal-bundle/maker-import.json)：完整的 [fixture.json](./examples/minimal-bundle/fixture.json)、[manifest](./examples/minimal-bundle/maker-import.json) 和 [SVG 资源](./examples/minimal-bundle/assets/000001.svg)，可直接导入，无需源码或测试夹具。
+
+```powershell
+$bundle = Join-Path (npm root) "fairygui-maker/docs/examples/minimal-bundle"
+fairygui-maker import inspect $bundle --data-dir .maker-example-data
+fairygui-maker import plan $bundle --out example-plan.json --data-dir .maker-example-data
+fairygui-maker import $bundle --dry-run --data-dir .maker-example-data
+fairygui-maker import $bundle --out example-output --data-dir .maker-example-data
+fairygui-maker view example-output --data-dir .maker-example-data
+```
+
+`example-plan.json` 和 `example-output` 必须尚不存在。源码 checkout 可将 `$bundle` 改为 `docs/examples/minimal-bundle`，命令改为 `node scripts/fairygui-maker.mjs ...`（先构建）。示例生成一个 320×160 的 Main 组件，包含 “Hello Maker” 可编辑文本和一个图标。它是人工编写的教学 IR，`source.kind: raster` 与 `source.sha256` 追踪随附 SVG 的实际字节，不代表从 Figma/PSD 服务导出的真实设计。
+
+只检查时用前三条命令；视觉表现仍需 Viewer 验证。精确的 `fixture.json` 字段、必填 null/空数组及节点引用规则见 [ImportDocument v1 完整字段参考](./import-document-v1.md)。不要把其他文件放进 Bundle 目录；修改任何文档/资源字节后必须重新计算 manifest 中对应的 SHA-256 和 byteLength（以字节计，不能用字符串长度）。
+
 ## 目录结构
 
 ```text
