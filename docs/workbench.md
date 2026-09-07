@@ -357,7 +357,8 @@ Plan 的 `diagnostics` 只是展示快照。编译时重新获取选中根与依
 升级与入口：
 
 - CLI、Draft Store 和重导入统一传入真实 imageBindings，不存在绕过摘要的旧编译入口。
-- persisted v1 Draft 元数据仍能恢复；旧 BuildPlan 不自动加盖新摘要，必须调用 Plan，或在 Workbench planned 状态点击“重新生成 Build Plan”。界面携带原计划 exported roots，保留所选根范围，沿用原 expectedRevision/CAS；校验失败不改变 Draft revision，也不产生 generated 目录。
+- persisted v1 Draft 元数据仍能恢复；旧 BuildPlan 不自动加盖新摘要，必须调用 Plan，或在 Workbench planned/compiled 状态点击“重新生成 Build Plan”。Host 在省略 rootIds 时保留原计划 exported roots，沿用 expectedRevision/CAS；校验失败不改变 Draft revision。
+- 预览后可直接修改 Mapping：已有计划时自动重新规划并回到 planned，然后重新编译。成功改稿会撤下旧预览、关闭旧会话并清除当前视觉证据；新编译结果通过独立生成目录原子切换。已物化 Draft 保留完成记录；目标已写入但回执未完成时先恢复 Materialize，再另建 Draft 继续工作。
 - 新 State v2 记录独立 Planner/Compiler 版本，重导入拒绝不匹配版本；兼容没有这两个字段的旧 State v2，并按原映射复用 ID。生成算法变化需更新版本，不以 npm package version 代替算法版本。
 - 本批复用既有 Hybrid/Semantic Overlay/UAM 编译链，不新增 Planner 服务、缓存、依赖或另一套 UI DSL；完整 Component Library Mapping、交互编排及新增栅格化能力不在本批扩展。
 

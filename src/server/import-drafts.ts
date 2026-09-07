@@ -160,21 +160,25 @@ export function registerImportDraftApi(
       }
     })
     .patch('/api/import-drafts/:draftId/semantic-overlay', zValidator('json', semanticUpdateSchema), async (c) => {
-      const { importDraftStore, importsEnabled } = readState();
+      const { importDraftStore, importsEnabled, removeDraftPreview } = readState();
       if (!importsEnabled) return readOnly(c);
       try {
         const { expectedRevision, nodeId, directive } = c.req.valid('json');
-        return c.json(await importDraftStore.updateSemanticDirective(c.req.param('draftId'), expectedRevision, nodeId, directive));
+        const result = await importDraftStore.updateSemanticDirective(c.req.param('draftId'), expectedRevision, nodeId, directive);
+        removeDraftPreview(c.req.param('draftId'));
+        return c.json(result);
       } catch (error) {
         return draftError(c, error);
       }
     })
     .post('/api/import-drafts/:draftId/plan', zValidator('json', planSchema), async (c) => {
-      const { importDraftStore, importsEnabled } = readState();
+      const { importDraftStore, importsEnabled, removeDraftPreview } = readState();
       if (!importsEnabled) return readOnly(c);
       try {
         const { expectedRevision, rootIds, semanticOverlay } = c.req.valid('json');
-        return c.json(await importDraftStore.plan(c.req.param('draftId'), expectedRevision, rootIds, semanticOverlay));
+        const result = await importDraftStore.plan(c.req.param('draftId'), expectedRevision, rootIds, semanticOverlay);
+        removeDraftPreview(c.req.param('draftId'));
+        return c.json(result);
       } catch (error) {
         return draftError(c, error);
       }

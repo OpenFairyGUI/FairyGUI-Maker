@@ -22,6 +22,7 @@ import { importTextSmoke } from "./import-text-smoke"
 import { semanticFidelitySmoke } from "./semantic-fidelity-smoke"
 import { workbenchRoutesSmoke } from "./workbench-routes-smoke"
 import { importRecoverySmoke } from "./import-recovery-smoke"
+import { importIterationSmoke } from "./import-iteration-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -169,8 +170,6 @@ try {
   const replannedResult = await replannedResponse
   if (!replannedResult.ok()) throw new Error("Workbench replan failed")
   const replanned = await replannedResult.json()
-  const requestedRootIds = firstPlan.buildPlan.packages.flatMap((pkg: any) => pkg.components.filter((root: any) => root.exported).map((root: any) => root.sourceNodeId))
-  if (JSON.stringify(replannedResult.request().postDataJSON().rootIds) !== JSON.stringify(requestedRootIds)) throw new Error("Workbench replan lost the selected root scope")
   if (replanned.draft.revision !== firstPlan.draft.revision + 1 || replanned.buildPlan.schemaVersion !== 2
     || JSON.stringify(replanned.buildPlan) !== JSON.stringify(firstPlan.buildPlan)) throw new Error("Workbench replan is not deterministic or revision-checked")
   await page.getByRole("button", { name: "编译 Viewer Preview" }).click()
@@ -355,6 +354,7 @@ try {
   const saveGrants = await evidence.step("save-grants", () => saveGrantSmoke(context, host!, publishDir))
   const runtimeNavigation = await evidence.step("runtime-navigation", () => runtimeNavigationSmoke(context, host!.origin, artifact))
   await evidence.step("import-recovery", () => importRecoverySmoke(context, host!.origin, evidence))
+  await evidence.step("import-iteration", () => importIterationSmoke(context, host!.origin, evidence, (name, args) => callTool(host!.origin, sessionId, 904, name, args)))
   if (!(await Promise.all(iframeCredentials)).every(Boolean)) throw new Error("Runtime iframe request carried Host credentials")
   evidence.verify()
   await context.close()

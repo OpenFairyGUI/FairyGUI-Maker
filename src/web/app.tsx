@@ -985,7 +985,7 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
   const [resourcesCollapsed, setResourcesCollapsed] = useState(false)
   const [collapsedPackages, setCollapsedPackages] = useState(() => new Set<string>())
   const bundle = useQuery({
-    queryKey: ["viewer-project", project.projectId],
+    queryKey: ["viewer-project", project.projectId, project.sourceRevision],
     queryFn: ({ signal }) => { setScanCancelled(false); return readViewerProject(project, { signal, onProgress: setScanProgress }) },
     retry: false,
     staleTime: Infinity,

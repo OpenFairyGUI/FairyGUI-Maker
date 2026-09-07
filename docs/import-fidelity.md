@@ -6,9 +6,11 @@ Planner 为 `deterministic-v2`，Compiler 为 `deterministic-v3`；Bundle/Import
 
 ## 可执行的计划字段
 
-`POST /api/import-drafts/:draftId/plan` 在原有鉴权、`expectedRevision` 和 parsed/planned 状态检查下接受可选的完整 `semanticOverlay`。
+`POST /api/import-drafts/:draftId/plan` 在原有鉴权、`expectedRevision` 和 parsed/planned/compiled 状态检查下接受可选的完整 `semanticOverlay`。
 省略它会沿用已保存的 Overlay；传入时是完整替换，不是深度合并。可先读取 Draft 详情的 `semanticOverlay` 再修改。
 Plan 与 Overlay 以同一份不可变快照保存，由 Draft revision 的原子提交选定。映射或重规划中途失败时，原 revision 仍读取、编译原内容；重启也不会接纳失败请求的输入。旧 Draft 格式仍可读取，下次映射或 Plan 时使用新快照。
+
+预览后可继续修改同一 Draft：在 planned/compiled 状态修改单节点映射时，Host 保留已选 exported roots 并重新生成 Plan，回到 planned；直接 Plan 省略 rootIds 时也保留原选择。成功重规划会撤下旧 Viewer、关闭旧渲染会话并清除当前视觉证据，需要重新编译和捕获。编译使用独立生成目录，由 Draft 元数据原子选中；失败不替换上一代内容，旧目录在重启时回收。materialized Draft 保留完成记录，不再改稿；若 Materialize 目标已写入但状态未恢复，必须先完成恢复，防止改稿丢失核对依据。
 
 Materialize 在提交目标前持久化目标、请求 revision 与生成目录的完整内容摘要。若工程已写入但 Draft 完成状态写入失败，REST 返回 `409 / materialize_recovery_required`、`committed: true` 和 `outputDirectory`；不能将其解释为“未写盘”。重启后 Draft 详情仍提供 `materializeAttempt`，Workbench 可“核对并完成上次物化”。用原参数重试时，Host 只在目标与已记录内容完全一致时恢复状态，返回 `recovered: true`；不会覆盖已有修改，也不会把没有匹配尝试记录的既有目录视为成功。成功响应丢失后，同一请求可重复读取结果而不再次写工程。
 Workbench 的单节点映射接口保持不变；本批字体库存与组件库策略通过 Plan API/程序调用输入，没有新增字体安装或库选择界面。

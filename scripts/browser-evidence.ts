@@ -26,9 +26,11 @@ export function expectedDiagnostic(d: BrowserDiagnostic): string | undefined {
   }
   if (d.kind === "requestfailed" && d.method === "DELETE" && d.message === "net::ERR_ABORTED"
     && /\/api\/render-sessions\/[^/]+$/.test(url)) return "best-effort renderer teardown (Host timeout/TTL remains authoritative)"
-  if (/^(delivery-|lifecycle-|project-revision$)/.test(d.phase)
+  if (/^(delivery-|lifecycle-|project-revision$|import-iteration$)/.test(d.phase)
     && (d.kind === "http" && d.status === 404 || d.kind === "console.error" && /404/.test(d.message))
     && /\/api\/render-sessions\/[^/]+\/commands$/.test(url)) return "closed or invalidated session poll"
+  if (d.phase === "import-iteration" && d.kind === "console.warning" && /\/viewer-runtime\.html$/.test(url)
+    && /^\[\.WebGL-0x[\da-f]+\]GL Driver Message \(OpenGL, Performance, GL_CLOSE_PATH_NV, High\): GPU stall due to ReadPixels$/.test(d.message)) return "synchronous PNG capture GPU readback performance notice"
   if (d.phase.startsWith("broker-state-") && /\/commands$/.test(url)
     && (d.kind === "http" && d.status === 409 || d.kind === "console.error" && /409/.test(d.message))) return "injected view CAS conflict"
   if (d.phase.startsWith("delivery-") && /\/api\/render-sessions\/[^/]+\/(results|interactions)$/.test(url)

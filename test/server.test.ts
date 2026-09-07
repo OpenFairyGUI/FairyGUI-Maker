@@ -834,7 +834,7 @@ test("Maker Host persists revision-checked import drafts and materializes only o
     const planned = await advance("plan")
   assert.equal(planned.buildPlan.schemaVersion, 2)
     await advance("compile")
-    assert.equal(await readFile(path.join(dataDir, "import-drafts", draft.draftId, "generated", "project", draft.generated.fairyFile)).then(() => true), true)
+    assert.equal(await readFile(path.join(dataDir, "import-drafts", draft.draftId, draft.generated.directory, "project", draft.generated.fairyFile)).then(() => true), true)
     await assert.rejects(readFile(path.join(targetPath, draft.generated.fairyFile)), { code: "ENOENT" })
     const compiledDetail = await fetch(`${host.origin}/api/import-drafts/${draft.draftId}`, { headers }).then((response) => response.json())
     assert.equal(compiledDetail.outline.pages.length, 1)

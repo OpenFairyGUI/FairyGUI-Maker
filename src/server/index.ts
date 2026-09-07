@@ -681,14 +681,17 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   }
 
   const previewProjectId = (draftId: string) => `project_${draftId.slice("draft_".length)}`
+  const draftPreviewGenerations = new Map<string, string>()
   const ensureDraftPreview = async (draftId: string) => {
     const projectId = previewProjectId(draftId)
-    const existing = projects.get(projectId)
-    if (existing) return existing
     const draft = importDraftStore.get(draftId)
     const generatedRoot = importDraftStore.getGeneratedProjectPath(draftId)
     if (!draft?.generated || !generatedRoot) throw new Error("Import draft has not been compiled")
+    const existing = projects.get(projectId)
+    if (existing && draftPreviewGenerations.get(projectId) === generatedRoot) return existing
+    if (existing) removeDraftPreview(draftId)
     const source = await createHostProjectSnapshot(generatedRoot)
+    if (importDraftStore.getGeneratedProjectPath(draftId) !== generatedRoot) throw new Error("Import draft generation changed during preview loading")
     const now = new Date().toISOString()
     const project: RegisteredProject = {
       projectId,
@@ -709,12 +712,14 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     }
     projects.set(projectId, project)
     projectSources.set(projectId, source)
+    draftPreviewGenerations.set(projectId, generatedRoot)
     return project
   }
   const removeDraftPreview = (draftId: string) => {
     const projectId = previewProjectId(draftId)
     projects.delete(projectId)
     projectSources.delete(projectId)
+    draftPreviewGenerations.delete(projectId)
     assetAnalyses.delete(projectId)
     renderBroker.invalidateProject(projectId)
   }

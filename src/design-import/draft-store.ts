@@ -104,6 +104,8 @@ export interface ImportDraftV1 {
     components: number;
   } | null;
   generated: {
+    /** Absent on legacy drafts stored in the fixed generated directory. */
+    directory?: string;
     fairyFile: string;
     projectId: string;
     ids: Record<string, string>;
@@ -120,6 +122,7 @@ export interface ImportDraftV1 {
 }
 
 const draftIdPattern = /^draft_[0-9a-f-]{36}$/;
+const generatedDirectory = z.string().regex(/^generated(?:-[0-9a-f-]{36})?$/);
 const dateString = z.string().max(64).refine((value) => Number.isFinite(Date.parse(value)), 'Invalid date');
 const fileName = z.string().min(1).max(255).refine(
   (value) => value === path.basename(value) && value !== '.' && value !== '..' && !value.includes('\0'),
@@ -226,6 +229,7 @@ const draftSchema = z.object({
     components: z.number().int().nonnegative(),
   }).strict().nullable(),
   generated: z.object({
+    directory: generatedDirectory.optional(),
     fairyFile: fileName.refine((value) => value.toLowerCase().endsWith('.fairy'), 'Invalid FairyGUI project file'),
     projectId: z.string().min(1).max(128),
     ids: z.record(z.string(), z.string()),
@@ -267,6 +271,7 @@ export class ImportDraftError extends Error {
 }
 
 const materializeAttemptSchema = z.object({
+  generatedDirectory: generatedDirectory.optional(),
   expectedRevision: z.number().int().positive(),
   outputDirectory: z.string().min(1),
   contentDigest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -325,6 +330,10 @@ export class ImportDraftStore {
           if (child.isDirectory() && (child.name === '.uploads' || child.name.startsWith('.generated-') || child.name.startsWith('.visual-evidence-'))) {
             await rm(path.join(draftRoot, child.name), { recursive: true, force: true });
           }
+          if (child.isDirectory() && generatedDirectory.safeParse(child.name).success
+            && child.name !== (draft.generated ? draft.generated.directory ?? 'generated' : null)) {
+            await rm(path.join(draftRoot, child.name), { recursive: true, force: true }).catch(() => undefined);
+          }
         }
       } catch {
         await rm(draftRoot, { recursive: true, force: true });
@@ -361,7 +370,7 @@ export class ImportDraftStore {
     const outline = snapshot ? outlineDocument(snapshot.document) : null;
     const planning = snapshot ? await this.readPlanning(draft, snapshot.document) : null;
     return { draft: structuredClone(draft), buildPlan: planning?.buildPlan ?? null, outline, semanticOverlay: planning?.semanticOverlay ?? null,
-      materializeAttempt: draft.status === 'compiled' ? await this.readMaterializeAttempt(draftId) : null };
+      materializeAttempt: draft.status === 'compiled' ? await this.readMaterializeAttempt(draft) : null };
   }
 
   async create(sourcePathInput: string): Promise<ImportDraftV1> {
@@ -539,13 +548,17 @@ export class ImportDraftStore {
     input: SemanticNodeDirective,
   ): Promise<{ draft: ImportDraftV1; semanticOverlay: MakerSemanticOverlayV1 }> {
     return this.mutate(async () => {
-      const draft = this.requireDraft(draftId, expectedRevision, ['parsed']);
+      const draft = this.requireDraft(draftId, expectedRevision, ['parsed', 'planned', 'compiled']);
       const snapshot = await this.readParsedSnapshot(draftId);
       const node = findNode(snapshot.document, nodeId);
       if (!node) throw new ImportDraftError(`Semantic mapping node does not exist: ${nodeId}`);
       const directive = assertSemanticTarget(node, input);
-      const { semanticOverlay } = await this.readPlanning(draft, snapshot.document);
+      const { semanticOverlay, buildPlan } = await this.readPlanning(draft, snapshot.document);
       semanticOverlay.nodes[nodeId] = directive;
+      if (buildPlan) {
+        const { draft: updated } = await this.commitPlan(draft, snapshot, semanticOverlay, this.plannedRoots(buildPlan), true);
+        return { draft: updated, semanticOverlay };
+      }
       const updated = await this.commitPlanning(draft, 'parsed', { semanticOverlay, buildPlan: null }, {
         semanticOverlay: {
           revision: (draft.semanticOverlay?.revision ?? 1) + 1,
@@ -558,25 +571,27 @@ export class ImportDraftStore {
 
   async plan(draftId: string, expectedRevision: number, rootIds?: string[], inputOverlay?: MakerSemanticOverlayV1): Promise<{ draft: ImportDraftV1; buildPlan: FairyBuildPlanV2 }> {
     return this.mutate(async () => {
-      const draft = this.requireDraft(draftId, expectedRevision, ['parsed', 'planned']);
+      const draft = this.requireDraft(draftId, expectedRevision, ['parsed', 'planned', 'compiled']);
       const snapshot = await this.readParsedSnapshot(draftId);
+      const previous = await this.readPlanning(draft, snapshot.document);
       const semanticOverlay = inputOverlay ? validateSemanticOverlay(snapshot.document, inputOverlay)
-        : (await this.readPlanning(draft, snapshot.document)).semanticOverlay;
-      const buildPlan = planDocument(snapshot.document, { rootIds, semanticOverlay, imageBindings: snapshot.imageBindings });
-      const updated = await this.commitPlanning(draft, 'planned', { semanticOverlay, buildPlan }, {
-        diagnostics: buildPlan.diagnostics,
-        buildPlan: {
-          schemaVersion: buildPlan.schemaVersion,
-          packages: buildPlan.packages.length,
-          components: buildPlan.packages.reduce((count, pkg) => count + pkg.components.length, 0),
-        },
-        semanticOverlay: {
-          revision: (draft.semanticOverlay?.revision ?? 1) + (inputOverlay ? 1 : 0),
-          mappedNodes: Object.keys(semanticOverlay.nodes).length,
-        },
-      });
-      return { draft: updated, buildPlan };
+        : previous.semanticOverlay;
+      return this.commitPlan(draft, snapshot, semanticOverlay, rootIds ?? (previous.buildPlan ? this.plannedRoots(previous.buildPlan) : undefined), !!inputOverlay);
     });
+  }
+
+  private plannedRoots(buildPlan: FairyBuildPlanV2): string[] {
+    return buildPlan.packages.flatMap((pkg) => pkg.components.filter((component) => component.exported).map((component) => component.sourceNodeId));
+  }
+
+  private async commitPlan(draft: ImportDraftV1, snapshot: ParsedSnapshot, semanticOverlay: MakerSemanticOverlayV1, rootIds: string[] | undefined, overlayChanged: boolean) {
+    const buildPlan = planDocument(snapshot.document, { rootIds, semanticOverlay, imageBindings: snapshot.imageBindings });
+    const updated = await this.commitPlanning(draft, 'planned', { semanticOverlay, buildPlan }, {
+      diagnostics: buildPlan.diagnostics,
+      buildPlan: { schemaVersion: buildPlan.schemaVersion, packages: buildPlan.packages.length, components: buildPlan.packages.reduce((count, pkg) => count + pkg.components.length, 0) },
+      semanticOverlay: { revision: (draft.semanticOverlay?.revision ?? 1) + (overlayChanged ? 1 : 0), mappedNodes: Object.keys(semanticOverlay.nodes).length },
+    });
+    return { draft: updated, buildPlan };
   }
 
   async compile(draftId: string, expectedRevision: number): Promise<ImportDraftV1> {
@@ -588,10 +603,9 @@ export class ImportDraftStore {
       if (!buildPlan) throw new ImportDraftError('Import draft is missing its build plan', 409);
       const converted = compilePlanToUam(snapshot.document, buildPlan, {}, snapshot.imageBindings);
       const ids = sourceNodeIds(snapshot.document, converted.ids);
-      const generatedRoot = path.join(draftRoot, 'generated');
-      const stagingRoot = path.join(draftRoot, `.generated-${randomUUID()}`);
+      const directory = `generated-${randomUUID()}`;
+      const stagingRoot = path.join(draftRoot, directory);
       try {
-        await rm(generatedRoot, { recursive: true, force: true });
         const projectRoot = path.join(stagingRoot, 'project');
         await mkdir(projectRoot, { recursive: true });
         const fairyFile = `${safeName(buildPlan.sourceName)}.fairy`;
@@ -619,10 +633,11 @@ export class ImportDraftStore {
           semanticOverlay,
           conversionIds: converted.ids,
         });
-        await rename(stagingRoot, generatedRoot);
-        return this.update(draft, 'compiled', {
+        // Publish the complete generation only through the atomic metadata pointer.
+        return await this.update(draft, 'compiled', {
           diagnostics: converted.diagnostics,
           generated: {
+            directory,
             fairyFile,
             projectId: converted.project.projectId,
             ids,
@@ -630,7 +645,7 @@ export class ImportDraftStore {
           },
         });
       } catch (error) {
-        await rm(stagingRoot, { recursive: true, force: true });
+        await rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined);
         throw error;
       }
     });
@@ -642,11 +657,11 @@ export class ImportDraftStore {
       if (!draft.source || !draft.generated) throw new ImportDraftError('Import draft is incomplete', 409);
       const outputDirectory = path.resolve(outputPath);
       if (!path.basename(outputDirectory)) throw new ImportDraftError('Materialize target must be a named directory');
-      let attempt = await this.readMaterializeAttempt(draftId);
+      let attempt = await this.readMaterializeAttempt(draft);
       const replay = draft.status === 'materialized' && attempt?.expectedRevision === expectedRevision
         && attempt.outputDirectory === outputDirectory && draft.materialized?.outputDirectory === outputDirectory;
       if (!replay) this.requireDraft(draftId, expectedRevision);
-      const generatedPath = path.join(this.resolveDraftRoot(draftId), 'generated', 'project');
+      const generatedPath = this.getGeneratedProjectPath(draftId)!;
       const contentDigest = await digestReimportPath(generatedPath);
       const recovered = await pathExists(outputDirectory);
       if (recovered) {
@@ -661,7 +676,7 @@ export class ImportDraftStore {
         if (attempt && attempt.outputDirectory !== outputDirectory && await pathExists(attempt.outputDirectory)) {
           throw new ImportDraftError(`First recover the previous materialize target: ${attempt.outputDirectory}`, 409);
         }
-        attempt = { expectedRevision, outputDirectory, contentDigest, at: new Date().toISOString() };
+        attempt = { expectedRevision, outputDirectory, contentDigest, generatedDirectory: draft.generated.directory ?? 'generated', at: new Date().toISOString() };
         // Persist the exact request before committing any target files, including across Host restarts.
         await writeJson(path.join(this.resolveDraftRoot(draftId), MATERIALIZE_ATTEMPT), attempt);
         const temporary = path.join(path.dirname(outputDirectory), `.${path.basename(outputDirectory)}.maker-${randomUUID()}`);
@@ -700,9 +715,10 @@ export class ImportDraftStore {
     });
   }
 
-  private async readMaterializeAttempt(draftId: string): Promise<MaterializeAttempt | null> {
+  private async readMaterializeAttempt(draft: ImportDraftV1): Promise<MaterializeAttempt | null> {
     try {
-      return materializeAttemptSchema.parse(await readJson(path.join(this.resolveDraftRoot(draftId), MATERIALIZE_ATTEMPT)));
+      const attempt = materializeAttemptSchema.parse(await readJson(path.join(this.resolveDraftRoot(draft.draftId), MATERIALIZE_ATTEMPT)));
+      return draft.generated && (attempt.generatedDirectory ?? 'generated') === (draft.generated.directory ?? 'generated') ? attempt : null;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
@@ -788,7 +804,7 @@ export class ImportDraftStore {
 
   getGeneratedProjectPath(draftId: string): string | null {
     const draft = this.requireCurrentDraft(draftId);
-    return draft.generated ? path.join(this.resolveDraftRoot(draftId), 'generated', 'project') : null;
+    return draft.generated ? path.join(this.resolveDraftRoot(draftId), draft.generated.directory ?? 'generated', 'project') : null;
   }
 
   private mutate<T>(operation: () => Promise<T>): Promise<T> {
@@ -837,12 +853,16 @@ export class ImportDraftStore {
   }
 
   private async commitPlanning(draft: ImportDraftV1, status: ImportDraftStatus, planning: PlanningSnapshot, patch: DraftPatch) {
+    const attempt = await this.readMaterializeAttempt(draft);
+    if (attempt && await pathExists(attempt.outputDirectory)) {
+      throw new ImportDraftError(`First recover the previous materialize target: ${attempt.outputDirectory}`, 409);
+    }
     const planningFile = `planning-${randomUUID()}.json`;
     const filePath = path.join(this.resolveDraftRoot(draft.draftId), planningFile);
     await writeJson(filePath, planning);
     try {
       // The metadata rename is the only commit: failed writes never change the previous revision's inputs.
-      return await this.update(draft, status, { ...patch, planningFile });
+      return await this.update(draft, status, { ...patch, planningFile, generated: null, visualEvidence: null });
     } catch (error) {
       await rm(filePath, { force: true }).catch(() => undefined);
       throw error;

@@ -39,6 +39,9 @@ test('materialize reports committed files and recovers the exact result after me
     const restarted = new ImportDraftStore(dataDir);
     await restarted.init();
     assert.equal((await restarted.getDetail(draft.draftId))!.materializeAttempt!.outputDirectory, output);
+    await assert.rejects(restarted.plan(draft.draftId, draft.revision), /First recover/);
+    const rootId = (await restarted.getDetail(draft.draftId))!.outline!.pages[0].roots[0].id;
+    await assert.rejects(restarted.updateSemanticDirective(draft.draftId, draft.revision, rootId, { target: 'component' }), /First recover/);
     await assert.rejects(restarted.materialize(draft.draftId, draft.revision, path.join(parent, 'other')), /First recover/);
     const extraFile = path.join(output, 'user-note.txt');
     await writeFile(extraFile, 'keep this user edit');
@@ -91,7 +94,7 @@ test('import drafts isolate source, compile in Maker data, materialize atomicall
     await resumed.init();
     draft = await resumed.compile(draft.draftId, draft.revision);
     assert.equal(draft.status, 'compiled');
-    assert.equal(await exists(path.join(dataDir, 'import-drafts', draft.draftId, 'generated', 'uam.json')), true);
+    assert.equal(await exists(path.join(path.dirname(resumed.getGeneratedProjectPath(draft.draftId)!), 'uam.json')), true);
     assert.equal(await exists(outputPath), false);
 
     const golden = await readFile(path.join(process.cwd(), 'test', 'fixtures', 'design-import', 'basic-shapes.viewer.png'));
@@ -219,9 +222,69 @@ test('persisted plans reject stale inputs, replan legacy drafts, and compile rep
     second = (await store.plan(second.draftId, second.revision)).draft;
     second = await store.compile(second.draftId, second.revision);
     assert.notEqual(second.draftId, draft.draftId);
-    assert.deepEqual(second.generated, draft.generated);
-    assert.deepEqual(await readFile(path.join(dataDir, 'import-drafts', second.draftId, 'generated', 'uam.json')),
-      await readFile(path.join(root, 'generated', 'uam.json')));
+    assert.deepEqual({ ...second.generated, directory: undefined }, { ...draft.generated, directory: undefined });
+    assert.deepEqual(await readFile(path.join(path.dirname(store.getGeneratedProjectPath(second.draftId)!), 'uam.json')),
+      await readFile(path.join(path.dirname(store.getGeneratedProjectPath(draft.draftId)!), 'uam.json')));
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('compiled drafts replan mappings, invalidate evidence and atomically select new generations', async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'maker-draft-iteration-'));
+  try {
+    const store = new ImportDraftStore(dataDir);
+    await store.init();
+    let draft = await store.create(fixture);
+    draft = await store.parse(draft.draftId, draft.revision);
+    const outline = (await store.getDetail(draft.draftId))!.outline!;
+    const rootId = outline.pages[0].roots[0].id;
+    const node = outline.pages[0].roots[0].children![0];
+    draft = (await store.plan(draft.draftId, draft.revision, [rootId])).draft;
+    draft = await store.compile(draft.draftId, draft.revision);
+    const originalRoot = store.getGeneratedProjectPath(draft.draftId)!;
+    const originalDigest = await digestReimportPath(originalRoot);
+    const golden = await readFile(path.join(process.cwd(), 'test/fixtures/design-import/basic-shapes.viewer.png'));
+    const width = golden.readUInt32BE(16), height = golden.readUInt32BE(20);
+    draft = await store.saveVisualEvidence(draft.draftId, draft.revision, {
+      schemaVersion: 1, packageId: 'pkg', componentId: 'component', packageName: 'Package', componentName: 'Component',
+      reference: { width, height }, capture: { width, height }, comparison: { width, height, totalPixels: width * height, differentPixels: 0, meanAbsoluteError: 0, maxChannelDelta: 0 },
+    }, { reference: golden, capture: golden, diff: golden });
+    const previous = await store.getDetail(draft.draftId);
+    const fail = () => t.mock.method(store as any, 'update', async () => { throw new Error('metadata EIO'); });
+    let fault = fail();
+    await assert.rejects(store.updateSemanticDirective(draft.draftId, draft.revision, node.id, { target: 'ignore' }), /metadata EIO/);
+    await assert.rejects(store.plan(draft.draftId, draft.revision), /metadata EIO/);
+    fault.mock.restore();
+    assert.deepEqual(await store.getDetail(draft.draftId), previous);
+    assert.equal(await digestReimportPath(originalRoot), originalDigest);
+
+    draft = (await store.updateSemanticDirective(draft.draftId, draft.revision, node.id, { target: 'ignore' })).draft;
+    assert.equal(draft.status, 'planned');
+    assert.equal(draft.generated, null);
+    assert.equal(draft.visualEvidence, null);
+    assert.equal(store.getGeneratedProjectPath(draft.draftId), null);
+    await assert.rejects(store.readVisualEvidenceImage(draft.draftId, 'capture'), /not found/);
+    assert.deepEqual((await store.getDetail(draft.draftId))!.buildPlan!.packages.flatMap((pkg) => pkg.components.filter((component) => component.exported).map((component) => component.sourceNodeId)), [rootId]);
+    fault = fail();
+    await assert.rejects(store.compile(draft.draftId, draft.revision), /metadata EIO/);
+    fault.mock.restore();
+    assert.equal(store.get(draft.draftId)!.revision, draft.revision);
+    assert.equal(await digestReimportPath(originalRoot), originalDigest);
+    draft = await store.compile(draft.draftId, draft.revision);
+    const currentRoot = store.getGeneratedProjectPath(draft.draftId)!;
+    assert.notEqual(currentRoot, originalRoot);
+    const names = async (root: string) => (await readProjectAsUam(new NodeIO(), path.join(root, draft.generated!.fairyFile))).packages.flatMap((pkg) => pkg.resources.flatMap((resource) => resource.kind === 'component' ? resource.component.displayList.map((item) => item.name) : []));
+    assert.ok((await names(originalRoot)).includes(node.name));
+    assert.ok(!(await names(currentRoot)).includes(node.name));
+    const restarted = new ImportDraftStore(dataDir);
+    await restarted.init();
+    assert.equal(restarted.getGeneratedProjectPath(draft.draftId), currentRoot);
+    assert.equal(await exists(originalRoot), false);
+    assert.deepEqual(await restarted.getDetail(draft.draftId), await store.getDetail(draft.draftId));
+    const replanned = await restarted.plan(draft.draftId, draft.revision);
+    assert.equal(replanned.draft.status, 'planned');
+    assert.equal(replanned.buildPlan.semanticOverlay.nodes[node.id].target, 'ignore');
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }

@@ -148,9 +148,6 @@ export function ImportDraftPage({ draftId, renderPreview }: { draftId: string; r
         body: JSON.stringify({
           expectedRevision: input.revision,
           ...(input.kind === "materialize" ? { targetPath: input.targetPath ?? targetPath } : {}),
-          ...(input.kind === "plan" && detail.data?.draft.status === "planned" && detail.data.buildPlan ? {
-            rootIds: detail.data.buildPlan.packages.flatMap((pkg) => pkg.components.filter((root) => root.exported).map((root) => root.sourceNodeId)),
-          } : {}),
         }),
       })
     },
@@ -185,7 +182,7 @@ export function ImportDraftPage({ draftId, renderPreview }: { draftId: string; r
         <CardContent className="flex flex-wrap items-end gap-3">
           <label className="grid w-64 gap-1.5 text-sm"><span className="text-muted-foreground">Profile</span><select value={profile} onChange={(event) => setProfile(event.target.value)} disabled={busy || draft.status !== "parsed"} className="h-9 rounded-md border bg-background px-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"><option value="legacy-hybrid">Hybrid · legacy-hybrid</option></select></label>
           {draft.status === "created" ? <Button disabled={busy} onClick={() => action.mutate({ kind: "parse", revision: draft.revision })}>解析 Source</Button> : null}
-          {draft.status === "parsed" || draft.status === "planned" ? <Button disabled={busy || profile !== "legacy-hybrid"} onClick={() => action.mutate({ kind: "plan", revision: draft.revision })}>{draft.status === "planned" ? "重新生成 Build Plan" : "生成 Build Plan"}</Button> : null}
+          {["parsed", "planned", "compiled"].includes(draft.status) ? <Button disabled={busy || profile !== "legacy-hybrid"} onClick={() => action.mutate({ kind: "plan", revision: draft.revision })}>{draft.status === "parsed" ? "生成 Build Plan" : "重新生成 Build Plan"}</Button> : null}
           {draft.status === "planned" ? <Button disabled={busy} onClick={() => action.mutate({ kind: "compile", revision: draft.revision })}>编译 Viewer Preview</Button> : null}
           {draft.status === "uploading" ? <p className="text-sm text-amber-500">上传尚未完成。浏览器不会保留文件授权，请删除后重新上传。</p> : null}
           {busy ? <span className="inline-flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />正在处理…</span> : null}
@@ -197,7 +194,7 @@ export function ImportDraftPage({ draftId, renderPreview }: { draftId: string; r
         <OutlineCard
           outline={outline}
           semanticOverlay={semanticOverlay}
-          editable={draft.status === "parsed" && !busy}
+          editable={["parsed", "planned", "compiled"].includes(draft.status) && !busy}
           mappingNodeId={action.isPending && action.variables?.kind === "mapping" ? action.variables.nodeId ?? null : null}
           onMap={(nodeId, target) => action.mutate({ kind: "mapping", revision: draft.revision, nodeId, target })}
         />
