@@ -282,8 +282,8 @@ export type MaterializeAttempt = z.infer<typeof materializeAttemptSchema>;
 export class MaterializeRecoveryError extends ImportDraftError {
   readonly code = 'materialize_recovery_required';
   readonly committed = true;
-  constructor(readonly attempt: MaterializeAttempt) {
-    super(`Project was committed to ${attempt.outputDirectory}, but its Draft receipt could not be saved. Retry materialize for this target to verify and recover the result.`, 409);
+  constructor(readonly draftId: string, readonly attempt: MaterializeAttempt) {
+    super(`Project was committed to ${attempt.outputDirectory}, but its Draft receipt could not be saved. Retry materialize for Draft ${draftId} at revision ${attempt.expectedRevision} and this target to verify and recover the result.`, 409);
   }
 }
 
@@ -696,7 +696,7 @@ export class ImportDraftStore {
         try {
           updated = await this.update(draft, 'materialized', { materialized: { outputDirectory, at: attempt!.at } });
         } catch {
-          throw new MaterializeRecoveryError(attempt!);
+          throw new MaterializeRecoveryError(draftId, attempt!);
         }
       }
       return {

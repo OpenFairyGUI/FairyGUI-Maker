@@ -29,6 +29,8 @@ test('materialize reports committed files and recovers the exact result after me
       assert.ok(error instanceof MaterializeRecoveryError);
       assert.equal(error.committed, true);
       assert.equal(error.code, 'materialize_recovery_required');
+      assert.equal(error.draftId, draft.draftId);
+      assert.ok(error.message.includes(`Draft ${draft.draftId} at revision ${draft.revision}`), 'CLI stderr must identify the Draft to recover');
       assert.equal(error.attempt.outputDirectory, output);
       return true;
     });
