@@ -141,6 +141,7 @@ test('persisted plans reject stale inputs, replan legacy drafts, and compile rep
     const legacy = { ...planned.buildPlan, schemaVersion: 1 } as Record<string, unknown>;
     for (const field of ['sourceDigest', 'sourceDocumentId', 'sourceSchemaVersion', 'compilerVersion', 'plannerVersion']) delete legacy[field];
     await writeFile(planPath, JSON.stringify(legacy));
+    delete draft.planningFile;
     draft.buildPlan!.schemaVersion = 1;
     await writeFile(path.join(root, 'draft.json'), JSON.stringify(draft));
 
@@ -161,7 +162,10 @@ test('persisted plans reject stale inputs, replan legacy drafts, and compile rep
     assert.equal(store.get(draft.draftId)?.revision, draft.revision);
     assert.equal(await exists(path.join(root, 'generated')), false);
     await writeFile(snapshotPath, originalSnapshot);
-    await writeFile(planPath, JSON.stringify({ ...planned.buildPlan, diagnostics: [] }));
+    await writeFile(path.join(root, draft.planningFile!), JSON.stringify({
+      semanticOverlay: planned.buildPlan.semanticOverlay,
+      buildPlan: { ...planned.buildPlan, diagnostics: [] },
+    }));
     draft = await store.compile(draft.draftId, draft.revision);
     assert.deepEqual(draft.diagnostics, planned.buildPlan.diagnostics);
 
@@ -173,6 +177,43 @@ test('persisted plans reject stale inputs, replan legacy drafts, and compile rep
     assert.deepEqual(second.generated, draft.generated);
     assert.deepEqual(await readFile(path.join(dataDir, 'import-drafts', second.draftId, 'generated', 'uam.json')),
       await readFile(path.join(root, 'generated', 'uam.json')));
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('failed mapping and replan commits preserve the revision inputs through reload and compile', async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'maker-draft-commit-'));
+  try {
+    const store = new ImportDraftStore(dataDir);
+    await store.init();
+    let draft = await store.create(fixture);
+    draft = await store.parse(draft.draftId, draft.revision);
+    const original = await store.getDetail(draft.draftId);
+    const nodeId = original!.outline!.pages[0].roots[0].children![0].id;
+    const directive = { target: 'ignore' as const, rationale: 'User mapping' };
+    // Inject failure at the metadata commit, after the new content has been written.
+    const fail = () => t.mock.method(store as any, 'update', async () => { throw new Error('metadata EIO'); });
+    let fault = fail();
+    await assert.rejects(store.updateSemanticDirective(draft.draftId, draft.revision, nodeId, directive), /metadata EIO/);
+    fault.mock.restore();
+    assert.deepEqual(await store.getDetail(draft.draftId), original);
+
+    draft = (await store.plan(draft.draftId, draft.revision)).draft;
+    const planned = await store.getDetail(draft.draftId);
+    const overlay = structuredClone(planned!.semanticOverlay!);
+    overlay.nodes[nodeId] = directive;
+    fault = fail();
+    await assert.rejects(store.plan(draft.draftId, draft.revision, undefined, overlay), /metadata EIO/);
+    fault.mock.restore();
+    assert.deepEqual(await store.getDetail(draft.draftId), planned);
+    const reloaded = new ImportDraftStore(dataDir);
+    await reloaded.init();
+    assert.deepEqual(await reloaded.getDetail(draft.draftId), planned);
+    const compiled = await reloaded.compile(draft.draftId, draft.revision);
+    assert.equal(compiled.status, 'compiled');
+    assert.equal(compiled.revision, draft.revision + 1);
+    assert.deepEqual((await reloaded.getDetail(draft.draftId))!.buildPlan, planned!.buildPlan);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }

@@ -81,6 +81,8 @@ export interface ImportDraftV1 {
   draftId: string;
   revision: number;
   status: ImportDraftStatus;
+  /** Immutable plan/overlay pair selected by this revision; absent on legacy drafts. */
+  planningFile?: string;
   input: {
     kind: 'fig' | 'psd' | 'bundle';
     name: string;
@@ -202,6 +204,7 @@ const draftSchema = z.object({
   draftId: z.string().regex(draftIdPattern),
   revision: z.number().int().positive(),
   status: z.enum(['uploading', 'created', 'parsed', 'planned', 'compiled', 'materialized']),
+  planningFile: z.string().regex(/^planning-[0-9a-f-]{36}\.json$/).optional(),
   input: z.object({
     kind: z.enum(['fig', 'psd', 'bundle']),
     name: fileName,
@@ -266,6 +269,9 @@ type ParsedSnapshot = {
   imageBindings: Record<string, ConversionImageBinding>;
 };
 
+type PlanningSnapshot = { semanticOverlay: MakerSemanticOverlayV1; buildPlan: FairyBuildPlanV2 | null };
+type DraftPatch = Partial<Pick<ImportDraftV1, 'upload' | 'semanticOverlay' | 'source' | 'diagnostics' | 'buildPlan' | 'generated' | 'visualEvidence' | 'materialized' | 'planningFile'>>;
+
 export type ImportDraftUploadInput = z.infer<typeof uploadInputSchema>;
 
 export class ImportDraftStore {
@@ -294,6 +300,10 @@ export class ImportDraftStore {
         }
         this.drafts.set(draft.draftId, draft);
         for (const child of await readdir(draftRoot, { withFileTypes: true })) {
+          // Retain old inputs during a run so concurrent detail reads keep their revision; collect on restart.
+          if (child.isFile() && /^planning-[0-9a-f-]{36}\.json$/.test(child.name) && child.name !== draft.planningFile) {
+            await rm(path.join(draftRoot, child.name)).catch(() => undefined);
+          }
           if (child.isDirectory() && (child.name === '.uploads' || child.name.startsWith('.generated-') || child.name.startsWith('.visual-evidence-'))) {
             await rm(path.join(draftRoot, child.name), { recursive: true, force: true });
           }
@@ -328,13 +338,10 @@ export class ImportDraftStore {
   } | null> {
     const draft = this.drafts.get(draftId);
     if (!draft) return null;
-    const buildPlan = draft.buildPlan
-      ? await readJson<FairyBuildPlanV2>(path.join(this.resolveDraftRoot(draftId), 'build-plan.json'))
-      : null;
     const snapshot = draft.source ? await this.readParsedSnapshot(draftId) : null;
     const outline = snapshot ? outlineDocument(snapshot.document) : null;
-    const semanticOverlay = snapshot ? await this.readSemanticOverlay(draftId, snapshot.document) : null;
-    return { draft: structuredClone(draft), buildPlan, outline, semanticOverlay };
+    const planning = snapshot ? await this.readPlanning(draft, snapshot.document) : null;
+    return { draft: structuredClone(draft), buildPlan: planning?.buildPlan ?? null, outline, semanticOverlay: planning?.semanticOverlay ?? null };
   }
 
   async create(sourcePathInput: string): Promise<ImportDraftV1> {
@@ -517,10 +524,9 @@ export class ImportDraftStore {
       const node = findNode(snapshot.document, nodeId);
       if (!node) throw new ImportDraftError(`Semantic mapping node does not exist: ${nodeId}`);
       const directive = assertSemanticTarget(node, input);
-      const semanticOverlay = await this.readSemanticOverlay(draftId, snapshot.document);
+      const { semanticOverlay } = await this.readPlanning(draft, snapshot.document);
       semanticOverlay.nodes[nodeId] = directive;
-      await writeJson(path.join(this.resolveDraftRoot(draftId), 'semantic-overlay.json'), semanticOverlay);
-      const updated = await this.update(draft, 'parsed', {
+      const updated = await this.commitPlanning(draft, 'parsed', { semanticOverlay, buildPlan: null }, {
         semanticOverlay: {
           revision: (draft.semanticOverlay?.revision ?? 1) + 1,
           mappedNodes: Object.keys(semanticOverlay.nodes).length,
@@ -535,11 +541,9 @@ export class ImportDraftStore {
       const draft = this.requireDraft(draftId, expectedRevision, ['parsed', 'planned']);
       const snapshot = await this.readParsedSnapshot(draftId);
       const semanticOverlay = inputOverlay ? validateSemanticOverlay(snapshot.document, inputOverlay)
-        : await this.readSemanticOverlay(draftId, snapshot.document);
+        : (await this.readPlanning(draft, snapshot.document)).semanticOverlay;
       const buildPlan = planDocument(snapshot.document, { rootIds, semanticOverlay, imageBindings: snapshot.imageBindings });
-      await writeJson(path.join(this.resolveDraftRoot(draftId), 'build-plan.json'), buildPlan);
-      if (inputOverlay) await writeJson(path.join(this.resolveDraftRoot(draftId), 'semantic-overlay.json'), semanticOverlay);
-      const updated = await this.update(draft, 'planned', {
+      const updated = await this.commitPlanning(draft, 'planned', { semanticOverlay, buildPlan }, {
         diagnostics: buildPlan.diagnostics,
         buildPlan: {
           schemaVersion: buildPlan.schemaVersion,
@@ -560,7 +564,8 @@ export class ImportDraftStore {
       const draft = this.requireDraft(draftId, expectedRevision, ['planned']);
       const draftRoot = this.resolveDraftRoot(draftId);
       const snapshot = await this.readParsedSnapshot(draftId);
-      const buildPlan = await readJson<FairyBuildPlanV2>(path.join(draftRoot, 'build-plan.json'));
+      const { buildPlan } = await this.readPlanning(draft, snapshot.document);
+      if (!buildPlan) throw new ImportDraftError('Import draft is missing its build plan', 409);
       const converted = compilePlanToUam(snapshot.document, buildPlan, {}, snapshot.imageBindings);
       const ids = sourceNodeIds(snapshot.document, converted.ids);
       const generatedRoot = path.join(draftRoot, 'generated');
@@ -762,7 +767,7 @@ export class ImportDraftStore {
   private async update(
     draft: ImportDraftV1,
     status: ImportDraftStatus,
-    patch: Partial<Pick<ImportDraftV1, 'upload' | 'semanticOverlay' | 'source' | 'diagnostics' | 'buildPlan' | 'generated' | 'visualEvidence' | 'materialized'>>,
+    patch: DraftPatch,
   ): Promise<ImportDraftV1> {
     const updatedAt = new Date().toISOString();
     const updated: ImportDraftV1 = {
@@ -780,6 +785,31 @@ export class ImportDraftStore {
 
   private async readParsedSnapshot(draftId: string): Promise<ParsedSnapshot> {
     return readJson<ParsedSnapshot>(path.join(this.resolveDraftRoot(draftId), 'import-document.json'));
+  }
+
+  private async commitPlanning(draft: ImportDraftV1, status: ImportDraftStatus, planning: PlanningSnapshot, patch: DraftPatch) {
+    const planningFile = `planning-${randomUUID()}.json`;
+    const filePath = path.join(this.resolveDraftRoot(draft.draftId), planningFile);
+    await writeJson(filePath, planning);
+    try {
+      // The metadata rename is the only commit: failed writes never change the previous revision's inputs.
+      return await this.update(draft, status, { ...patch, planningFile });
+    } catch (error) {
+      await rm(filePath, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async readPlanning(draft: ImportDraftV1, document: ImportDocument): Promise<PlanningSnapshot> {
+    const root = this.resolveDraftRoot(draft.draftId);
+    if (draft.planningFile) {
+      const planning = await readJson<PlanningSnapshot>(path.join(root, draft.planningFile));
+      return { ...planning, semanticOverlay: validateSemanticOverlay(document, planning.semanticOverlay) };
+    }
+    return {
+      buildPlan: draft.buildPlan ? await readJson<FairyBuildPlanV2>(path.join(root, 'build-plan.json')) : null,
+      semanticOverlay: await this.readSemanticOverlay(draft.draftId, document),
+    };
   }
 
   private async readSemanticOverlay(draftId: string, document: ImportDocument): Promise<MakerSemanticOverlayV1> {

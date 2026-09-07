@@ -8,6 +8,7 @@ Planner 为 `deterministic-v2`，Compiler 为 `deterministic-v3`；Bundle/Import
 
 `POST /api/import-drafts/:draftId/plan` 在原有鉴权、`expectedRevision` 和 parsed/planned 状态检查下接受可选的完整 `semanticOverlay`。
 省略它会沿用已保存的 Overlay；传入时是完整替换，不是深度合并。可先读取 Draft 详情的 `semanticOverlay` 再修改。
+Plan 与 Overlay 以同一份不可变快照保存，由 Draft revision 的原子提交选定。映射或重规划中途失败时，原 revision 仍读取、编译原内容；重启也不会接纳失败请求的输入。旧 Draft 格式仍可读取，下次映射或 Plan 时使用新快照。
 Workbench 的单节点映射接口保持不变；本批字体库存与组件库策略通过 Plan API/程序调用输入，没有新增字体安装或库选择界面。
 
 示例（节点 ID 应替换为实际源 ID）：
