@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { access, cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { pathToFileURL } from "node:url"
 import { tmpdir } from "node:os"
@@ -139,6 +139,22 @@ try {
   await run(npmCommand, ["install", "--prefix", consumer, "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", tarball], { env: npmEnv })
 
   const installedRoot = path.join(consumer, "node_modules", packageMetadata.name)
+  // Follow the documented external-project recipe for both clients: copy the canonical folder, not the repository wrapper.
+  for (const client of [".agents", ".claude"]) {
+    const skillRoot = path.join(consumer, client, "skills", "use-fairygui-maker")
+    await cp(path.join(installedRoot, ".agents", "skills", "use-fairygui-maker"), skillRoot, { recursive: true, force: false, errorOnExist: true })
+    for (const entry of await readdir(skillRoot, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".md")) continue
+      const file = path.join(entry.parentPath, entry.name)
+      const text = await readFile(file, "utf8")
+      for (const [, link] of text.matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
+        if (/^(?:https?:|#)/.test(link)) continue
+        const resolved = path.resolve(path.dirname(file), link.split("#")[0])
+        if (!resolved.startsWith(skillRoot + path.sep)) throw new Error(`Installed skill link escapes its portable folder: ${link}`)
+        await access(resolved)
+      }
+    }
+  }
   await Promise.all([
     access(path.join(installedRoot, "dist", "server", "index.js")),
     access(path.join(installedRoot, "dist", "web", "index.html")),

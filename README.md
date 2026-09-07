@@ -139,6 +139,22 @@ claude mcp get fairygui-maker
 
 Claude 文件只负责转到同一份通用 Skill，避免两套指南漂移。
 
+### 在其他工程中安装 Skill
+
+先在目标工程安装已验证的 tarball（例如 `npm install --no-save E:\Artifacts\fairygui-maker-0.1.0.tgz`；正式发布后可改用确切 npm 版本）。然后复制包内的完整通用 Skill：
+
+```powershell
+$skillSource = Join-Path (npm root) "fairygui-maker/.agents/skills/use-fairygui-maker"
+$skillTarget = Join-Path (Get-Location) ".agents/skills/use-fairygui-maker"
+if (Test-Path -LiteralPath $skillTarget) { throw "Skill already exists; review it before replacing" }
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $skillTarget) | Out-Null
+Copy-Item -LiteralPath $skillSource -Destination $skillTarget -Recurse
+```
+
+Claude 工程使用 `.claude/skills/use-fairygui-maker` 作为目标目录，仍复制上面同一份通用 Skill；不要单独复制仓库内依赖相对转发路径的 Claude wrapper。源码用户也可将 `$skillSource` 改为 Maker checkout 中 `.agents/skills/use-fairygui-maker` 的绝对路径。保留 `references/` 和 `agents/`；本地工作流引用均位于 Skill 自身目录内，完整产品文档同时随包放在 `node_modules/fairygui-maker/docs/`。
+
+在目标工程重新开启 Agent 任务，显式调用 `$use-fairygui-maker`，例如“检查 `E:\Design\hud.fig` 的转换诊断，暂不物化工程”。先检查 Agent 是否发现 Skill，再分别检查所需 CLI 或 MCP：安装 Skill 本身不会启动 Host，也不会建立 MCP 连接；本地 import/reimport 不以 MCP 在线为前提。
+
 ## 设计源导入
 
 CLI 可以把 `.fig`、`.psd` 或 [Maker Import Bundle v1](./docs/maker-import-bundle-v1.md) 目录转换成新的 FairyGUI 工程目录：
