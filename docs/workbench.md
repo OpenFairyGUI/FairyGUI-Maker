@@ -78,6 +78,8 @@ Agent 不直接操作 iframe 或 Canvas。它只向 Host 提交语义命令，�
 | 交互语义 | Maker 解释 UAM Controller/Gear/Transition 与常用控件 | 发布 runtime 执行原生 Controller/Gear/Transition 与控件行为 |
 | 持久化 | 工程和临时运行态都不写回；session 仅 Host 内存 | Artifact 内容寻址并持久化；session 仍仅 Host 内存 |
 
+Backend 会话还可通过 `open_session_preview` 或 Dashboard 的“预览会话”进入 Viewer。此来源使用公开 `readSessionState` / `readResourceBytes` 读取指定 revision 的未保存模型及所选组件资源；编辑、保存和关闭会话使旧 renderer 失效。Host 不另存权威 UAM。接口、预算及当前上游 MCP 组合阻断见[会话预览接入验收](./session-preview.md)。
+
 当前共享协议为 v7，分成两层：Host 与 Workbench 页面通过 `/api/renderers`、命令长轮询、结果 ACK 和 interaction 上报通信；Renderer 与不透明源 iframe 通过绑定父窗口、来源和一次性 nonce 的 `MessageChannel` 通信。Host 命令统一为 `render / update / view / observe / capture`，Renderer 再分别转换为 Viewer 的 `render` 或 Player 的 `prepare-artifact / render-artifact / unload-artifact`，因此共享控制面不会把两种 renderer 混为一套。Workbench 控件不持有可直接修改 iframe 的 FrameSession。
 
 对应实现边界：`src/web/lib/viewer.ts` 与 `src/runtime/viewer-runtime.ts` 负责工程态；`src/web/lib/player.ts`、`src/runtime/player-runtime.ts` 与 `src/server/artifacts.ts` 负责发布态；`src/web/lib/renderer-frame.ts` 负责父页面共用的 MessagePort 请求与命令转发；`src/server/viewer.ts` 负责两者共用的 Render Session Broker 和 MCP 工具。

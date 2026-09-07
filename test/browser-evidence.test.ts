@@ -22,6 +22,8 @@ test("evidence gates reject a changed pixel, dimensions, unexpected browser fail
   assert.equal(expectedDiagnostic({ ...intentional, url: "http://localhost/assets/runtime.js" }), undefined)
   const invalidated: BrowserDiagnostic = { phase: "import-iteration", kind: "http", status: 404, message: "GET 404", url: "http://localhost/api/render-sessions/render-id/commands" }
   assertDiagnostics([invalidated])
+  assertDiagnostics([{ ...invalidated, phase: "session-preview" }])
+  assert.equal(expectedDiagnostic({ ...invalidated, phase: "session-preview", status: 500 }), undefined)
   assert.equal(expectedDiagnostic({ ...invalidated, url: "http://localhost/api/renderers" }), undefined)
   assert.equal(expectedDiagnostic({ ...invalidated, status: 500 }), undefined)
   const readback: BrowserDiagnostic = { phase: "import-iteration", kind: "console.warning", url: "http://localhost/viewer-runtime.html", message: "[.WebGL-0xabcd]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels" }

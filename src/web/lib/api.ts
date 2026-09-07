@@ -21,6 +21,13 @@ export async function getSessions() {
   return response.json()
 }
 
+export async function openSessionPreview(sessionId: string, expectedRevision: number) {
+  const response = await client.api["session-previews"].$post({ json: { sessionId, expectedRevision } })
+  const result = await response.json()
+  if ("error" in result) throw new Error(typeof result.error === "string" ? result.error : "会话预览参数无效。")
+  return result.project
+}
+
 export type CreateProjectInput = {
   bindingId: string
   directoryName: string

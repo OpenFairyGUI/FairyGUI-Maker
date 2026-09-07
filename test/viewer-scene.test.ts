@@ -5,7 +5,7 @@ import type { UamComponentResource, UamDisplayNode, UamProject } from "@openfair
 import { analyzeProjectAssets, assetResourceKey, collectUamResourceReferences, summarizeAssetAnalysis } from "../src/asset-analysis"
 import { compileViewerScene, type ViewerProjectBundle } from "../src/web/lib/viewer"
 
-test("Viewer Scene compiles the raw UAM dependency closure without published artifacts", () => {
+test("Viewer Scene compiles the raw UAM dependency closure without published artifacts", async () => {
   const packageA = "pkg00001"
   const packageB = "pkg00002"
   const rootId = "root0001"
@@ -46,7 +46,7 @@ test("Viewer Scene compiles the raw UAM dependency closure without published art
     diagnostics: [],
   }
 
-  const scene = compileViewerScene(bundle, packageA, rootId)
+  const scene = await compileViewerScene(bundle, packageA, rootId)
 
   assert.deepEqual(scene.components.map(({ resource }) => resource.id).sort(), [childId, rootId])
   assert.deepEqual(scene.assets.map(({ resource }) => resource.id).sort(), [fontId, glyphId, imageId].sort())
@@ -54,6 +54,19 @@ test("Viewer Scene compiles the raw UAM dependency closure without published art
   assert.ok(scene.diagnostics.some(({ code }) => code === "asset_bytes_missing"))
   assert.equal(JSON.stringify(scene).includes(".fui"), false)
   assert.equal(scene.assets.every(({ data }) => data instanceof ArrayBuffer), true)
+
+  // Session models omit primary bytes. Load only this component's dependency closure,
+  // including glyph references discovered inside a lazily fetched bitmap font.
+  const reads: string[] = []
+  const bytes = new Map(project.packages.flatMap((pkg) => pkg.resources.filter((resource) => resource.kind !== "component")
+    .map((resource) => [`${pkg.id}/${resource.id}`, resource.sourceBytes] as const)))
+  const model = structuredClone(project)
+  for (const pkg of model.packages) for (const resource of pkg.resources) if (resource.kind !== "component") delete resource.sourceBytes
+  const lazy = { ...bundle, project: model, readAssetBytes: async (pkg: string, id: string) => { reads.push(`${pkg}/${id}`); return bytes.get(`${pkg}/${id}`) ?? new Uint8Array() } }
+  assert.deepEqual((await compileViewerScene(lazy, packageA, rootId)).assets.map(({ resource }) => resource.id).sort(), [fontId, glyphId, imageId].sort())
+  assert.equal(reads.filter((key) => key.endsWith(glyphId)).length, 1)
+  await assert.rejects(compileViewerScene({ ...lazy, readAssetBytes: async () => { throw new Error("stale_read") } }, packageA, rootId), /stale_read/)
+  await assert.rejects(compileViewerScene(lazy, packageA, rootId, AbortSignal.abort()), /abort/i)
 })
 
 test("Asset Manager reports references, broken links, unused resources, exact duplicates, and path conflicts", async () => {

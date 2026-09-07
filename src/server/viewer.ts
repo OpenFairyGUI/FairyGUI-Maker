@@ -154,7 +154,8 @@ type ViewerProject = {
   viewerUrl: string
   fairyguiProjectId?: string
   name?: string
-  sourceOwner?: "browser" | "host"
+  sourceOwner?: "browser" | "host" | "session"
+  backendSession?: { sessionId: string; revision: number; lastSavedRevision: number; dirty: boolean }
   sourceRevision: string
   assetManagerUrl?: string
 }
@@ -691,6 +692,7 @@ export function registerViewerMcpTools(
           fairyguiProjectId: project.fairyguiProjectId,
           name: project.name,
           sourceOwner: project.sourceOwner,
+          ...(project.backendSession ? { backendSession: project.backendSession } : {}),
           sourceRevision: project.sourceRevision,
           viewerUrl: project.viewerUrl,
           browserRequired: renderer?.catalog === null || !renderer,
@@ -778,6 +780,7 @@ export function registerViewerMcpTools(
   }, async ({ projectId, packageId, resourceId, direction, limit, cursor, issueId }) => {
     const project = getProject(projectId)
     if (!project) return toolResult({ ok: false, code: "project_not_found", projectId }, true)
+    if (project.sourceOwner === "session") return toolResult({ ok: false, code: "asset_analysis_unavailable", message: "Session previews load only the rendered component's resources. Use an authorized saved project for a complete asset analysis." }, true)
     const analysis = getAssetAnalysis(projectId)
     if (!analysis || analysis.sourceRevision !== project.sourceRevision) {
       return toolResult({

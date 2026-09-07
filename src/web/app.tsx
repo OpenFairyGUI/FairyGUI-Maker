@@ -48,7 +48,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import type { VisualCaptureInfo } from "@/design-import"
 import { SaveApprovalsCard } from "@/save-approvals"
-import { createProject, deleteProject, getArtifact, getArtifacts, getProject, getProjects, getSessions, getStatus, registerProjectAssetAnalysis, type RegisteredProjectData } from "@/lib/api"
+import { createProject, deleteProject, getArtifact, getArtifacts, getProject, getProjects, getSessions, getStatus, openSessionPreview, registerProjectAssetAnalysis, type RegisteredProjectData } from "@/lib/api"
 import { importPublishedFolder } from "@/lib/artifacts"
 import { startPlayerRenderer } from "@/lib/player"
 import { watchRenderViewport, type RenderSessionClient } from "@/lib/render-session"
@@ -77,7 +77,7 @@ const projectsQuery = {
     return {
       projects: await Promise.all(result.projects.map(async (project) => ({
         ...project,
-        permission: project.sourceOwner === "host" ? "host" as const : await queryProjectBindingPermission(project.bindingId),
+        permission: project.sourceOwner === "browser" ? await queryProjectBindingPermission(project.bindingId) : project.sourceOwner,
       }))),
     }
   },
@@ -92,13 +92,14 @@ type SessionRow = {
   name: string
   state: string
   activity: string
+  revision?: number
 }
 
 const tableFeatureSet = tableFeatures({})
 const columnHelper = createColumnHelper<typeof tableFeatureSet, SessionRow>()
 const sessionColumns = columnHelper.columns([
   columnHelper.accessor("kind", { header: "类型" }),
-  columnHelper.accessor("name", { header: "会话" }),
+  columnHelper.accessor("name", { header: "会话", cell: ({ row }) => <div className="flex items-center gap-2"><span className="truncate">{row.original.name}</span>{row.original.kind === "Project" && row.original.revision !== undefined ? <SessionPreviewButton sessionId={row.original.id} revision={row.original.revision} /> : null}</div> }),
   columnHelper.accessor("state", { header: "状态" }),
   columnHelper.accessor("activity", { header: "最近活动" }),
 ])
@@ -357,7 +358,7 @@ function ProjectBindingsCard({ projects, creating, error, create, progress, canc
                     <Badge variant="outline">READ ONLY</Badge>
                     <PermissionBadge permission={project.permission} />
                   </div>
-                  <p className="mt-1 truncate text-xs text-muted-foreground">{project.directoryName}/{project.fairyPath}</p>
+                  <p className="mt-1 truncate text-xs text-muted-foreground">{projectSourceLabel(project)}</p>
                 </div>
                 <Button asChild variant="outline">
                   <Link to="/projects/$projectId/viewer" params={{ projectId: project.projectId }}>打开 Viewer</Link>
@@ -427,7 +428,7 @@ function ArtifactImportsCard({ artifacts, importing, progress, error, create }: 
 }
 
 function PermissionBadge({ permission }: { permission: ProjectBindingPermission }) {
-  const label = permission === "host" ? "CLI 授权" : permission === "granted" ? "已授权" : permission === "prompt" ? "需要确认" : permission === "denied" ? "已拒绝" : permission === "missing" ? "绑定缺失" : "权限未知"
+  const label = permission === "session" ? "会话预览" : permission === "host" ? "CLI 授权" : permission === "granted" ? "已授权" : permission === "prompt" ? "需要确认" : permission === "denied" ? "已拒绝" : permission === "missing" ? "绑定缺失" : "权限未知"
   return <Badge variant={permission === "granted" || permission === "host" ? "secondary" : "outline"}>{label}</Badge>
 }
 
@@ -448,6 +449,18 @@ function MetricCard({ label, value, detail }: { label: string; value: string; de
   )
 }
 
+function SessionPreviewButton({ sessionId, revision }: { sessionId: string; revision: number }) {
+  const preview = useMutation({
+    mutationFn: () => openSessionPreview(sessionId, revision),
+    onSuccess: (project) => window.location.assign(project.viewerUrl),
+  })
+  return <div><Button size="sm" variant="outline" disabled={preview.isPending} onClick={() => preview.mutate()}>预览会话</Button>{preview.error ? <p role="alert" className="whitespace-normal text-xs text-destructive">{preview.error.message}</p> : null}</div>
+}
+
+function projectSourceLabel(project: Pick<RegisteredProjectData, "backendSession" | "directoryName" | "fairyPath">) {
+  return project.backendSession ? `会话 revision ${project.backendSession.revision} · ${project.backendSession.dirty ? "未保存" : "已保存"}` : `${project.directoryName}/${project.fairyPath}`
+}
+
 function SessionTable({ data }: { data: Awaited<ReturnType<typeof getSessions>> | undefined }) {
   const rows = useMemo<SessionRow[]>(() => [
     ...(data?.mcp ?? []).map((session) => ({
@@ -461,6 +474,7 @@ function SessionTable({ data }: { data: Awaited<ReturnType<typeof getSessions>> 
       id: session.id,
       kind: "Project" as const,
       name: session.projectName,
+      revision: session.revision,
       state: session.lastError ?? (session.dirty ? "Dirty" : "Clean"),
       activity: formatTime(session.lastActivityAt ?? session.createdAt),
     })),
@@ -540,7 +554,7 @@ function ViewerPage() {
                 <div key={project.projectId} className="flex items-center gap-3 py-4 first:pt-0 last:pb-0">
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium">{project.name}</p>
-                    <p className="mt-1 truncate text-xs text-muted-foreground">{project.directoryName}/{project.fairyPath}</p>
+                    <p className="mt-1 truncate text-xs text-muted-foreground">{projectSourceLabel(project)}</p>
                   </div>
                   <Button asChild variant="outline"><Link to="/projects/$projectId/viewer" params={{ projectId: project.projectId }}>打开 Viewer</Link></Button>
                 </div>
@@ -564,6 +578,7 @@ function ViewerPage() {
 
 function AssetManagerPage() {
   const projects = useQuery({ queryKey: ["projects", "asset-manager"], queryFn: getProjects })
+  const availableProjects = projects.data?.projects.filter((project) => project.sourceOwner !== "session") ?? []
   if (projects.isError) return <ErrorState retry={() => void projects.refetch()} />
   return (
     <div className="space-y-6">
@@ -575,9 +590,9 @@ function AssetManagerPage() {
       <Card>
         <CardHeader className="border-b"><CardTitle>选择工程</CardTitle><CardDescription>首次打开工程时在当前浏览器读取已授权目录，并向 Maker Host 注册不含资源字节的分析快照。</CardDescription></CardHeader>
         <CardContent>
-          {projects.data?.projects.length ? (
+          {availableProjects.length ? (
             <div className="divide-y">
-              {projects.data.projects.map((project) => (
+              {availableProjects.map((project) => (
                 <div key={project.projectId} className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center">
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium">{project.name}</p>
@@ -800,6 +815,7 @@ function ProjectAssetManagerPage() {
   const { projectId } = projectAssetManagerRoute.useParams()
   const project = useQuery({ queryKey: ["projects", projectId], queryFn: () => getProject(projectId) })
   if (project.isError) return <ErrorState retry={() => void project.refetch()} />
+  if (project.data?.project.sourceOwner === "session") return <p role="status">会话预览按组件读取资源，暂不支持工程资源分析。请授权已保存的工程目录。</p>
   return project.data ? <ProjectAssetManager project={project.data.project} /> : <ViewerLoading message="正在读取项目绑定…" />
 }
 
@@ -1084,7 +1100,7 @@ function ProjectViewer({ project, compact = false, onCapture }: { project: Regis
         {!compact ? <div>
           <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-blue-400">Project Viewer</p>
           <h1 className="font-heading text-3xl font-semibold tracking-tight">{project.name}</h1>
-          <p className="mt-2 text-sm text-muted-foreground">{project.directoryName}/{project.fairyPath} · 尚未发布的工程 · 只读</p>
+          <p className="mt-2 text-sm text-muted-foreground">{projectSourceLabel({ ...project, backendSession: bundle.data?.backendSession ?? project.backendSession })} · 尚未发布的工程 · 只读</p>
         </div> : null}
         <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-3 shadow-sm">
           <RenderStateControls rendered={rendered} session={session} onError={setCommandError} />

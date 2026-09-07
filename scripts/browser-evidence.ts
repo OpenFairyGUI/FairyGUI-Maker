@@ -26,7 +26,7 @@ export function expectedDiagnostic(d: BrowserDiagnostic): string | undefined {
   }
   if (d.kind === "requestfailed" && d.method === "DELETE" && d.message === "net::ERR_ABORTED"
     && /\/api\/render-sessions\/[^/]+$/.test(url)) return "best-effort renderer teardown (Host timeout/TTL remains authoritative)"
-  if (/^(delivery-|lifecycle-|project-revision$|import-iteration$)/.test(d.phase)
+  if (/^(delivery-|lifecycle-|project-revision$|import-iteration$|session-preview$)/.test(d.phase)
     && (d.kind === "http" && d.status === 404 || d.kind === "console.error" && /404/.test(d.message))
     && /\/api\/render-sessions\/[^/]+\/commands$/.test(url)) return "closed or invalidated session poll"
   if (d.phase === "import-iteration" && d.kind === "console.warning" && /\/viewer-runtime\.html$/.test(url)

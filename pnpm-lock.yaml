@@ -18,14 +18,14 @@ importers:
         specifier: 1.30.0
         version: 1.30.0(zod@4.4.3)
       '@openfairygui/backend':
-        specifier: 0.3.1
-        version: 0.3.1(@types/node@26.1.2)
+        specifier: 0.5.0-alpha.1
+        version: 0.5.0-alpha.1(@types/node@26.1.2)
       '@openfairygui/core':
-        specifier: 0.3.1
-        version: 0.3.1
+        specifier: 0.5.0-alpha.1
+        version: 0.5.0-alpha.1
       '@openfairygui/mcp':
-        specifier: 0.3.1
-        version: 0.3.1(@types/node@26.1.2)
+        specifier: 0.5.0-alpha.1
+        version: 0.5.0-alpha.1(@types/node@26.1.2)
       '@resvg/resvg-js':
         specifier: 2.6.2
         version: 2.6.2
@@ -635,21 +635,21 @@ packages:
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
 
-  '@openfairygui/backend@0.3.1':
-    resolution: {integrity: sha512-SWrewcIKORW/VtBaLxp4FbMMI9CNyv2fw9H6iQ1h2aTdYy1vCALZ0yYezcj7QOZe3sTxzCkm6/LM0EhoVRYaUA==}
-    engines: {node: '>=20'}
+  '@openfairygui/backend@0.5.0-alpha.1':
+    resolution: {integrity: sha512-ILJFI+HGmxkzbatQx+7+9xpgQ3ai0hweG4ppIKZGUnCNaeZngi1jz1qi7ytq2oq1EletLtf3+OtWMdL2R4QFvA==}
+    engines: {node: '>=22'}
 
-  '@openfairygui/core@0.3.1':
-    resolution: {integrity: sha512-urLWZdCq8MksJydHkH+G1L1P7GFEqHocm1AtBjignuPDWCvVj2mLrL9DOQA98GihPVVIGH2ID3CjSIqKLSgqLg==}
-    engines: {node: '>=20'}
+  '@openfairygui/core@0.5.0-alpha.1':
+    resolution: {integrity: sha512-gb6bNVhP02Yrza76Mq2QTCQvATPjw6ssknii3k3RhfNsAS2bwk/xMyrvbzH5b48VHwjMN76YNKWD8OhAOFOAYA==}
+    engines: {node: '>=22'}
 
-  '@openfairygui/functions@0.3.1':
-    resolution: {integrity: sha512-Jta4GA8SyreYf/UM9KOQNKGlfQOyKjPQu2EhgJuFVQgeEZcraesVod0mDBoDtazkGMTqllfumb3LdnjKe2Mo7w==}
-    engines: {node: '>=20'}
+  '@openfairygui/functions@0.5.0-alpha.1':
+    resolution: {integrity: sha512-nBNkQN4Pr2Fi/xGKjBs7ET3pV/tICeyD+GunpVD6I189sd3MsjsXFH/S6XMGx3avCrisJZqaulHBGx1E/RorOQ==}
+    engines: {node: '>=22'}
 
-  '@openfairygui/mcp@0.3.1':
-    resolution: {integrity: sha512-l0Ngxw/zjmbstskbrgNMO2CGx0esD+kw9RnM+Gu2jZ5nLmd3ee0J4vNf4+UR2aLkAtpbjl0lyZqb4aolNHyrwQ==}
-    engines: {node: '>=20'}
+  '@openfairygui/mcp@0.5.0-alpha.1':
+    resolution: {integrity: sha512-B9B5bTWwTMfdrdVJo3NElxJbJzOFPWn2nKW4mAbKi4VkIPUIBUx5+wC/kK/BdUWqkqn5IIi5+aDfImVdEB5+UQ==}
+    engines: {node: '>=22'}
     hasBin: true
 
   '@oxc-project/types@0.143.0':
@@ -3869,23 +3869,23 @@ snapshots:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.1
 
-  '@openfairygui/backend@0.3.1(@types/node@26.1.2)':
+  '@openfairygui/backend@0.5.0-alpha.1(@types/node@26.1.2)':
     dependencies:
-      '@openfairygui/core': 0.3.1
-      '@openfairygui/functions': 0.3.1(@types/node@26.1.2)
+      '@openfairygui/core': 0.5.0-alpha.1
+      '@openfairygui/functions': 0.5.0-alpha.1(@types/node@26.1.2)
     transitivePeerDependencies:
       - '@types/node'
 
-  '@openfairygui/core@0.3.1':
+  '@openfairygui/core@0.5.0-alpha.1':
     dependencies:
       fast-xml-parser: 5.10.1
       jpeg-js: 0.4.4
       pako: 2.2.0
       property-graph: 4.1.0
 
-  '@openfairygui/functions@0.3.1(@types/node@26.1.2)':
+  '@openfairygui/functions@0.5.0-alpha.1(@types/node@26.1.2)':
     dependencies:
-      '@openfairygui/core': 0.3.1
+      '@openfairygui/core': 0.5.0-alpha.1
       fast-xml-parser: 5.10.1
       jiti: 2.7.0
     optionalDependencies:
@@ -3893,10 +3893,10 @@ snapshots:
     transitivePeerDependencies:
       - '@types/node'
 
-  '@openfairygui/mcp@0.3.1(@types/node@26.1.2)':
+  '@openfairygui/mcp@0.5.0-alpha.1(@types/node@26.1.2)':
     dependencies:
       '@modelcontextprotocol/sdk': 1.30.0(zod@4.4.3)
-      '@openfairygui/backend': 0.3.1(@types/node@26.1.2)
+      '@openfairygui/backend': 0.5.0-alpha.1(@types/node@26.1.2)
       zod: 4.4.3
     transitivePeerDependencies:
       - '@cfworker/json-schema'

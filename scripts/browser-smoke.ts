@@ -15,6 +15,7 @@ import { rendererDeliverySmoke, rendererLifecycleSmoke } from "./renderer-delive
 import { brokerStateSmoke } from "./broker-state-smoke"
 import { projectRevisionSmoke } from "./project-revision-smoke"
 import { saveGrantSmoke } from "./save-grant-smoke"
+import { sessionPreviewSmoke } from "./session-preview-smoke"
 import { assertRuntimeIsolated, runtimeNavigationSmoke } from "./runtime-isolation-smoke"
 import { createBrowserEvidence, goldenUpdateEnabled, saveVisualGolden } from "./browser-evidence"
 import { browserEvidenceSmoke } from "./browser-evidence-smoke"
@@ -356,10 +357,11 @@ try {
     (name, args) => callTool(host!.origin, sessionId, 71, name, args)))
   const runtimeBudgets = await evidence.step("runtime-budgets", () => runtimeBudgetSmoke(page.context(), host!.origin, artifact, publishDir))
   const projectRevision = await evidence.step("project-revision", () => projectRevisionSmoke(context, host!.origin, evidence.directory))
-  const saveGrants = await evidence.step("save-grants", () => saveGrantSmoke(context, host!, publishDir))
+  await evidence.step("session-preview", () => sessionPreviewSmoke(context, host!, publishDir, evidence.directory))
   const runtimeNavigation = await evidence.step("runtime-navigation", () => runtimeNavigationSmoke(context, host!.origin, artifact))
   await evidence.step("import-recovery", () => importRecoverySmoke(context, host!.origin, evidence))
   await evidence.step("import-iteration", () => importIterationSmoke(context, host!.origin, evidence, (name, args) => callTool(host!.origin, sessionId, 904, name, args)))
+  const saveGrants = await evidence.step("save-grants", () => saveGrantSmoke(context, host!, publishDir))
   if (!(await Promise.all(iframeCredentials)).every(Boolean)) throw new Error("Runtime iframe request carried Host credentials")
   evidence.verify()
   await context.close()

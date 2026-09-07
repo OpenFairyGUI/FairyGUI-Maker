@@ -1,6 +1,8 @@
 import type { Document, UamAssetResource, UamComponentResource, UamProject, UamResource } from "@openfairygui/core"
 import type { FileSystem } from "@openfairygui/core/project-io"
+import { BACKEND_SESSION_READ_LIMITS, type BackendSessionStateSnapshot } from "@openfairygui/backend"
 import { collectUamResourceReferences } from "../../asset-analysis"
+import { readBoundedResponse, RUNTIME_LIMITS } from "../../runtime/resource-budget"
 import { snapshotFileSystem, type ProjectScanOptions } from "../../project-snapshot"
 import {
   VIEWER_PROTOCOL_VERSION,
@@ -26,7 +28,7 @@ export type ViewerProjectRef = {
   bindingId: string
   fairyguiProjectId: string
   fairyPath: string
-  sourceOwner: "browser" | "host"
+  sourceOwner: "browser" | "host" | "session"
   sourceRevision: string
 }
 
@@ -35,6 +37,8 @@ export type ViewerProjectBundle = {
   project: UamProject
   catalog: ViewerProjectCatalog
   diagnostics: ViewerDiagnostic[]
+  backendSession?: Pick<BackendSessionStateSnapshot, "sessionId" | "revision" | "dirty" | "lastSavedRevision">
+  readAssetBytes?: (packageId: string, resourceId: string, signal: AbortSignal) => Promise<Uint8Array>
 }
 
 export async function readViewerProject(project: ViewerProjectRef, options: ProjectScanOptions = {}): Promise<ViewerProjectBundle> {
@@ -46,6 +50,27 @@ export async function readViewerProject(project: ViewerProjectRef, options: Proj
     import("@openfairygui/core/project-io"),
     import("@openfairygui/core"),
   ])
+  if (current.sourceOwner === "session") {
+    const signal = AbortSignal.any([...(options.signal ? [options.signal] : []), AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
+    const base = `/api/projects/${encodeURIComponent(current.projectId)}`
+    const query = new URLSearchParams({ sourceRevision: current.sourceRevision })
+    const response = await fetch(`${base}/session-state?${query}`, { signal })
+    const state = (await sessionPreviewJson(response, signal)).state
+    if (!state) throw new Error("session_preview_failed: Backend session model is missing")
+    if (state.project.projectId !== current.fairyguiProjectId || state.sessionId !== current.backendSession?.sessionId || state.revision !== current.backendSession.revision) {
+      throw new Error("session_preview_stale: 会话模型与预览版本不一致，请刷新工程。")
+    }
+    const bundle = viewerProjectBundle(state.project, current.sourceRevision, core.validateUamProject(state.project).map((issue) => ({ level: "warning", code: "uam_validation", path: issue.path, message: issue.message })))
+    bundle.backendSession = { sessionId: state.sessionId, revision: state.revision, dirty: state.dirty, lastSavedRevision: state.lastSavedRevision }
+    bundle.readAssetBytes = async (packageId, resourceId, lifetime) => {
+      const readSignal = AbortSignal.any([lifetime, AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
+      const resourceQuery = new URLSearchParams({ sourceRevision: current.sourceRevision, packageId, resourceId })
+      const bytes = await fetch(`${base}/resource-bytes?${resourceQuery}`, { signal: readSignal })
+      if (!bytes.ok) await sessionPreviewJson(bytes, readSignal)
+      return readBoundedResponse(bytes, BACKEND_SESSION_READ_LIMITS.resourceBytes, readSignal)
+    }
+    return bundle
+  }
   let sourceRevision = current.sourceRevision
   let document: Document
   if (project.sourceOwner === "host") {
@@ -81,13 +106,24 @@ export async function readViewerProject(project: ViewerProjectRef, options: Proj
     await refreshProject(project.projectId, { bindingId: current.bindingId, fairyguiProjectId: current.fairyguiProjectId, expectedSourceRevision: current.sourceRevision, nextSourceRevision: sourceRevision }, options.signal)
   }
 
+  return viewerProjectBundle(uam, sourceRevision, diagnostics)
+}
+
+async function sessionPreviewJson(response: Response, signal: AbortSignal) {
+  const bytes = await readBoundedResponse(response, BACKEND_SESSION_READ_LIMITS.model.maxBytes + 128, signal)
+  const result = JSON.parse(new TextDecoder().decode(bytes)) as { state?: BackendSessionStateSnapshot; error?: string; backendError?: { code: string; reason?: string } }
+  if (!response.ok) throw new Error(`${result.backendError?.code ?? "session_preview_failed"}${result.backendError?.reason ? `:${result.backendError.reason}` : ""}: ${result.error ?? response.status}`)
+  return result
+}
+
+function viewerProjectBundle(project: UamProject, sourceRevision: string, diagnostics: ViewerDiagnostic[]): ViewerProjectBundle {
   return {
     sourceRevision,
-    project: uam,
+    project,
     catalog: {
       schemaVersion: 1,
-      source: { projectId: uam.projectId },
-      packages: uam.packages.map((pkg) => ({
+      source: { projectId: project.projectId },
+      packages: project.packages.map((pkg) => ({
         packageId: pkg.id,
         packageName: pkg.name,
         components: pkg.resources
@@ -121,7 +157,8 @@ async function createHostProjectFileSystem(projectId: string, sourceRevision: st
   return snapshotFileSystem(filePaths, readRaw)
 }
 
-export function compileViewerScene(bundle: ViewerProjectBundle, packageId: string, componentId: string): ViewerScene {
+export async function compileViewerScene(bundle: ViewerProjectBundle, packageId: string, componentId: string, lifetime?: AbortSignal): Promise<ViewerScene> {
+  const signal = AbortSignal.any([...(lifetime ? [lifetime] : []), AbortSignal.timeout(RUNTIME_LIMITS.loadMs)])
   const diagnostics: ViewerDiagnostic[] = []
   const packages = new Map(bundle.project.packages.map((pkg) => [pkg.id, pkg]))
   const components = new Map<string, ViewerScene["components"][number]>()
@@ -138,7 +175,8 @@ export function compileViewerScene(bundle: ViewerProjectBundle, packageId: strin
     if (!pkg || !resource) return null
     return { packageId: pkg.id, packageName: pkg.name, resource }
   }
-  const addResource = (ownerPackageId: string, resourceId: string, path: string) => {
+  const addResource = async (ownerPackageId: string, resourceId: string, path: string): Promise<void> => {
+    signal.throwIfAborted()
     if (!resourceId) return
     if (components.size + assets.size >= 5_000) throw new Error("Viewer 组件依赖超过 5000 个资源，已停止读取。")
     const entry = resourceAt(ownerPackageId, resourceId)
@@ -157,7 +195,7 @@ export function compileViewerScene(bundle: ViewerProjectBundle, packageId: strin
       components.set(key, { packageId: entry.packageId, packageName: entry.packageName, resource: structuredClone(entry.resource) })
       for (const reference of collectUamResourceReferences(entry.packageId, entry.resource, (invalidPath, value) => {
         diagnostic("warning", "url_invalid", invalidPath, `无法解析 FairyGUI URL：${value}`)
-      })) addResource(reference.packageId, reference.resourceId, reference.path)
+      })) await addResource(reference.packageId, reference.resourceId, reference.path)
       for (const transition of entry.resource.component.transitions) {
         for (const item of transition.items) {
           if (item.actionType < 0 || item.actionType > 15) {
@@ -169,7 +207,8 @@ export function compileViewerScene(bundle: ViewerProjectBundle, packageId: strin
       return
     }
     if (assets.has(key)) return
-    const sourceBytes = entry.resource.sourceBytes
+    const sourceBytes = entry.resource.sourceBytes ?? await bundle.readAssetBytes?.(entry.packageId, entry.resource.id, signal)
+    signal.throwIfAborted()
     if (!sourceBytes?.byteLength) {
       diagnostic("error", "asset_bytes_missing", path, `资源 ${entry.packageName}/${entry.resource.name} 没有可读取的源文件字节。`)
       return
@@ -183,12 +222,12 @@ export function compileViewerScene(bundle: ViewerProjectBundle, packageId: strin
       resource: structuredClone(resource) as Omit<UamAssetResource, "sourceBytes">,
       data: sourceBytes.slice().buffer,
     })
-    for (const reference of collectUamResourceReferences(entry.packageId, entry.resource)) {
-      addResource(reference.packageId, reference.resourceId, reference.path)
+    for (const reference of collectUamResourceReferences(entry.packageId, { ...entry.resource, sourceBytes })) {
+      await addResource(reference.packageId, reference.resourceId, reference.path)
     }
   }
 
-  addResource(packageId, componentId, `component:${packageId}/${componentId}`)
+  await addResource(packageId, componentId, `component:${packageId}/${componentId}`)
   const root = resourceAt(packageId, componentId)
   if (!root || root.resource.kind !== "component") throw new Error(`找不到 Viewer 组件 ${packageId}/${componentId}。`)
 
@@ -229,10 +268,10 @@ async function connectViewerFrame(frame: HTMLIFrameElement, bundle: ViewerProjec
   const runtime = await connectRendererChannel(frame.contentWindow, "Viewer", { ...connection, sourceRevision: bundle.sourceRevision }, signal)
   return {
     ...runtime,
-    render(packageId, componentId, expectedRuntimeEventSeq) {
+    async render(packageId, componentId, expectedRuntimeEventSeq) {
       const component = bundle.catalog.packages.find((pkg) => pkg.packageId === packageId)?.components.find((item) => item.id === componentId)
       if (!component) throw new Error(`Viewer resource not found: ${packageId}/${componentId}`)
-      const scene = compileViewerScene(bundle, packageId, componentId)
+      const scene = await compileViewerScene(bundle, packageId, componentId, signal)
       return runtime.send<ViewerRendered & { runtimeEventSeq: number }>({ kind: "render", scene, expectedRuntimeEventSeq }, scene.assets.map(({ data }) => data))
     },
   }

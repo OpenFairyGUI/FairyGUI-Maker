@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto"
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto"
 import { access, readdir, realpath, writeFile } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { basename, resolve } from "node:path"
@@ -57,7 +57,11 @@ const TRACKED_METHODS = new Set([
   "openProjectSession",
   "getSession",
   "getProjectOutline",
+  "queryEntity",
+  "readSessionState",
+  "readResourceBytes",
   "validateSession",
+  "preflightTransaction",
   "applyTransaction",
   "saveSession",
   "materializeSession",
@@ -104,7 +108,8 @@ export type RegisteredProject = {
   fairyPath: string
   revision: number
   sourceRevision: string
-  sourceOwner: "browser" | "host"
+  sourceOwner: "browser" | "host" | "session"
+  backendSession?: { sessionId: string; revision: number; lastSavedRevision: number; dirty: boolean }
   access: "read-only"
   status: "ready"
   viewerUrl: string
@@ -140,6 +145,37 @@ const projectRegistrationSchema = z.object({
   ), "fairyPath must be a safe relative .fairy path"),
   sourceRevision: z.string().regex(/^[a-f0-9]{64}$/),
 })
+
+const sessionPreviewInput = z.object({ sessionId: z.string().min(1).max(256), expectedRevision: z.number().int().nonnegative() }).strict()
+
+function sessionPreviewResult(runtime: OpenFairyGuiBackendRuntime, sessionId: string, expectedRevision: number) {
+  const result = runtime.readSessionState({ sessionId, expectedRevision })
+  if (!result.ok) return { ok: false as const, error: result.error }
+  const state = result.data
+  if (!state.readComplete || state.uamFidelity !== "full") return { ok: false as const, error: {
+    code: "session_preview_incomplete", message: "The Backend session model is incomplete or unsupported; inspect its read diagnostics before previewing.", readDiagnostics: state.readDiagnostics,
+  } }
+  const packageIds = new Set<string>()
+  let components = 0
+  for (const pkg of state.project.packages) {
+    const resourceIds = new Set<string>()
+    if (packageIds.has(pkg.id) || pkg.resources.some((resource) => { if (resourceIds.has(resource.id)) return true; resourceIds.add(resource.id); return false })) {
+      return { ok: false as const, error: { code: "session_preview_ambiguous", message: "Duplicate package or resource IDs cannot identify a Viewer source." } }
+    }
+    packageIds.add(pkg.id)
+    components += pkg.resources.filter((resource) => resource.kind === "component").length
+  }
+  if (packageIds.size > 5_000 || components > 5_000) return { ok: false as const, error: { code: "session_preview_budget_exceeded", message: "Viewer supports at most 5000 packages and components." } }
+  return { ok: true as const, state }
+}
+
+function advanceSessionPreview(project: RegisteredProject, snapshot: NonNullable<RegisteredProject["backendSession"]>): RegisteredProject {
+  const revision = project.revision + 1
+  const backendSession = { sessionId: snapshot.sessionId, revision: snapshot.revision, lastSavedRevision: snapshot.lastSavedRevision, dirty: snapshot.dirty }
+  // A preview generation identifies reads of the session, including save bookkeeping; it is not a file-content digest.
+  const sourceRevision = createHash("sha256").update(JSON.stringify({ bindingId: project.bindingId, generation: revision, ...backendSession })).digest("hex")
+  return { ...project, revision, sourceRevision, backendSession, updatedAt: new Date().toISOString() }
+}
 
 const assetResourceKeySchema = z.string().regex(/^[A-Za-z0-9_-]{1,128}\/[A-Za-z0-9_-]{1,128}$/)
 const assetAnalysisSchema = z.object({
@@ -259,7 +295,7 @@ function trackBackendResult(sessions: Map<string, BackendSession>, activity: Bac
   })
 }
 
-function createTrackedRuntime(runtime: OpenFairyGuiBackendRuntime, sessions: Map<string, BackendSession>, activity: BackendActivity[], saveGrants: HostSaveGrants) {
+function createTrackedRuntime(runtime: OpenFairyGuiBackendRuntime, sessions: Map<string, BackendSession>, activity: BackendActivity[], saveGrants: HostSaveGrants, onResult: (method: string, input: any, result: any) => void) {
   return new Proxy(runtime, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver)
@@ -271,6 +307,7 @@ function createTrackedRuntime(runtime: OpenFairyGuiBackendRuntime, sessions: Map
         const finish = (result: any) => {
           trackBackendResult(sessions, activity, property, args[0], result)
           if (result?.ok && (property === "openSession" || property === "openProjectSession")) saveGrants.invalidateSession(result.data.sessionId)
+          onResult(property, args[0], result)
           return result
         }
         const fail = () => finish(hostBackendFailure("backend_unhandled_error", "Backend tool execution failed."))
@@ -307,6 +344,8 @@ function registerApi(
     saveGrants: HostSaveGrants
     approvalToken: string
     saveApprovalsEnabled: boolean
+    runtime: OpenFairyGuiBackendRuntime
+    ensureSessionPreview(sessionId: string, expectedRevision: number): { ok: true; project: RegisteredProject } | Extract<ReturnType<typeof sessionPreviewResult>, { ok: false }>
     ensureDraftPreview(draftId: string): Promise<RegisteredProject>
     removeDraftPreview(draftId: string): void
   },
@@ -341,6 +380,13 @@ function registerApi(
         projects: [...backendSessions.values()].map(publicBackendSession),
         activity: [...backendActivity].reverse(),
       })
+    })
+    .post("/api/session-previews", zValidator("json", sessionPreviewInput), (c) => {
+      const { ensureSessionPreview, saveApprovalsEnabled } = readState()
+      if (!saveApprovalsEnabled) return c.json({ error: "Backend session previews are unavailable in read-only CLI mode" }, 403)
+      const { sessionId, expectedRevision } = c.req.valid("json")
+      const result = ensureSessionPreview(sessionId, expectedRevision)
+      return result.ok ? c.json(result) : c.json({ error: result.error.message, backendError: result.error }, 409)
     })
     .get("/api/save-approvals", (c) => {
       const { saveGrants, saveApprovalsEnabled } = readState()
@@ -391,6 +437,30 @@ function registerApi(
       const project = readState().projects.get(c.req.param("projectId"))
       return project ? c.json({ project }) : c.json({ error: "Project not found" }, 404)
     })
+    .get("/api/projects/:projectId/session-state", zValidator("query", z.object({ sourceRevision: z.string().regex(/^[a-f0-9]{64}$/) }).strict()), (c) => {
+      const { projects, runtime } = readState()
+      const project = projects.get(c.req.param("projectId"))
+      if (!project?.backendSession) return c.json({ error: "Session preview not found" }, 404)
+      if (project.sourceRevision !== c.req.valid("query").sourceRevision) return c.json({ error: "session_preview_stale: refresh the preview" }, 409)
+      const result = sessionPreviewResult(runtime, project.backendSession.sessionId, project.backendSession.revision)
+      return result.ok ? c.json({ state: result.state }) : c.json({ error: result.error.message, backendError: result.error }, 409)
+    })
+    .get("/api/projects/:projectId/resource-bytes", zValidator("query", z.object({
+      sourceRevision: z.string().regex(/^[a-f0-9]{64}$/), packageId: z.string().min(1).max(256), resourceId: z.string().min(1).max(256),
+    }).strict()), (c) => {
+      const { projects, runtime } = readState()
+      const project = projects.get(c.req.param("projectId"))
+      if (!project?.backendSession) return c.json({ error: "Session preview not found" }, 404)
+      const { sourceRevision, packageId, resourceId } = c.req.valid("query")
+      if (project.sourceRevision !== sourceRevision) return c.json({ error: "session_preview_stale: refresh the preview" }, 409)
+      const result = runtime.readResourceBytes({ sessionId: project.backendSession.sessionId, expectedRevision: project.backendSession.revision, selector: { packageId, resourceId } })
+      if (!result.ok) return c.json({ error: result.error.message, backendError: result.error }, 409)
+      c.header("Content-Type", "application/octet-stream")
+      c.header("Content-Disposition", "attachment")
+      c.header("Content-Security-Policy", "default-src 'none'; sandbox")
+      c.header("Content-Length", String(result.data.sourceBytes.byteLength))
+      return c.body(Uint8Array.from(result.data.sourceBytes).buffer)
+    })
     .post("/api/projects/:projectId/refresh", zValidator("json", z.object({
       bindingId: z.uuid(), fairyguiProjectId: z.string().min(1).max(128),
       expectedSourceRevision: z.string().regex(/^[a-f0-9]{64}$/), nextSourceRevision: z.string().regex(/^[a-f0-9]{64}$/),
@@ -431,6 +501,7 @@ function registerApi(
       const projectId = c.req.param("projectId")
       const project = projects.get(projectId)
       if (!project) return c.json({ error: "Project not found" }, 404)
+      if (project.sourceOwner === "session") return c.json({ error: "Session previews do not provide full-project asset analysis" }, 409)
       const analysis = c.req.valid("json")
       if (analysis.projectId !== projectId || analysis.sourceRevision !== project.sourceRevision) {
         return c.json({ error: "Asset analysis does not match the current project revision" }, 409)
@@ -644,7 +715,17 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     allowedProjectRoots: [allowedProjectRoot], fileSystem: await createHostBackendFileSystem(dataDir),
   })
   const saveGrants = new HostSaveGrants(backend)
-  const runtime = createTrackedRuntime(backend, backendSessions, backendActivity, saveGrants)
+  const runtime = createTrackedRuntime(backend, backendSessions, backendActivity, saveGrants, (method, input, result) => {
+    if (!result?.ok || !["openSession", "openProjectSession", "applyTransaction", "saveSession", "materializeSession", "closeSession"].includes(method)) return
+    const sessionId = result.data?.sessionId ?? input?.sessionId
+    for (const project of projects.values()) {
+      if (project.backendSession?.sessionId !== sessionId) continue
+      if (["openSession", "openProjectSession", "closeSession"].includes(method)) projects.delete(project.projectId)
+      else projects.set(project.projectId, advanceSessionPreview(project, result.data))
+      assetAnalyses.delete(project.projectId)
+      renderBroker.invalidateProject(project.projectId)
+    }
+  })
   const viewOnly = projectSource !== null
   const app = new Hono()
   let origin = ""
@@ -652,6 +733,25 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   let allowedOrigins = new Set<string>()
   let closing = false
   let pendingMcpSessions = 0
+
+  const ensureSessionPreview = (sessionId: string, expectedRevision: number) => {
+    const result = sessionPreviewResult(runtime, sessionId, expectedRevision)
+    if (!result.ok) return result
+    const existing = [...projects.values()].find((project) => project.backendSession?.sessionId === sessionId)
+    if (existing && existing.backendSession?.revision === result.state.revision && existing.backendSession.dirty === result.state.dirty
+      && existing.backendSession.lastSavedRevision === result.state.lastSavedRevision) return { ok: true as const, project: existing }
+    const now = new Date().toISOString()
+    const projectId = existing?.projectId ?? `project_${randomUUID()}`
+    const project = advanceSessionPreview({
+      projectId, bindingId: existing?.bindingId ?? randomUUID(), fairyguiProjectId: result.state.project.projectId,
+      name: backendSessions.get(sessionId)?.projectName ?? "Backend session", directoryName: "Backend session", fairyPath: "",
+      revision: existing?.revision ?? 0, sourceRevision: "", sourceOwner: "session", access: "read-only", status: "ready",
+      viewerUrl: `${origin}/projects/${projectId}/viewer`, assetManagerUrl: "", createdAt: existing?.createdAt ?? now, updatedAt: now,
+    }, result.state)
+    projects.set(projectId, project)
+    renderBroker.invalidateProject(projectId)
+    return { ok: true as const, project }
+  }
 
   const pruneMcpSessions = async () => {
     const now = Date.now()
@@ -818,6 +918,16 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
         () => [...projects.values()],
         (projectId) => assetAnalyses.get(projectId),
       )
+      if (!viewOnly) server.registerTool("open_session_preview", {
+        title: "Open an unsaved Backend session in Viewer",
+        description: "Create a read-only Viewer source for an explicit Backend session revision. Uses public session-model and resource-byte reads; does not save files or request a Save Grant. Open viewerUrl in a browser, then use the existing Viewer tools. Edits and saves invalidate the previous renderer.",
+        inputSchema: sessionPreviewInput,
+        annotations: { readOnlyHint: true },
+      }, async ({ sessionId, expectedRevision }) => {
+        const result = ensureSessionPreview(sessionId, expectedRevision)
+        const value = result.ok ? { ok: true, project: result.project, browserRequired: !renderBroker.getViewerRenderer(result.project.projectId) } : result
+        return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value, isError: !result.ok }
+      })
       record = { id: null, createdAt: now, lastActivityAt: now, lastError: null, activeRequests: 0, transport, server }
       transport.onerror = () => {
         record!.lastError = "mcp_transport_error"
@@ -853,6 +963,8 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     saveGrants,
     approvalToken,
     saveApprovalsEnabled: !viewOnly,
+    runtime,
+    ensureSessionPreview,
     ensureDraftPreview,
     removeDraftPreview,
   }))

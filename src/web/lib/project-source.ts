@@ -1,6 +1,6 @@
 import { captureProjectSnapshot, projectPath, type ProjectScanOptions } from "../../project-snapshot"
 
-export type ProjectBindingPermission = PermissionState | "missing" | "unavailable" | "host"
+export type ProjectBindingPermission = PermissionState | "missing" | "unavailable" | "host" | "session"
 
 export type AuthorizedProjectSource = {
   bindingId: string

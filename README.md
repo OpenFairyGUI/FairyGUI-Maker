@@ -100,6 +100,7 @@ MCP 最多保留 32 个会话，空闲 30 分钟后回收，正在执行的调�
 
 | 工作流 | 工具 |
 |---|---|
+| Backend 未保存预览 | `open_session_preview`（显式 `sessionId`、`expectedRevision`） |
 | Viewer 发现与渲染 | `list_viewer_components`、`render_component_preview` |
 | Player 发现与渲染 | `list_artifact_components`、`open_artifact_player`、`render_artifact_component` |
 | Render session | `update_render_session`、`set_render_view`、`get_render_observation`、`capture_render_screenshot` |
@@ -215,8 +216,9 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 
 ## 当前状态与边界
 
-- 已发布 Backend `0.3.1` 的 `get_session` 返回会话元数据，`get_project_outline` 返回稳定身份；当前属性读取需等待 [OpenFairyGUI #129](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/129) 的正式接口发布。事务成功和 revision 变化不能代替属性读回验证。
-- Viewer 尚不读取 Backend 未保存的会话 revision；公开预览快照接口跟踪 [OpenFairyGUI #130](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/130)。当前只能在用户明确要求并批准保存后，刷新文件来源验证已保存结果。Maker 不反射上游私有状态或维护第二套事务模型。
+- 已接入 Backend `0.5.0-alpha.1`：`query_entity` 读取当前属性；`read_session_state` 与 `read_resource_bytes` 提供绑定 revision 的模型和主资源字节。事务后必须读回所改字段，不能只用成功返回或 revision 变化证明结果。
+- Dashboard 的“预览会话”和 `open_session_preview` 可预览未保存修改。模型和所选组件资源来自公开 Backend 接口；编辑、保存或关闭会话会使旧 renderer 失效，刷新后读取新版本。详情见 [会话预览](./docs/session-preview.md)。
+- **升级验收尚未通过**：上游 `0.5.0-alpha.1` 的 MCP 工厂隐藏 Maker 后注册工具，并将 Host 保存授权错误改写成 `backend_unhandled_error`。跟踪 [OpenFairyGUI #138](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/138)；不能把未保存预览通过解释为完整 MCP/保存流程可用。
 - Host 只绑定 `127.0.0.1`，并校验 Host、Origin 和访问令牌。
 - 同一 Host 最多保留 32 个 MCP session；客户端应正常发送 MCP `DELETE` 关闭不再使用的 session。
 - Host 强制执行一次性保存授权；仅持有 MCP token 或普通 Workbench Cookie 不能批准保存。授权状态仅存内存，最多保留 128 条记录。
@@ -234,7 +236,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 | 项目 | `0.1.x` 基线 |
 |---|---|
 | Node.js | `>=22.18`；CI 覆盖 Node 22 与 24 |
-| OpenFairyGUI | `@openfairygui/core/backend/mcp` `0.3.1` |
+| OpenFairyGUI | `@openfairygui/core/backend/mcp` `0.5.0-alpha.1`（集成验收受 #138 阻断） |
 | MCP | Streamable HTTP；Viewer protocol v7 |
 | Viewer / Player runtime | 冻结的 LayaAir 3.3.10 + FairyGUI Web runtime |
 | 浏览器 | 当前稳定版 Chrome 与 Edge；自动门禁使用 Chromium |

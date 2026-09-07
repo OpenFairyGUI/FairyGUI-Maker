@@ -44,10 +44,10 @@ For reimport, show the actual dry-run changes, conflicts/blockers and `planDiges
 ## Inspect or edit a project
 
 1. Call `openfairygui_backend_open_session` with the authorized `projectPath` and record the returned `sessionId`.
-2. Call `openfairygui_backend_get_session` for revision/dirty/save metadata and `openfairygui_backend_get_project_outline` for stable resource and node IDs. Published Backend 0.3.1 does not expose current entity properties or full UAM through these calls; property readback is tracked in [OpenFairyGUI #129](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/129). If a change depends on an unknown current value, report this limitation rather than guessing.
+2. Call `openfairygui_backend_get_session` for revision/dirty/save metadata and `openfairygui_backend_get_project_outline` for stable IDs. Use `openfairygui_backend_query_entity` to read the current properties of the exact target. Read its installed method/operation schema before constructing selectors; do not guess current values.
 3. Plan the smallest UAM operation batch supported by the current contract. Do not invent selector or operation grammar at the MCP layer.
 4. Call `openfairygui_backend_apply_transaction` with `sessionId`, the observed `expectedRevision`, and the operation batch.
-5. Fetch the session and outline again to verify the new revision and any observable identity changes; call `openfairygui_backend_validate_session` for structural diagnostics. These checks do not verify changed text, geometry, or other properties in Backend 0.3.1. Report property readback as unavailable; do not claim a model change was independently verified just because the transaction succeeded.
+5. Query the changed entity again and compare the intended fields at the returned revision; call `openfairygui_backend_validate_session` for structural diagnostics and inspect its actual validity/completeness. A successful transaction or validation envelope alone does not prove the changed properties.
 6. Before `openfairygui_backend_save_session`, ensure the user has requested persistence or overwriting. An explicit edit-and-save request allows requesting a Host grant; a read-only or preview request does not. Chat authorization alone does not bypass the Host gate.
 7. Always send the observed `expectedRevision`, including for force-save or materialization. On `save_approval_required`, report the request ID, target, revision, options and Workbench `approvalPath`; ask the Host owner to confirm there using their separate approval token. Keep the backend session open while awaiting this decision. Do not obtain, read, print or supply that token yourself, approve via REST/browser automation, or bypass the gate using filesystem tools or another backend.
 8. After owner confirmation, retry the identical tool arguments once. Grants expire five minutes after request creation and are consumed before execution, even on failed or uncertain writes. Re-read state after failure; never silently request and approve another grant. Changed revision/options, closure, rejection or revocation require a fresh request and owner decision. Preserve backend partial-save/error envelopes; a consumed grant does not prove success.
@@ -59,6 +59,7 @@ If a revision is stale, fetch the session again and re-plan. Never replay an old
 
 Choose one authorization path:
 
+- Current Backend session: call `open_session_preview` with the existing `sessionId` and explicitly observed `expectedRevision`, or click its Dashboard “预览会话” button. Open the returned `project.viewerUrl`; this reads the unsaved session without saving. On `stale_read`, discard the incomplete read and inspect/replan against current state. Do not silently substitute a new revision.
 - Interactive: the user binds a directory from Dashboard with `showDirectoryPicker({ mode: "read" })`. Only the user can grant or renew this browser permission.
 - Automated read-only snapshot: run the installed `fairygui-maker view <project-path>` (or `pnpm cli -- view <project-path>` from a built source checkout) using the one explicit project root. Add `--data-dir <private-path>` when artifacts must not live under the launch directory. The snapshot is immutable until the CLI/Host restarts and the MCP service does not register backend write tools.
 
@@ -77,11 +78,15 @@ Use the MCP `image/png` content attached to render and capture results; do not c
 
 Viewer updates never change the `.fairy` project. Persist project changes only through a backend revision-checked transaction and save.
 
-Viewer reads saved files or the CLI's frozen snapshot, not pending Backend edits. There is no public Backend-revision preview bridge in 0.3.1; this is tracked in [OpenFairyGUI #130](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/130). Do not read private runtime fields, mirror Backend transactions, or save solely to work around this limitation. After an explicitly requested and approved save, refresh the browser source or restart the CLI snapshot before validating the saved result.
+Session previews use public `readSessionState` and revision-bound `readResourceBytes`. Model reads exclude primary resource bytes; the Viewer fetches only the selected component's dependency closure, including cross-package assets and bitmap-font glyphs. Edits/saves invalidate the old renderer; refresh before rendering again. The Host `sourceRevision` identifies a preview generation, not a file hash or a permanent Backend revision snapshot. A session close removes its preview. File-bound Viewer projects still require source refresh (or CLI restart) after saving. Do not read private runtime fields, mirror Backend transactions, or save just to obtain a preview.
+
+The pinned upstream MCP `0.5.0-alpha.1` currently hides Maker tools from discovery and rewrites Host Save Grant errors; integration is blocked by [OpenFairyGUI #138](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/138). Report this incompatibility when tools are missing or save returns `backend_unhandled_error`; preserve the dirty session and do not bypass the Host gate. Session preview is independently verified, not full workflow acceptance.
 
 ## Inspect assets
 
 Use `list_viewer_components` to find the authorized projectId, then call `inspect_project_assets`. On `browser_required`, open its `assetManagerUrl` and let Asset Manager scan the authorized source; retry for that sourceRevision. Do not invent a scan or upload your own conclusions as Host-verified evidence.
+
+Session preview projects load resource bytes on demand and do not provide full-project asset analysis. Use an explicitly authorized saved directory for that workflow.
 
 Use `{projectId, packageId, resourceId, direction: "both", limit: 100}` for one resource. Repeat identical selectors with `nextCursor` until null to read all issues and incoming/outgoing references. For a large issue group, use its `issueId` with `{projectId, issueId, limit: 100}` to page every affected resource key. Stale cursors or issue IDs require a fresh query. Results are `analysisOwner: "browser"`, `trust: "advisory"`; zero references do not authorize deletion, and Maker exposes no delete/rename/merge/reference-rewrite asset operation.
 
