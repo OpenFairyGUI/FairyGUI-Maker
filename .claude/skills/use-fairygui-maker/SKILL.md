@@ -1,6 +1,6 @@
 ---
 name: use-fairygui-maker
-description: Use FairyGUI Maker to inspect or edit FairyGUI projects, preview unpublished project UI in Viewer, validate published .fui or _fui.bytes artifacts in Player, capture render evidence, and diagnose revision, permission, browser_required, or unsupported-runtime failures. Trigger for operating FairyGUI through the Maker CLI, Workbench, or MCP tools. Do not trigger for developing FairyGUI Maker's own source code.
+description: Use FairyGUI Maker to import or reimport design sources, inspect or edit FairyGUI projects, analyze assets, preview unpublished UI in Viewer, and validate published .fui or _fui.bytes artifacts in Player. Trigger for operating the Maker CLI, Workbench, or MCP tools, including render evidence and revision or permission failures. Do not trigger for developing FairyGUI Maker's own source code.
 ---
 
 # Use FairyGUI Maker

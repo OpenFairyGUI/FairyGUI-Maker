@@ -1,17 +1,20 @@
 ---
 name: use-fairygui-maker
-description: Use FairyGUI Maker to inspect or edit FairyGUI projects, preview unpublished project UI in Viewer, validate published .fui or _fui.bytes artifacts in Player, capture render evidence, and diagnose revision, permission, browser_required, or unsupported-runtime failures. Trigger for operating FairyGUI through the Maker CLI, Workbench, or MCP tools. Do not trigger for developing FairyGUI Maker's own source code.
+description: Use FairyGUI Maker to import or reimport design sources, inspect or edit FairyGUI projects, analyze assets, preview unpublished UI in Viewer, and validate published .fui or _fui.bytes artifacts in Player. Trigger for operating the Maker CLI, Workbench, or MCP tools, including render evidence and revision or permission failures. Do not trigger for developing FairyGUI Maker's own source code.
 ---
 
 # Use FairyGUI Maker
 
-Operate the existing Maker Host and its MCP tools. Keep project authoring, Viewer preview, and Player validation separate.
+Choose the local CLI or connected Maker Host for the requested workflow. Keep project authoring, Viewer preview, and Player validation separate.
 
 ## Choose the workflow
 
 | Goal | Use | Persistent effect |
 |---|---|---|
+| Import `.fig`, `.psd`, or a Maker Import Bundle | Local CLI or Workbench Draft | Draft state; project files only on explicit import/Materialize |
+| Reimport changed local design sources | Local CLI dry-run, then approved plan digest | Three-way merge into the existing project |
 | Inspect, edit, or save a `.fairy` project | OpenFairyGUI backend session | Save requires an explicit revision and a one-time Host Save Grant |
+| Inspect resource health/references | Asset Manager + `inspect_project_assets` | Advisory analysis for one source revision |
 | Preview the current unpublished project | Viewer | Render-session memory only |
 | Validate imported `.fui` / `_fui.bytes` output | Player | Artifact remains immutable |
 | Publish a project automatically | Unsupported | `publish_artifact` is not implemented |
@@ -20,7 +23,7 @@ Do not use Viewer as evidence of published runtime behavior. Use Player for the 
 
 ## Start safely
 
-1. Confirm the FairyGUI Maker MCP tools are available. If not, ask the user to start or connect the Maker Host.
+1. For local CLI work, check the installed command's `--version` and `--help`; import/reimport do not require a running Host, MCP connection, or token. For backend/MCP rendering work, use the available Maker tools or start/connect the authorized Host as described in the [CLI reference](references/import-workflows.md).
 2. Call `openfairygui_backend_get_capabilities` before backend work. Respect its versions, supported methods, and non-goals.
 3. Use the single Maker MCP service. Do not create a second OpenFairyGUI transaction path.
 4. Use only a project path supplied or authorized by the user. Do not scan for other FairyGUI projects.
@@ -29,6 +32,14 @@ Do not use Viewer as evidence of published runtime behavior. Use Player for the 
 7. Never expose the Maker token in logs, screenshots, or the final report.
 
 Use the registered OpenFairyGUI MCP prompts when the client exposes them. They define the same capability, revision, save, and polling contracts.
+
+## Import and reimport design sources
+
+Read [references/import-workflows.md](references/import-workflows.md) for exact CLI commands, Draft REST inputs, and recovery. Use inspect/plan/dry-run when the user requests analysis; use `import --out` or Draft Materialize only for a requested new project. Keep the source path, draftId, revision, output path and diagnostics in the result.
+
+After preview, a planned/compiled Draft can change Mapping and compile again. Successful replanning invalidates the old preview and visual evidence; capture the new result. An already-written Materialize attempt must be recovered before changing that Draft.
+
+For reimport, show the actual dry-run changes, conflicts/blockers and `planDigest` before applying. A prior request to apply the reviewed plan is sufficient authorization; a request merely to inspect changes is not. Close the project in Host/editor, apply the exact approved digest once, and run a fresh dry-run to check the resulting project. Never use CLI reimport to bypass a pending Host Save Grant.
 
 ## Inspect or edit a project
 
@@ -49,7 +60,7 @@ If a revision is stale, fetch the session again and re-plan. Never replay an old
 Choose one authorization path:
 
 - Interactive: the user binds a directory from Dashboard with `showDirectoryPicker({ mode: "read" })`. Only the user can grant or renew this browser permission.
-- Automated read-only snapshot: run `npx fairygui-maker@0.1.0 view <project-path>` (or `pnpm cli -- view <project-path>` from this source checkout) using the one explicit project root. Add `--data-dir <private-path>` when artifacts must not live under the launch directory. The snapshot is immutable until the CLI/Host restarts and the MCP service does not register backend write tools.
+- Automated read-only snapshot: run the installed `fairygui-maker view <project-path>` (or `pnpm cli -- view <project-path>` from a built source checkout) using the one explicit project root. Add `--data-dir <private-path>` when artifacts must not live under the launch directory. The snapshot is immutable until the CLI/Host restarts and the MCP service does not register backend write tools.
 
 Then:
 
@@ -67,6 +78,12 @@ Use the MCP `image/png` content attached to render and capture results; do not c
 Viewer updates never change the `.fairy` project. Persist project changes only through a backend revision-checked transaction and save.
 
 Viewer reads saved files or the CLI's frozen snapshot, not pending Backend edits. There is no public Backend-revision preview bridge in 0.3.1; this is tracked in [OpenFairyGUI #130](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/130). Do not read private runtime fields, mirror Backend transactions, or save solely to work around this limitation. After an explicitly requested and approved save, refresh the browser source or restart the CLI snapshot before validating the saved result.
+
+## Inspect assets
+
+Use `list_viewer_components` to find the authorized projectId, then call `inspect_project_assets`. On `browser_required`, open its `assetManagerUrl` and let Asset Manager scan the authorized source; retry for that sourceRevision. Do not invent a scan or upload your own conclusions as Host-verified evidence.
+
+Use `{projectId, packageId, resourceId, direction: "both", limit: 100}` for one resource. Repeat identical selectors with `nextCursor` until null to read all issues and incoming/outgoing references. For a large issue group, use its `issueId` with `{projectId, issueId, limit: 100}` to page every affected resource key. Stale cursors or issue IDs require a fresh query. Results are `analysisOwner: "browser"`, `trust: "advisory"`; zero references do not authorize deletion, and Maker exposes no delete/rename/merge/reference-rewrite asset operation.
 
 ## Validate a published Artifact in Player
 
@@ -86,6 +103,9 @@ Player operations change only render-session memory. Never treat them as Artifac
 | `browser_required` | Open the returned Viewer or Player URL; do not fabricate a render result |
 | `project_permission_required` | Ask the user to reauthorize from Dashboard |
 | stale backend revision | Re-fetch the session, re-plan, and use the new revision |
+| `cursor_invalid_or_stale` / `issue_invalid_or_stale` | Restart the same asset/catalog query without the old cursor/issue ID |
+| `materialize_recovery_required` | Files are committed; preserve the returned target and recover the same Draft/target after content verification |
+| reimport conflict, blocker or stale plan digest | Stop applying; read a fresh dry-run and resolve the reported source/project issue |
 | `save_approval_required` | Ask the owner to confirm in Workbench; keep the session open and do not self-approve |
 | `save_revision_stale` / `save_input_invalid` | Re-fetch the backend revision and supply supported, bounded save arguments; old grants cannot be reused |
 | state-version conflict | Observe the latest state, then decide whether the update is still valid |
@@ -99,7 +119,7 @@ Do not send arbitrary JavaScript, expressions, business JSON, coordinate guesses
 
 State:
 
-- which workflow ran: backend authoring, Viewer, or Player;
+- which workflow ran: import/reimport, backend authoring, Asset Manager, Viewer, or Player;
 - the relevant project/session revisions or Artifact digest;
 - whether changes were persisted or temporary;
 - the structured observation, screenshot, and diagnostics actually verified;
@@ -107,4 +127,4 @@ State:
 
 Do not present build or type-check success as browser-runtime evidence.
 
-For startup and CLI details, read [README.md](../../../README.md). For product and persistence boundaries, read [docs/architecture.md](../../../docs/architecture.md). For render sessions, tools, and browser requirements, read [docs/workbench.md](../../../docs/workbench.md).
+This folder is portable: keep `SKILL.md`, `agents/` and `references/` together. The local reference contains CLI/Host startup details. Extended product documentation ships in the installed `fairygui-maker/docs/` directory; online copies are the [README](https://github.com/OpenFairyGUI/FairyGUI-Maker/blob/main/README.md), [architecture](https://github.com/OpenFairyGUI/FairyGUI-Maker/blob/main/docs/architecture.md), and [Workbench contract](https://github.com/OpenFairyGUI/FairyGUI-Maker/blob/main/docs/workbench.md). Match the installed version when consulting online documentation.
