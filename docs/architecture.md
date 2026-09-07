@@ -108,6 +108,7 @@ Maker 只补充面向用户任务的高层工具。Viewer 与 Artifact-first Pla
 | `update_render_session` | 以稳定对象 ID 更新白名单临时属性，或驱动 Controller、Transition 与控件语义事件 |
 | `set_render_view` | 使用独立 viewStateVersion 修改缩放、背景和视口 |
 | `capture_render_screenshot` | 获取实际捕获时 semanticStateVersion/viewStateVersion 对应的 Canvas PNG |
+| `run_ui_scenario` | 复用 Broker 串联临时语义操作、条件等待、断言和一次 PNG 捕获，按步骤报告失败与已执行结果 |
 
 工程态工具应返回 `projectId`、稳定 package/component ID 和 Viewer URL；发布态工具返回 `artifactId`、manifest URI 或 Player URL。两类工具都不应把整个工程或全部发布资源编码进单次 MCP 响应。
 
@@ -184,7 +185,8 @@ Viewer 的“只读”只约束工程目录：Button、TextInput、List/Tree、C
 - Dashboard / Player 手动授权并导入真实发布目录。
 - 持久 artifact 目录、文件 digest、manifest、包依赖与组件目录。
 - 原生 `.fui` / `_fui.bytes` 回放、Agent 语义操作、观察、人工交互上报与截图。
-- 后续再接入 OpenFairyGUI 自动发布、持久 ScreenshotRef、`run_ui_scenario` 和 `fairygui-publish-preview` Skill。
+- 已通过 `run_ui_scenario` 提供有界的连续 UI 验收；场景回执与当前 render session 同生命周期，不编辑或保存工程。
+- 后续再接入 OpenFairyGUI 自动发布、持久 ScreenshotRef 和 `fairygui-publish-preview` Skill。
 
 ### 阶段 4：远程或云端
 

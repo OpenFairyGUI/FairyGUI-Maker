@@ -224,8 +224,9 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 - Viewer 和 Player 都只接受白名单语义操作，不执行任意 JavaScript、表达式或业务 JSON。
 - Workbench 与 Agent 共用 Broker；语义状态和 zoom/background/viewport 分别计版本，截图记录实际捕获的双版本。`stateVersion` 保留为语义版本别名，详见[统一 Broker 状态](./docs/workbench.md#28-统一-broker-状态批次-13)。
 - 每个 render session 最多保留最近 256 个 request ID 用于安全重试；更早的已完成请求可能被淘汰。
+- `run_ui_scenario` 已支持连续语义操作、状态/Controller/交互断言、条件等待和一次 PNG 截图；绑定现有 renderer 与 source revision，失败即停止且不回滚。每个 renderer 保留最近 8 次场景回执。输入、限制与恢复见[连续 UI 场景验收](./.agents/skills/use-fairygui-maker/references/ui-scenarios.md)。
 - 普通 Viewer/Player 截图直接作为 MCP `image/png` 返回，不持久化 ScreenshotRef；Import Draft 的 Visual Evidence 是独立、带 revision 的审查记录。
-- 当前不包含远程部署、守护进程、WebSocket、自动 `publishBrowser` 或 `run_ui_scenario`。
+- 当前不包含远程部署、守护进程、WebSocket 或自动 `publishBrowser`。
 - Player 验证发布包内的原生 FairyGUI 行为，不加载游戏项目的业务脚本、网络层或宿主逻辑。
 
 ## 兼容范围

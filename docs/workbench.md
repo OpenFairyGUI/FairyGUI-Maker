@@ -482,7 +482,7 @@ type UpdateRenderSessionInput = {
 }
 ```
 
-当前 v7 不暴露 `settle`；命令结果只确认对应 runtime 已执行本次操作。`idle`、条件等待与事件断言留给后续 `run_ui_scenario`，不提前塞入单次更新接口。
+当前 v7 不暴露 `settle`；命令结果只确认对应 runtime 已执行本次操作。条件等待与交互记录断言由 `run_ui_scenario` 编排现有 observe/update/capture 命令；不声称 `idle` 或任意动画已经完成。
 
 约束：
 
@@ -512,7 +512,7 @@ type UpdateRenderSessionInput = {
 
 - 创建或切换组件。
 - 设置 Controller page。
-- 播放 Transition；停止和条件等待属于后续会话编排能力。
+- 播放 Transition；`run_ui_scenario` 可等待可观察属性达到期望值，尚不提供通用停止或动画完成信号。
 - 按对象 ID click、输入或滚动。
 - 读取当前对象树、控件状态、Controller page 和最近运行时交互事件。
 - 获取截图和结构化对象树。
@@ -584,7 +584,7 @@ type CaptureRenderScreenshotInput = {
 
 页面把 PNG 转为 `screenshotBase64` 随命令 ACK 返回 Host；Host 不把这段 Base64 放进文本结果，而是立即返回 MCP `image/png` content，并在文本中标记 `screenshot: { attached: true, mimeType: "image/png" }`。组件证据应使用该 Canvas 截图；浏览器整页截图只用于审查 Workbench 自身界面。普通 MCP 截图当前不创建持久 `ScreenshotRef` 或 resource URI；Import Draft 已可保存 Reference/Capture/Diff 与报告，Playwright 无人值守证据及失败页面截图已由批次 19 落地。这些文件不代表 render session 跨重启持久化。
 
-后续连续性 UI 测试会复用该通道编排 update、wait、interaction 和 capture；当前尚未实现 `run_ui_scenario`。
+`run_ui_scenario` 已复用该通道串联 update、assert、wait-for 和 capture，无需升级 runtime 协议或上游 Backend。输入绑定 renderSessionId、sourceRevision 和起始双版本，最多 20 步、100 个操作、一次 PNG，输入不超过 256 KiB，总期限不超过 30 秒。属性、对象存在性和 Controller 断言读取真实 observation；交互条件只接受场景开始后的已确认事件。命中失败即停止，保留已执行步骤与零起始 failedStep，不回滚操作前缀。源码变化或 renderer 关闭会终止场景；命令在途超时则关闭旧会话，避免不确定执行与后续任务交错。每个 renderer 保留最近八份幂等场景回执，同一 requestId 不接受不同输入。完整[输入、示例、结果和恢复规则](../.agents/skills/use-fairygui-maker/references/ui-scenarios.md)随 Skill 一起分发。
 
 ## 5. 对外接口
 
@@ -647,8 +647,9 @@ REST handler 与 MCP tools 调用同一组应用函数，不分别实现发布�
 | `set_render_view` | 按 expectedViewStateVersion 修改 zoom/background/width/height，返回双版本 |
 | `get_render_observation` | 返回当前对象树、控件状态和 Controller page |
 | `capture_render_screenshot` | 返回实际捕获时双版本、组件/视图元数据与 MCP `image/png` content |
+| `run_ui_scenario` | 在已渲染的 Viewer/Player 中串联白名单操作、断言、条件等待和一次 PNG；返回逐步结果与失败定位 |
 
-`publish_artifact` 和 `run_ui_scenario` 尚未实现，保留在后续阶段。
+`publish_artifact` 尚未实现，保留在后续阶段。`run_ui_scenario` 只编排临时运行态，不提供 Backend 会话未保存预览或工程写入能力。
 
 ### 5.3 MCP resources
 

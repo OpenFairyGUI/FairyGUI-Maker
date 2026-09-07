@@ -96,6 +96,12 @@ Use `{projectId, packageId, resourceId, direction: "both", limit: 100}` for one 
 
 Player operations change only render-session memory. Never treat them as Artifact mutation.
 
+## Run a continuous UI scenario
+
+After rendering a Viewer or Player component, use `run_ui_scenario` to sequence temporary operations, assertions, condition waits and one optional Canvas capture. Start from fresh observation IDs, `sourceRevision`, semantic/view versions and a new UUID requestId. Follow the portable [scenario input, example and recovery reference](references/ui-scenarios.md).
+
+Inspect `value.passed`, zero-based step results and `failedStep`; later steps stop after a failure and prior operations are not rolled back. A capture has its own versions in `value.capture`. Replay identical input/requestId only while its receipt remains among the renderer's last eight runs. If execution is uncertain or the session closed, reopen and inspect rather than replaying mutations under a new ID. Scenarios cannot edit/save project files, publish Artifacts or preview unsaved Backend changes.
+
 ## Recover from expected failures
 
 | Failure | Response |

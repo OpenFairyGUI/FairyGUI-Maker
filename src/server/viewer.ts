@@ -15,6 +15,7 @@ import {
 } from "../viewer-protocol"
 import type { ArtifactManifest } from "../artifact-protocol"
 import { ASSET_RESOURCE_ID_PATTERN, assetResourceKey, summarizeAssetAnalysis, type ProjectAssetAnalysis } from "../asset-analysis"
+import { executeUiScenario } from "./ui-scenario"
 
 const MAX_RENDER_REQUESTS_PER_SESSION = 256
 const RENDER_SESSION_TTL_MS = 5 * 60_000
@@ -64,6 +65,32 @@ export const renderViewSchema = z.object({
 }).strict().refine((view) => Object.keys(view).length > 0, "View patch must not be empty")
 
 const versionSchema = z.number().int().nonnegative()
+const scenarioTarget = z.string().min(1).max(128)
+export const uiScenarioConditionSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("exists"), targetId: scenarioTarget, exists: z.boolean() }).strict(),
+  z.object({ kind: z.literal("property"), targetId: scenarioTarget,
+    property: z.enum(["text", "visible", "enabled", "selected", "value", "selectedIndex", "x", "y", "width", "height"]),
+    equals: z.union([z.string().max(16_384), z.number().finite(), z.boolean()]) }).strict(),
+  z.object({ kind: z.literal("controller"), targetId: scenarioTarget, controllerName: scenarioTarget, pageId: scenarioTarget }).strict(),
+  z.object({ kind: z.literal("interaction"), targetId: scenarioTarget, event: z.enum(["click", "input", "change", "scroll"]) }).strict(),
+])
+export const uiScenarioInputSchema = z.object({
+  renderSessionId: scenarioTarget,
+  requestId: z.string().uuid(),
+  sourceRevision: scenarioTarget,
+  expectedStateVersion: versionSchema,
+  expectedViewStateVersion: versionSchema,
+  timeoutMs: z.number().int().min(100).max(30_000).default(10_000),
+  steps: z.array(z.discriminatedUnion("action", [
+    z.object({ action: z.literal("update"), operations: z.array(viewerOperationSchema).min(1).max(100) }).strict(),
+    z.object({ action: z.literal("assert"), condition: uiScenarioConditionSchema }).strict(),
+    z.object({ action: z.literal("wait-for"), condition: uiScenarioConditionSchema, timeoutMs: z.number().int().min(1).max(30_000) }).strict(),
+    z.object({ action: z.literal("capture") }).strict(),
+  ])).min(1).max(20),
+}).strict().refine((input) => input.steps.filter((step) => step.action === "capture").length <= 1, "A scenario can capture at most one PNG")
+  .refine((input) => input.steps.reduce((total, step) => total + (step.action === "update" ? step.operations.length : 0), 0) <= 100, "A scenario can apply at most 100 operations")
+  .refine((input) => Buffer.byteLength(JSON.stringify(input)) <= 256 * 1024, "A scenario must fit within 256 KiB")
+
 const commandIdentity = { requestId: z.string().uuid() }
 export const renderSessionCommandSchema = z.discriminatedUnion("kind", [
   z.object({ ...commandIdentity, kind: z.literal("render"), expectedStateVersion: versionSchema,
@@ -155,6 +182,8 @@ type RenderSession = {
   commands: ViewerBrokerCommand[]
   pending: Map<string, PendingCommand>
   requests: Map<string, { fingerprint: string; promise: Promise<CommandResult> }>
+  scenarios: Map<string, { fingerprint: string; promise: Promise<CommandResult> }>
+  activeScenario: string | null
   resultReceipts: Map<number, { requestId: string; digest: string }>
   interactionReceipts: Map<number, string>
   waiters: Set<() => void>
@@ -205,6 +234,8 @@ export class ViewerRenderBroker {
       commands: [],
       pending: new Map(),
       requests: new Map(),
+      scenarios: new Map(),
+      activeScenario: null,
       resultReceipts: new Map(),
       interactionReceipts: new Map(),
       waiters: new Set(),
@@ -383,6 +414,39 @@ export class ViewerRenderBroker {
   getSession(renderSessionId: string) {
     const session = this.currentSession(renderSessionId)
     return session ? this.publicSession(session) : null
+  }
+
+  runScenario(raw: z.input<typeof uiScenarioInputSchema>) {
+    const input = uiScenarioInputSchema.parse(raw)
+    const session = this.currentSession(input.renderSessionId)
+    if (!session) return null
+    const fingerprint = wireFingerprint(input)
+    const existing = session.scenarios.get(input.requestId)
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) throw new Error("request_id_conflict: scenario requestId was already used for different input")
+      return existing.promise
+    }
+    if (Date.now() - session.rendererLastSeen > 45_000) return null
+    if (session.activeScenario) throw new Error("scenario_busy: this render session already has a running scenario")
+    if (input.sourceRevision !== session.sourceRevision) throw new Error("source_revision_conflict: scenario source does not match the renderer")
+    if (input.expectedStateVersion !== session.stateVersion) throw new Error(`state_version_conflict: expected ${input.expectedStateVersion}, current ${session.stateVersion}`)
+    if (input.expectedViewStateVersion !== session.viewStateVersion) throw new Error(`view_state_version_conflict: expected ${input.expectedViewStateVersion}, current ${session.viewStateVersion}`)
+    if (!session.rendered) throw new Error("component_required: render a component before running a scenario")
+    // ponytail: retain eight run receipts per renderer; use a durable evidence store if cross-session replay becomes necessary.
+    while (session.scenarios.size >= 8) session.scenarios.delete(session.scenarios.keys().next().value!)
+    session.activeScenario = input.requestId
+    const promise = executeUiScenario(this, input).finally(() => { session.activeScenario = null })
+    session.scenarios.set(input.requestId, { fingerprint, promise })
+    return promise
+  }
+
+  getInteractionsSince(renderSessionId: string, after: number) {
+    const session = this.currentSession(renderSessionId)
+    if (!session) throw new Error(this.getSessionError(renderSessionId))
+    if (session.interactions[0] && after < session.interactions[0].interactionSeq - 1) {
+      throw new Error("interaction_history_lost: the scenario exceeded the retained interaction window")
+    }
+    return structuredClone(session.interactions.filter((event) => event.interactionSeq > after))
   }
 
   getSessionError(renderSessionId: string) {
@@ -568,6 +632,8 @@ export class ViewerRenderBroker {
     }
     session.pending.clear()
     session.requests.clear()
+    session.scenarios.clear()
+    session.activeScenario = null
     session.resultReceipts.clear()
     session.interactionReceipts.clear()
     session.commands = []
@@ -880,6 +946,21 @@ export function registerViewerMcpTools(
       return toolResult({ ok: false, code: "render_session_error", message: formatError(error) }, true)
     }
   })
+
+  server.registerTool("run_ui_scenario", {
+    title: "Run FairyGUI UI scenario",
+    description: "Run up to 20 steps / 100 temporary operations, assertions, condition waits and one optional PNG in a rendered Viewer or Player session (256 KiB input; 30 seconds maximum). Stops at the first failure without rollback. The renderer retains its last eight run receipts: repeat identical input/requestId to retrieve one. Never retry failed actions under a new ID without inspecting state. Does not edit or save a project or Artifact.",
+    inputSchema: uiScenarioInputSchema,
+  }, async (input) => {
+    try {
+      const result = broker.runScenario(input)
+      if (!result) return sessionBrowserRequired(input.renderSessionId)
+      const completed = await result
+      return commandToolResult(completed, completed.value.passed === false)
+    } catch (error) {
+      return toolResult({ ok: false, code: "scenario_rejected", message: formatError(error) }, true)
+    }
+  })
 }
 
 function compactAssetIssue(issue: ProjectAssetAnalysis["issues"][number], issueId: string) {
@@ -895,11 +976,11 @@ function compactAssetIssue(issue: ProjectAssetAnalysis["issues"][number], issueI
   }
 }
 
-function commandToolResult(result: CommandResult) {
+function commandToolResult(result: CommandResult, isError = false) {
   const screenshotBase64 = typeof result.value.screenshotBase64 === "string" ? result.value.screenshotBase64 : null
   const { screenshotBase64: _screenshotBase64, ...commandValue } = result.value
   const value = {
-    ok: true,
+    ok: !isError,
     ...result,
     value: commandValue,
     screenshot: screenshotBase64
@@ -911,6 +992,7 @@ function commandToolResult(result: CommandResult) {
       { type: "text" as const, text: JSON.stringify(value) },
       ...(screenshotBase64 ? [{ type: "image" as const, data: screenshotBase64, mimeType: "image/png" }] : []),
     ],
+    ...(isError ? { isError: true } : {}),
   }
 }
 

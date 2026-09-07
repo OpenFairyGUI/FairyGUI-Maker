@@ -23,6 +23,7 @@ import { semanticFidelitySmoke } from "./semantic-fidelity-smoke"
 import { workbenchRoutesSmoke } from "./workbench-routes-smoke"
 import { importRecoverySmoke } from "./import-recovery-smoke"
 import { importIterationSmoke } from "./import-iteration-smoke"
+import { uiScenarioSmoke } from "./ui-scenario-smoke"
 
 const token = "browser-smoke-token-with-24-chars"
 const browserChannel = process.env.FAIRYGUI_MAKER_BROWSER_CHANNEL ?? "chromium"
@@ -223,6 +224,8 @@ try {
   await page.getByAltText("Pixel Diff").waitFor()
   const viewerState = await evidence.step("broker-state-viewer", () => brokerStateSmoke(page, "viewer", viewerRender.value.renderSessionId,
     (name, args) => callTool(host!.origin, sessionId, 80, name, args)))
+  await evidence.step("ui-scenario-viewer", () => uiScenarioSmoke(page, "viewer", viewerRender.value.renderSessionId, evidence.directory,
+    (name, args) => callTool(host!.origin, sessionId, 81, name, args)))
   const viewerDelivery = await evidence.step("delivery-viewer", () => rendererDeliverySmoke(page, "viewer", viewerRender.value.renderSessionId, viewerRender.value.value.observation.objectTree.id,
     (name, args) => callTool(host!.origin, sessionId, 60, name, args)))
   const viewerLifecycle = await evidence.step("lifecycle-viewer", () => rendererLifecycleSmoke(page, viewerDelivery.reconnectedSessionId,
@@ -327,6 +330,8 @@ try {
   if (!JSON.stringify(playerRender.value).includes("TITLE001")) throw new Error("Player observation did not include the rendered title")
   const playerState = await evidence.step("broker-state-player", () => brokerStateSmoke(page, "player", playerRender.value.renderSessionId,
     (name, args) => callTool(host!.origin, sessionId, 90, name, args)))
+  await evidence.step("ui-scenario-player", () => uiScenarioSmoke(page, "player", playerRender.value.renderSessionId, evidence.directory,
+    (name, args) => callTool(host!.origin, sessionId, 93, name, args)))
   evidence.phase("artifact-persistence")
   const stablePlayer = (await callTool(host.origin, sessionId, 91, "open_artifact_player", { artifactId: artifact.artifactId })).value.renderSession
   const relabel = await context.request.post(`${host.origin}/api/artifact-imports`, { data: { name: "Relabeled Smoke", files: [{ path: "Smoke.fui", size: binary.length, sha256: createHash("sha256").update(binary).digest("hex") }] } })
