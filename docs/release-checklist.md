@@ -30,9 +30,9 @@ CI 单元测试 job 限时 20 分钟，完整发布门禁限时 30 分钟；时�
 
 ## npm 首发与后续发布
 
-2026-09-04 只读核查：npm registry 的 `fairygui-maker` 返回 404，GitHub Release 列表为空，repository secrets 列表为空。404 不代表包名已预留或当前账号有权发布；repository secrets 列表也不能证明没有组织级凭据。
+2026-09-08 只读核查：npm registry 的 `fairygui-maker` 返回 404，repository secrets 列表为空。已有 `v0.1.0` 标签与同名 Release 草稿指向旧提交 `48435c4573ed4d47e061a2cb41362118e8c0d37e`，不要发布旧草稿或覆盖该标签；本次候选版本为 `0.1.1`。404 不代表包名已预留或当前账号有权发布；repository secrets 列表也不能证明没有组织级凭据。
 
-首次发布尚未执行，Trusted Publisher 的真实认证链尚未验收。步骤为：
+首次发布尚未成功，Trusted Publisher 的真实认证链尚未验收。步骤为：
 
 1. 发布者确认包名可用、账号有发布权，并明确批准首发。
 2. 临时配置仅用于首发的 granular `NPM_TOKEN` repository secret；从已验收提交创建版本 tag/GitHub Release，由 `release.yml` 执行门禁和带 provenance 的发布。

@@ -40,7 +40,8 @@ const component = (project: UamProject) => {
 };
 
 async function setup(t: TestContext, children = [text('keep'), text('change'), text('remove')]) {
-  const parent = await mkdtemp(join(tmpdir(), 'maker-reimport-'));
+  // Windows TEMP can use an 8.3 alias; match Backend's canonical directory-swap paths.
+  const parent = await fs.realpath(await mkdtemp(join(tmpdir(), 'maker-reimport-')));
   t.after(() => rm(parent, { recursive: true, force: true }));
   const source = join(parent, 'bundle'), output = join(parent, 'project');
   const writeSource = async (nodes: ImportNode[], bindings = {}) => {

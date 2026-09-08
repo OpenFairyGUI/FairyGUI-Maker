@@ -1,6 +1,6 @@
 {
 	"name": "fairygui-maker",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "AI agent toolkit and preview workspace for FairyGUI projects and published artifacts.",
 	"license": "MIT",
 	"repository": {

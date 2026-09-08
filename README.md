@@ -42,13 +42,13 @@ Viewer 不能作为发布结果的证明；最终 `.fui` 行为应在 Player 中
 
 ## 快速开始
 
-截至 2026-09-04，`0.1.0` 仍是未发布候选版本，npm registry 查询 `fairygui-maker` 返回 404。首次发布前请按[本地开发](#本地开发)从源码启动；以下 npm 命令供发布后使用。发布状态与验收要求见[发布检查清单](./docs/release-checklist.md)。
+当前发布候选版本为 `0.1.1`。截至 2026-09-08，npm registry 尚未找到 `fairygui-maker`；首次发布前请按[本地开发](#本地开发)从源码启动，以下 npm 命令供发布后使用。发布状态与验收要求见[发布检查清单](./docs/release-checklist.md)。
 
 使用 npm 包只需要 Node.js `>=22.18`：
 
 ```powershell
 $env:FAIRYGUI_MAKER_TOKEN = "replace-with-at-least-24-characters"
-npx fairygui-maker@0.1.0
+npx fairygui-maker@0.1.1
 ```
 
 服务默认监听 `127.0.0.1:3847`。终端会输出：
@@ -61,13 +61,13 @@ npx fairygui-maker@0.1.0
 修改端口：
 
 ```powershell
-npx fairygui-maker@0.1.0 --port 3900
+npx fairygui-maker@0.1.1 --port 3900
 ```
 
 把 Artifact 与运行状态放到明确的私有目录：
 
 ```powershell
-npx fairygui-maker@0.1.0 --data-dir E:\FairyGUI\maker-data
+npx fairygui-maker@0.1.1 --data-dir E:\FairyGUI\maker-data
 ```
 
 相对 `--data-dir` 以启动命令的当前目录为基准；未传入时默认使用当前目录下的 `.fairygui-maker`。环境变量 `FAIRYGUI_MAKER_DATA_DIR` 提供相同能力，CLI 参数优先。
@@ -142,7 +142,7 @@ Claude 文件只负责转到同一份通用 Skill，避免两套指南漂移。
 
 ### 在其他工程中安装 Skill
 
-先在目标工程安装已验证的 tarball（例如 `npm install --no-save E:\Artifacts\fairygui-maker-0.1.0.tgz`；正式发布后可改用确切 npm 版本）。然后复制包内的完整通用 Skill：
+先在目标工程安装已验证的 tarball（例如 `npm install --no-save E:\Artifacts\fairygui-maker-0.1.1.tgz`；正式发布后可改用确切 npm 版本）。然后复制包内的完整通用 Skill：
 
 ```powershell
 $skillSource = Join-Path (npm root) "fairygui-maker/.agents/skills/use-fairygui-maker"
@@ -189,7 +189,7 @@ Artifact 同内容只存一份字节，每次导入独立保留名称、来源�
 Agent、批处理和视觉回归可以显式授权一个工程根目录：
 
 ```powershell
-npx fairygui-maker@0.1.0 view E:\Projects\MyFairyGUIProject
+npx fairygui-maker@0.1.1 view E:\Projects\MyFairyGUIProject
 
 # 全局安装后也可以使用：
 fairygui-maker view E:\Projects\MyFairyGUIProject
@@ -293,8 +293,8 @@ Artifact Store 启动时会重新校验 manifest、文件大小、SHA-256、整�
 建议 Agent 和 CI 固定精确版本，并在验证后显式升级：
 
 ```powershell
-npx -y fairygui-maker@0.1.0 --version
-npm install --global fairygui-maker@0.1.0
+npx -y fairygui-maker@0.1.1 --version
+npm install --global fairygui-maker@0.1.1
 npm uninstall --global fairygui-maker
 ```
 
