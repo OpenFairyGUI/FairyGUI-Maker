@@ -83,7 +83,7 @@ export async function semanticFidelitySmoke(context: BrowserContext, origin: str
         try {
           goldens.push(await saveVisualGolden(page, evidence.directory, name, png, captured.value,
             { mode, sourceId, sourceRevision: captured.value.sourceRevision, packageId, componentId },
-            path.join(process.cwd(), `test/fixtures/design-import/${name}.png`),
+            path.join(process.cwd(), `test/fixtures/design-import/${name}${process.platform === 'linux' ? '.linux' : ''}.png`),
             path.join(process.cwd(), 'test/fixtures/design-import/semantic-fidelity-baseline.json')));
         } catch (error) {
           // Retain all eight diffs for review; a pixel mismatch still fails the entire gate.

@@ -275,7 +275,7 @@ pnpm verify:release
 
 每次浏览器测试在 `test-results/browser/run-*/` 留存 reference/actual/diff、阈值、来源/组件/Broker 版本和诊断报告；CI 成败均上传并保留 14 天。未预期 Console/CSP/网络错误阻断测试。Viewer 的真实 FIG、Player 原生图形与 T5 新增的固定字体文字/按钮四态/List 使用独立零差异 Golden，不覆盖任意系统字体保真。详见[证据闭环](./docs/workbench.md#214-视觉与故障证据闭环批次-19)与[T5 字体、布局、组件库和栅格策略](./docs/import-fidelity.md)。
 
-测试固定使用 ANGLE/SwiftShader，以统一 Windows/Linux 的图形栅格化；不改变正常 Workbench 浏览器的 GPU 配置，也不放宽像素阈值。发布验收必须记录同一个提交的本地结果和完整 CI 矩阵，不能用不同提交的绿灯拼接通过。
+测试固定使用 ANGLE/SwiftShader；含文字的语义截图使用 Windows/Linux 独立基线，以容纳系统字体栅格化差异。测试不改变正常 Workbench 浏览器的 GPU 配置，也不放宽零像素差异阈值。发布验收必须记录同一个提交的本地结果和完整 CI 矩阵，不能用不同提交的绿灯拼接通过。
 
 仅当渲染变化符合预期时显式生成新基线；CI 禁止该开关，功能或诊断检查失败不会写回 Golden。更新后审查图片并关闭开关重跑：
 

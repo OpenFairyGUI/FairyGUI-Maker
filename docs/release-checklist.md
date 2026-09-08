@@ -23,7 +23,7 @@ pnpm verify:release
 1. 干净 checkout 的完整 SHA 已记录；依赖采用 frozen lockfile。
 2. 本地 `pnpm verify:release` 全程退出 0，包括生产依赖审计和全新 tarball 消费测试。
 3. 同一 SHA 的 CI 四个单元测试组合（Windows/Linux × Node 22.18/24）与 Linux `release-smoke` 全部通过。超时、进行中、旧 SHA 和部分绿灯均不能算通过。
-4. 浏览器证据保留 reference/actual/diff、运行环境与诊断报告。合成图形使用固定 SwiftShader，Viewer/Player 的像素阈值仍为 0；更新 Golden 必须人工检查图片，并在关闭更新开关后重跑完整门禁。
+4. 浏览器证据保留 reference/actual/diff、运行环境与诊断报告。合成图形使用固定 SwiftShader；含文字的语义截图分别使用 Windows/Linux 基线，Viewer/Player 的像素阈值仍为 0。更新 Golden 必须人工检查图片，并在关闭更新开关后重跑完整门禁。
 5. 所有变更审查完成；实际发布前再核对 npm 包状态与发布权限。任意文件改变都需要以新 SHA 重新验收。
 
 CI 单元测试 job 限时 20 分钟，完整发布门禁限时 30 分钟；时间限制只用于暴露挂起，不代表挂起原因已经解决。GitHub 浏览器证据默认保留 14 天，需要长期归档时由发布者另行保留。

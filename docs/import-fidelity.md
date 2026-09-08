@@ -90,11 +90,13 @@ FIG Prototype Interaction Intent 保留有界的 trigger/action/原始 JSON 到 
 `scripts/semantic-fidelity-smoke.ts` 纳入 `pnpm test:browser`：同一导入计划生成可编辑工程供 Viewer 使用，再经 Core 发布真实 `.fui` 与 PNG atlas，由独立原生 Player 加载。
 工程背景使用原生 Graph（Core 的 component bgColor 是编辑器属性，发布 FUI 不渲染）；Viewer 保留按钮源标题、使用正确的文字垂直对齐属性，并且只有声明描边颜色时才启用文字描边。
 
-新增 8 张 460×350 独立 Golden：两种 Runtime × 四种按钮状态，包含真实订单标题、金额、按钮文字和双行 List。
+每个平台各有 8 张 460×350 独立 Golden：两种 Runtime × 四种按钮状态，包含真实订单标题、金额、按钮文字和双行 List。Windows 沿用 `semantic-<runtime>-<state>.png`，Linux 使用同名 `.linux.png`；固定 SwiftShader 与字体文件仍不能消除系统字体栅格化差异。
 通过既有 Broker 切页并检查仅当前背景可见、文字存在、单行未溢出、List 两项，以及四页图片不同。
 测试预载已安装 `@fontsource-variable/geist@5.3.0` 的 Latin variable WOFF2（SHA-256 `19f9c92546aa300c312235e3125af1b81394d8db9a4bc4a425cd5b641d2d54e1`），无远程字体请求。
 每种 Runtime 各自零像素差异/零 MAE，保存 reference/actual/diff 与版本证据；并不要求两个 Runtime 相互像素一致。
 固定字体只覆盖此 Latin fixture，不覆盖任意系统字体、中文、复杂脚本或 Photoshop 合成保真。
 Windows/Linux 的字体栅格化仍需同提交 CI 证据；本地通过不能代替完整 CI 矩阵。
+
+首批 Linux 基线原样取自 [CI 34192023956](https://github.com/OpenFairyGUI/FairyGUI-Maker/actions/runs/34192023956) 的 8 张 actual PNG（提交 `81b052c4af92ba364a1fea9f26281da0788f7c3d`，Ubuntu 24.04、Playwright 1.62.1、Chromium 151.0.7922.34）。人工检查文字、按钮四态和 List 后加入；Windows 基线保持原样，两个平台都要求零像素差异。
 
 基线更新沿用显式 `UPDATE_VISUAL_GOLDENS=1`、CI 禁止更新、所有功能/诊断通过后才写回的机制；更新后审查图片，并关闭更新重跑。
