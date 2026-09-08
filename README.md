@@ -42,13 +42,13 @@ Viewer 不能作为发布结果的证明；最终 `.fui` 行为应在 Player 中
 
 ## 快速开始
 
-当前发布候选版本为 `0.1.1`。截至 2026-09-08，npm registry 尚未找到 `fairygui-maker`；首次发布前请按[本地开发](#本地开发)从源码启动，以下 npm 命令供发布后使用。发布状态与验收要求见[发布检查清单](./docs/release-checklist.md)。
+npm 包名为 `@openfairygui/fairygui-maker`，CLI 命令仍为 `fairygui-maker`。以下命令使用 `0.1.1`；如果 npm registry 尚未提供该版本，请按[本地开发](#本地开发)从源码启动。发布状态以 registry 为准，验收要求见[发布检查清单](./docs/release-checklist.md)。
 
 使用 npm 包只需要 Node.js `>=22.18`：
 
 ```powershell
 $env:FAIRYGUI_MAKER_TOKEN = "replace-with-at-least-24-characters"
-npx fairygui-maker@0.1.1
+npx @openfairygui/fairygui-maker@0.1.1
 ```
 
 服务默认监听 `127.0.0.1:3847`。终端会输出：
@@ -61,13 +61,13 @@ npx fairygui-maker@0.1.1
 修改端口：
 
 ```powershell
-npx fairygui-maker@0.1.1 --port 3900
+npx @openfairygui/fairygui-maker@0.1.1 --port 3900
 ```
 
 把 Artifact 与运行状态放到明确的私有目录：
 
 ```powershell
-npx fairygui-maker@0.1.1 --data-dir E:\FairyGUI\maker-data
+npx @openfairygui/fairygui-maker@0.1.1 --data-dir E:\FairyGUI\maker-data
 ```
 
 相对 `--data-dir` 以启动命令的当前目录为基准；未传入时默认使用当前目录下的 `.fairygui-maker`。环境变量 `FAIRYGUI_MAKER_DATA_DIR` 提供相同能力，CLI 参数优先。
@@ -142,17 +142,17 @@ Claude 文件只负责转到同一份通用 Skill，避免两套指南漂移。
 
 ### 在其他工程中安装 Skill
 
-先在目标工程安装已验证的 tarball（例如 `npm install --no-save E:\Artifacts\fairygui-maker-0.1.1.tgz`；正式发布后可改用确切 npm 版本）。然后复制包内的完整通用 Skill：
+先在目标工程安装已验证的 tarball（例如 `npm install --no-save E:\Artifacts\openfairygui-fairygui-maker-0.1.1.tgz`；正式发布后可改用确切 npm 版本）。然后复制包内的完整通用 Skill：
 
 ```powershell
-$skillSource = Join-Path (npm root) "fairygui-maker/.agents/skills/use-fairygui-maker"
+$skillSource = Join-Path (npm root) "@openfairygui/fairygui-maker/.agents/skills/use-fairygui-maker"
 $skillTarget = Join-Path (Get-Location) ".agents/skills/use-fairygui-maker"
 if (Test-Path -LiteralPath $skillTarget) { throw "Skill already exists; review it before replacing" }
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $skillTarget) | Out-Null
 Copy-Item -LiteralPath $skillSource -Destination $skillTarget -Recurse
 ```
 
-Claude 工程使用 `.claude/skills/use-fairygui-maker` 作为目标目录，仍复制上面同一份通用 Skill；不要单独复制仓库内依赖相对转发路径的 Claude wrapper。源码用户也可将 `$skillSource` 改为 Maker checkout 中 `.agents/skills/use-fairygui-maker` 的绝对路径。保留 `references/` 和 `agents/`；本地工作流引用均位于 Skill 自身目录内，完整产品文档同时随包放在 `node_modules/fairygui-maker/docs/`。
+Claude 工程使用 `.claude/skills/use-fairygui-maker` 作为目标目录，仍复制上面同一份通用 Skill；不要单独复制仓库内依赖相对转发路径的 Claude wrapper。源码用户也可将 `$skillSource` 改为 Maker checkout 中 `.agents/skills/use-fairygui-maker` 的绝对路径。保留 `references/` 和 `agents/`；本地工作流引用均位于 Skill 自身目录内，完整产品文档同时随包放在 `node_modules/@openfairygui/fairygui-maker/docs/`。
 
 在目标工程重新开启 Agent 任务，显式调用 `$use-fairygui-maker`，例如“检查 `E:\Design\hud.fig` 的转换诊断，暂不物化工程”。先检查 Agent 是否发现 Skill，再分别检查所需 CLI 或 MCP：安装 Skill 本身不会启动 Host，也不会建立 MCP 连接；本地 import/reimport 不以 MCP 在线为前提。
 
@@ -189,7 +189,7 @@ Artifact 同内容只存一份字节，每次导入独立保留名称、来源�
 Agent、批处理和视觉回归可以显式授权一个工程根目录：
 
 ```powershell
-npx fairygui-maker@0.1.1 view E:\Projects\MyFairyGUIProject
+npx @openfairygui/fairygui-maker@0.1.1 view E:\Projects\MyFairyGUIProject
 
 # 全局安装后也可以使用：
 fairygui-maker view E:\Projects\MyFairyGUIProject
@@ -293,16 +293,16 @@ Artifact Store 启动时会重新校验 manifest、文件大小、SHA-256、整�
 建议 Agent 和 CI 固定精确版本，并在验证后显式升级：
 
 ```powershell
-npx -y fairygui-maker@0.1.1 --version
-npm install --global fairygui-maker@0.1.1
-npm uninstall --global fairygui-maker
+npx -y @openfairygui/fairygui-maker@0.1.1 --version
+npm install --global @openfairygui/fairygui-maker@0.1.1
+npm uninstall --global @openfairygui/fairygui-maker
 ```
 
 `npx` 使用者没有全局包需要卸载。卸载不会删除 `--data-dir` 或 `.fairygui-maker`；确认不再需要其中的 Artifact 后再由用户手动删除该目录。
 
 ## 发布 npm 包
 
-FairyGUI Maker 自身采用 [MIT License](./LICENSE)，公开仓库为 [OpenFairyGUI/FairyGUI-Maker](https://github.com/OpenFairyGUI/FairyGUI-Maker)。npm 包名为无 scope 的 `fairygui-maker`，发布者登录有权发布该包的 npm 账号后执行：
+FairyGUI Maker 自身采用 [MIT License](./LICENSE)，公开仓库为 [OpenFairyGUI/FairyGUI-Maker](https://github.com/OpenFairyGUI/FairyGUI-Maker)。npm 包名为 `@openfairygui/fairygui-maker`，发布者登录在 npm `openfairygui` 组织中有发布权限的账号后执行：
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -312,7 +312,7 @@ npm publish --access public
 
 GitHub CI 会在 Windows/Linux 与 Node.js 22/24 上执行 runtime 校验、构建和单元测试，并在 Linux Chromium 中运行同一套发布门禁。发布工作流只响应人工发布的 `v<package-version>` GitHub Release；首发采用临时 token，完成配置后采用 npm Trusted Publishing，并请求生成 provenance。
 
-首次发布前需确认 `fairygui-maker` 名称仍然可用。首次 GitHub Release 需要发布者临时配置可发布该包的 granular `NPM_TOKEN` repository secret。首次发布成功后，在 npm package settings 中把 `OpenFairyGUI/FairyGUI-Maker` 和 `release.yml` 配置为允许 `npm publish` 的 trusted publisher，并删除该 secret；后续发布由 OIDC 认证，不再保存长期 npm token。
+首次发布前需确认 `@openfairygui/fairygui-maker` 名称仍然可用，并核对 npm 组织发布权限。首次 GitHub Release 需要发布者临时配置可发布该 scope、启用 Bypass 2FA 的 granular `NPM_TOKEN` repository secret。首次发布成功后，在 npm package settings 中把 `OpenFairyGUI/FairyGUI-Maker` 和 `release.yml` 配置为允许 `npm publish` 的 trusted publisher，并删除该 secret、撤销临时 token；后续发布由 OIDC 认证，不再保存长期 npm token。
 
 ## 文档
 

@@ -4,7 +4,7 @@
 
 ## 固定输入
 
-- `package.json` 中包名为 `fairygui-maker`、许可证为 MIT，repository/homepage/issues 指向 `OpenFairyGUI/FairyGUI-Maker`；发布 tag 必须为 `v<package-version>`。
+- `package.json` 中包名为 `@openfairygui/fairygui-maker`、许可证为 MIT，repository/homepage/issues 指向 `OpenFairyGUI/FairyGUI-Maker`；发布 tag 必须为 `v<package-version>`。CLI 名称仍为 `fairygui-maker`。
 - `vendor-runtime.lock.json` 是三个浏览器 runtime 文件来源、完整 commit、源路径、字节数和 SHA-256 的单一清单。第三方声明与 tarball 内 `dist/web/viewer-runtime/` 必须与它一致。
 - runtime 直接复制自清单指定的 `FairyGUI-Editor-Online` 预编译资产，不做构建或改写。按 `source.repository`、`source.commit` 和每个 `sourcePath` 获取原始文件，保持字节原样；不要用文本写入命令或换行转换重存。`.gitattributes` 禁止这些文件的 Git 文本转换。
 - 该来源链只能复现分发的预编译字节，不证明 LayaAir/FairyGUI 原始源码构建可复现。若以后需要重建引擎，必须另行固定引擎源码 commit、工具链与构建命令，不能从版本标签推断。
@@ -30,14 +30,14 @@ CI 单元测试 job 限时 20 分钟，完整发布门禁限时 30 分钟；时�
 
 ## npm 首发与后续发布
 
-2026-09-08 只读核查：npm registry 的 `fairygui-maker` 返回 404，repository secrets 列表为空。已有 `v0.1.0` 标签与同名 Release 草稿指向旧提交 `48435c4573ed4d47e061a2cb41362118e8c0d37e`，不要发布旧草稿或覆盖该标签；本次候选版本为 `0.1.1`。404 不代表包名已预留或当前账号有权发布；repository secrets 列表也不能证明没有组织级凭据。
+2026-09-08 首发准备快照：候选包为 `@openfairygui/fairygui-maker@0.1.1`，该包的公开 registry 查询返回 404，repository secret `NPM_TOKEN` 已配置（未读取值）。已有 `v0.1.0` 标签与同名 Release 草稿指向旧提交 `48435c4573ed4d47e061a2cb41362118e8c0d37e`，不要发布旧草稿或覆盖该标签。此快照不代表当前 registry 状态；404 不代表包名已预留或账号有权发布，secret 存在也不证明其发布权限有效。
 
-首次发布尚未成功，Trusted Publisher 的真实认证链尚未验收。步骤为：
+首次发布和后续 Trusted Publisher 认证必须分别验收。步骤为：
 
 1. 发布者确认包名可用、账号有发布权，并明确批准首发。
 2. 临时配置仅用于首发的 granular `NPM_TOKEN` repository secret；从已验收提交创建版本 tag/GitHub Release，由 `release.yml` 执行门禁和带 provenance 的发布。
-3. 首发成功后，在 npm package settings 配置 GitHub Trusted Publisher：organization/user 为 `OpenFairyGUI`，repository 为 `FairyGUI-Maker`，workflow filename 为 `release.yml`。当前工作流未配置 GitHub Environment，不应填写不匹配的 environment。
+3. 首发成功后，在 npm package settings 配置 GitHub Trusted Publisher：organization/user 为 `OpenFairyGUI`，repository 为 `FairyGUI-Maker`，workflow filename 为 `release.yml`，允许直接 `npm publish`。当前工作流未配置 GitHub Environment，不应填写不匹配的 environment。
 4. 删除 GitHub 的 bootstrap secret 并撤销 npm token。下一次经授权的版本发布必须在没有该 token 的情况下成功，才能证明 OIDC 路径闭环；仅存在 `id-token: write` 不算验证成功。
-5. 实际发布后，核对 npm 版本、tarball 和 provenance，再更新 README 中的“未发布”状态。
+5. 实际发布后，核对 `npm view @openfairygui/fairygui-maker@0.1.1 version dist.integrity`、registry tarball 和 provenance；包名、版本、tag、Release、CI 和产物必须一致。
 
 现有 `release.yml` 使用 GitHub-hosted Ubuntu、Node 24 和 npm 11.18.0；npm 优先尝试 OIDC，并支持 token fallback。认证与配置要求以 [npm Trusted Publishing 官方文档](https://docs.npmjs.com/trusted-publishers/)为准。不要为验证流程直接发布一个无人批准的版本。

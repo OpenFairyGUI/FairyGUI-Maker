@@ -1,5 +1,5 @@
 {
-	"name": "fairygui-maker",
+	"name": "@openfairygui/fairygui-maker",
 	"version": "0.1.1",
 	"description": "AI agent toolkit and preview workspace for FairyGUI projects and published artifacts.",
 	"license": "MIT",

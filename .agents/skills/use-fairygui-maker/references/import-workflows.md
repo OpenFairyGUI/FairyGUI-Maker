@@ -1,6 +1,6 @@
 # Local CLI and Import Draft workflows
 
-Use an installed `fairygui-maker` binary, or `node <maker-checkout>/scripts/fairygui-maker.mjs` after building the source checkout. Run `--version` and `--help` first. Version 0.1.0 was an unpublished candidate at the September 2026 audit; use a supplied tarball/source checkout until registry availability is confirmed. Do not repeatedly run npx against an unavailable version.
+Use the `fairygui-maker` binary from the `@openfairygui/fairygui-maker` package, or `node <maker-checkout>/scripts/fairygui-maker.mjs` after building the source checkout. Run `--version` and `--help` first. Confirm the requested version is available in the registry; otherwise use a supplied tarball/source checkout. Do not repeatedly run npx against an unavailable version.
 
 ## Commands and writes
 

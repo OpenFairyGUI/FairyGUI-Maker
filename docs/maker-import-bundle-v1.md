@@ -8,7 +8,7 @@ ImportDocument，不定义第二套设计模型，也不包含 Agent 推断的 B
 安装包随附 [minimal-bundle](./examples/minimal-bundle/maker-import.json)：完整的 [fixture.json](./examples/minimal-bundle/fixture.json)、[manifest](./examples/minimal-bundle/maker-import.json) 和 [SVG 资源](./examples/minimal-bundle/assets/000001.svg)，可直接导入，无需源码或测试夹具。
 
 ```powershell
-$bundle = Join-Path (npm root) "fairygui-maker/docs/examples/minimal-bundle"
+$bundle = Join-Path (npm root) "@openfairygui/fairygui-maker/docs/examples/minimal-bundle"
 fairygui-maker import inspect $bundle --data-dir .maker-example-data
 fairygui-maker import plan $bundle --out example-plan.json --data-dir .maker-example-data
 fairygui-maker import $bundle --dry-run --data-dir .maker-example-data

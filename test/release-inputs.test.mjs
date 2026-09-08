@@ -39,6 +39,8 @@ test("release inputs reject runtime, provenance, notice and repository drift", a
     await writeFile(noticePath, notices)
     const metadataPath = path.join(root, "package.json")
     const metadata = JSON.parse(await readFile(metadataPath, "utf8"))
+    await writeFile(metadataPath, JSON.stringify({ ...metadata, name: "fairygui-maker" }))
+    await assert.rejects(verify(), /package name changed/)
     metadata.repository.url = "https://github.com/somebody/another-repository.git"
     await writeFile(metadataPath, JSON.stringify(metadata))
     await assert.rejects(verify(), /repository metadata/)

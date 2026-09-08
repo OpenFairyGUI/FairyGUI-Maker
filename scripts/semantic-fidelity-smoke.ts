@@ -45,6 +45,7 @@ export async function semanticFidelitySmoke(context: BrowserContext, origin: str
     void face.load();
   }, [...font]);
   const captures: Record<string, string> = {};
+  const visualErrors: Error[] = [];
   try {
     await page.goto(`${origin}/imports/${draft.draftId}`);
     await page.getByText('AGENT READY', { exact: true }).waitFor();
@@ -79,10 +80,16 @@ export async function semanticFidelitySmoke(context: BrowserContext, origin: str
         const image = captured.body.result.content.find((item: any) => item.type === 'image');
         const png = Buffer.from(image.data, 'base64');
         const name = `semantic-${mode}-${buttonState}`;
-        goldens.push(await saveVisualGolden(page, evidence.directory, name, png, captured.value,
-          { mode, sourceId, sourceRevision: captured.value.sourceRevision, packageId, componentId },
-          path.join(process.cwd(), `test/fixtures/design-import/${name}.png`),
-          path.join(process.cwd(), 'test/fixtures/design-import/semantic-fidelity-baseline.json')));
+        try {
+          goldens.push(await saveVisualGolden(page, evidence.directory, name, png, captured.value,
+            { mode, sourceId, sourceRevision: captured.value.sourceRevision, packageId, componentId },
+            path.join(process.cwd(), `test/fixtures/design-import/${name}.png`),
+            path.join(process.cwd(), 'test/fixtures/design-import/semantic-fidelity-baseline.json')));
+        } catch (error) {
+          // Retain all eight diffs for review; a pixel mismatch still fails the entire gate.
+          if (!(error instanceof assert.AssertionError) || !error.message.startsWith('Visual baseline changed:')) throw error;
+          visualErrors.push(new Error(`${name}: ${error.message}`));
+        }
         const objectTree = captured.value.value.observation.objectTree;
         const flatten = (node: any): any[] => [node, ...(node.children ?? []).flatMap(flatten)];
         const objects = flatten(objectTree);
@@ -135,6 +142,7 @@ export async function semanticFidelitySmoke(context: BrowserContext, origin: str
     await page.getByText('AGENT READY', { exact: true }).waitFor();
     await installFont('player');
     await captureStates('player', artifact.artifactId, await callTool('render_artifact_component', { artifactId: artifact.artifactId, packageId, componentId, requestId: randomUUID(), capture: false }));
+    if (visualErrors.length) throw new AggregateError(visualErrors, visualErrors.map((error) => error.message).join('\n'));
     return { goldens: 8, buttonStates: 4, editableSourceRoundTrip: true, pinnedFontSha256: sha256(font), captures };
   } finally { await page.close(); }
 }

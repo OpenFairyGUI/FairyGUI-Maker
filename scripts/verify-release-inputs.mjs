@@ -10,7 +10,7 @@ const repository = "OpenFairyGUI/FairyGUI-Maker"
 export async function verifyReleaseInputs(root, { upstream = false, githubRepository = process.env.GITHUB_REPOSITORY } = {}) {
   const metadata = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"))
   const url = `https://github.com/${repository}`
-  assert.equal(metadata.name, "fairygui-maker", "Release package name changed")
+  assert.equal(metadata.name, "@openfairygui/fairygui-maker", "Release package name changed")
   assert.equal(metadata.license, "MIT", "Release license changed")
   assert.equal(metadata.repository?.url, `${url}.git`, "Release repository metadata disagrees")
   assert.equal(metadata.homepage, `${url}#readme`, "Release homepage disagrees")
