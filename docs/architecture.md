@@ -163,6 +163,8 @@ Viewer 的“只读”只约束工程目录：Button、TextInput、List/Tree、C
 
 `use-fairygui-maker` Skill 只描述 Agent 应怎样组合现有工具，不承载工程解析、发布或事务逻辑。`.agents` 保存唯一完整指南；`.claude` 只转向这份通用指南，避免两套契约漂移。Skill 与 Maker MCP 同仓库、同 npm tarball 版本化，确保工具名称、只读边界、revision 和截图协议一致。
 
+创建或改版 UI 时，入口按需加载 [UI 制作参考](../.agents/skills/use-fairygui-maker/references/ui-authoring.md)，将复用、状态、布局和动效需求映射到设计选择及验收结果。参考中的通用 FairyGUI 原则与 Maker 执行流程分开描述；精确操作契约仍由安装版本的 OpenFairyGUI 提供，列表虚拟化等运行时集成能力不因加入 Skill 而成为新的 Maker API。三个案例用于检查结构复用、状态切换和布局/动效结果，不代替实际保存回读或渲染验证。
+
 ## 8. 实施顺序
 
 ### 阶段 1：localhost Host 与入口（已完成）

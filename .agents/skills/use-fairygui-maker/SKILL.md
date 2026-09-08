@@ -1,6 +1,6 @@
 ---
 name: use-fairygui-maker
-description: Use FairyGUI Maker to import or reimport design sources, inspect or edit FairyGUI projects, analyze assets, preview unpublished UI in Viewer, and validate published .fui or _fui.bytes artifacts in Player. Trigger for operating the Maker CLI, Workbench, or MCP tools, including render evidence and revision or permission failures. Do not trigger for developing FairyGUI Maker's own source code.
+description: Create or refine FairyGUI UI with FairyGUI Maker using reusable resources and components, Controller states, Relations and Transitions. Also use for design import/reimport, project inspection/editing, asset analysis, Viewer previews, published .fui or _fui.bytes validation in Player, and Maker CLI/MCP revision or permission failures. Do not trigger for developing FairyGUI Maker's own source code or unrelated UI frameworks.
 ---
 
 # Use FairyGUI Maker
@@ -13,6 +13,7 @@ Choose the local CLI or connected Maker Host for the requested workflow. Keep pr
 |---|---|---|
 | Import `.fig`, `.psd`, or a Maker Import Bundle | Local CLI or Workbench Draft | Draft state; project files only on explicit import/Materialize |
 | Reimport changed local design sources | Local CLI dry-run, then approved plan digest | Three-way merge into the existing project |
+| Create or refine reusable UI components, states, layout or motion | Backend authoring + Viewer; Player for published acceptance | Same transaction and save rules as project editing |
 | Inspect, edit, or save a `.fairy` project | OpenFairyGUI backend session | Save requires an explicit revision and a one-time Host Save Grant |
 | Inspect resource health/references | Asset Manager + `inspect_project_assets` | Advisory analysis for one source revision |
 | Preview the current unpublished project | Viewer | Render-session memory only |
@@ -40,6 +41,12 @@ Read [references/import-workflows.md](references/import-workflows.md) for exact 
 After preview, a planned/compiled Draft can change Mapping and compile again. Successful replanning invalidates the old preview and visual evidence; capture the new result. An already-written Materialize attempt must be recovered before changing that Draft.
 
 For reimport, show the actual dry-run changes, conflicts/blockers and `planDigest` before applying. A prior request to apply the reviewed plan is sufficient authorization; a request merely to inspect changes is not. Close the project in Host/editor, apply the exact approved digest once, and run a fresh dry-run to check the resulting project. Never use CLI reimport to bypass a pending Host Save Grant.
+
+## Create or refine UI
+
+For building components or panels, reusing templates, configuring visual states, adapting layout or adding motion, read [UI authoring decisions and acceptance examples](references/ui-authoring.md). It explains when to choose component references, Controller/Gear, Relations, Transitions, lists or branches, and how to check the result. A narrow inspection or rename does not require this reference.
+
+Inspect existing resources and the requested behavior before choosing a representation. Use only the mechanisms the task needs, preserve the user's design intent, and check current capabilities and installed schemas before applying a choice. The reference supplies design decisions; the workflows below supply the authoring, permission and rendering contracts. A discussion or review request remains read-only.
 
 ## Inspect or edit a project
 

@@ -1,4 +1,4 @@
 interface:
   display_name: "Use FairyGUI Maker"
-  short_description: "Operate FairyGUI projects and previews safely"
-  default_prompt: "Use $use-fairygui-maker to inspect, edit, or visually validate a FairyGUI project safely."
+  short_description: "Build reusable FairyGUI UI and validate its behavior"
+  default_prompt: "Use $use-fairygui-maker to create or refine FairyGUI UI with reusable components, appropriate states and layout, and visual validation."
