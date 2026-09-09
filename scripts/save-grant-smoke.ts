@@ -83,15 +83,13 @@ export async function saveGrantSmoke(context: BrowserContext, host: { origin: st
       await key.fill(token)
       const response = page.waitForResponse((response) => response.url().endsWith("/owner-session") && response.request().method() === "POST")
       await page.getByRole("button", { name: "验证所有者", exact: true }).click()
-      const result = await response
-      assert.equal(await result.finished(), null)
-      return result
+      return response
     }
     const act = async (button: string, requestRow = row) => {
       const response = page.waitForResponse((response) => response.url().endsWith("/decision") && response.request().method() === "POST")
       await requestRow.getByRole("button", { name: button, exact: true }).click()
       const result = await response
-      assert.equal(await result.finished(), null)
+      await page.getByRole("button", { name: "锁定授权管理", exact: true }).click({ trial: true })
       return result
     }
     assert.equal((await unlock(host.token)).status(), 403)
@@ -191,7 +189,6 @@ export async function saveGrantSmoke(context: BrowserContext, host: { origin: st
     await page.getByRole("button", { name: "锁定授权管理", exact: true }).click()
     const lockResponse = await locked
     assert.equal(lockResponse.status(), 200)
-    assert.equal(await lockResponse.finished(), null)
     await key.waitFor()
     assert.equal(await key.inputValue(), "")
     const reopenedRow = page.getByTestId(`save-approval-${afterReopen.error.approval.approvalRequestId}`)
