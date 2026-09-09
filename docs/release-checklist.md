@@ -1,9 +1,12 @@
 # 发布检查清单
 
+> **当前发布定位：早期实验版本。** 项目处于开发初期，暂不能用于实际项目开发或生产环境。以下门禁用于检查特定版本的构建、测试与分发，不代表项目已达到实际开发可用标准。
+
 发布对象是一个固定提交，不是几个不同提交的测试结果集合。以下检查不自动授权创建 GitHub Release、修改 npm/GitHub 凭据或执行 `npm publish`。
 
 ## 固定输入
 
+- README、包简介与 GitHub Release 说明须保持一致，明确开发初期状态、仅供实验评估及暂不能用于实际项目开发；不得将测试通过或成功发布表述为生产可用。
 - `package.json` 中包名为 `@openfairygui/fairygui-maker`、许可证为 MIT，repository/homepage/issues 指向 `OpenFairyGUI/FairyGUI-Maker`；发布 tag 必须为 `v<package-version>`。CLI 名称仍为 `fairygui-maker`。
 - `vendor-runtime.lock.json` 是三个浏览器 runtime 文件来源、完整 commit、源路径、字节数和 SHA-256 的单一清单。第三方声明与 tarball 内 `dist/web/viewer-runtime/` 必须与它一致。
 - runtime 直接复制自清单指定的 `FairyGUI-Editor-Online` 预编译资产，不做构建或改写。按 `source.repository`、`source.commit` 和每个 `sourcePath` 获取原始文件，保持字节原样；不要用文本写入命令或换行转换重存。`.gitattributes` 禁止这些文件的 Git 文本转换。

@@ -1,8 +1,10 @@
 # FairyGUI Maker 产品定位与技术架构
 
+> **项目状态：开发初期，暂不能用于实际项目开发或生产环境。** 本文描述目标定位与当前架构，仅供实验评估和参与项目开发；具体能力与限制见 [README](../README.md#当前状态与边界)。
+
 ## 1. 项目定位
 
-FairyGUI Maker 不是另一个 FairyGUI 编辑器，而是建立在 OpenFairyGUI 之上的 Agent 优先、本地优先产品与工具层，面向以下工作流：
+FairyGUI Maker 不是另一个 FairyGUI 编辑器，而是建立在 OpenFairyGUI 之上的 Agent 优先、本地优先产品与工具层，目标工作流包括：
 
 - 让 Agent 打开、检查、修改并保存 FairyGUI 工程。
 - 导入并管理 FairyGUI 工程的真实发布产物。

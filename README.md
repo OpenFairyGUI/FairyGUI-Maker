@@ -2,13 +2,16 @@
 
 > 面向 AI Agent 的 FairyGUI 本地工作台：检查与编辑工程、预览未发布 UI、分析资源，并验证真实发布产物。
 
+> [!WARNING]
+> **项目处于开发初期，暂不能用于实际项目开发或生产环境。** 当前仅供实验评估、原型验证与参与项目开发。功能完整性、兼容性和工作流仍在验证中，接口及数据格式可能调整；请仅使用测试工程或已备份的副本试用。下文介绍的能力、示例和测试结果不代表项目已达到实际开发可用标准。
+
 FairyGUI Maker 建立在 [OpenFairyGUI](https://github.com/OpenFairyGUI/OpenFairyGUI) 之上。OpenFairyGUI 提供工程读写、UAM、事务、二进制协议和 backend runtime；Maker 将这些底层能力组合为一个本地 Host、Streamable HTTP MCP、浏览器 Workbench、CLI 和可复用 Agent Skill。
 
 FairyGUI Maker 不是另一个完整编辑器，也不是 FairyGUI 官方产品。“FairyGUI”名称、Logo 及相关品牌标识的权利归其权利人所有；官方产品与信息请访问 [FairyGUI 官网](https://fairygui.com/)。
 
 ## FairyGUI Maker 是什么
 
-Maker 让人和 Agent 使用同一组稳定 ID、revision 与 render session 协作，适合：
+Maker 的目标是让人和 Agent 使用同一组稳定 ID、revision 与 render session 协作，当前正在探索并验证以下工作流：
 
 - 让 Agent 检查、修改并按明确授权保存 `.fairy` 工程。
 - 在发布前通过 Viewer 预览当前工程组件，而不生成 `.fui`。
@@ -41,6 +44,8 @@ Viewer 不能作为发布结果的证明；最终 `.fui` 行为应在 Player 中
 | Agent Skills | 同仓库维护通用 Skill，并通过轻量包装兼容 Claude |
 
 ## 快速开始
+
+以下步骤仅供本地实验评估，请使用独立的测试目录和工程副本。
 
 npm 包名为 `@openfairygui/fairygui-maker`，CLI 命令仍为 `fairygui-maker`。以下命令使用 `0.1.1`；如果 npm registry 尚未提供该版本，请按[本地开发](#本地开发)从源码启动。发布状态以 registry 为准，验收要求见[发布检查清单](./docs/release-checklist.md)。
 
@@ -218,6 +223,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 
 ## 当前状态与边界
 
+- 项目整体仍处于开发初期，暂不能用于实际项目开发。下列内容描述已接入的能力与当前限制，不构成完整性、稳定性或生产可用性承诺。
 - 已接入 Backend `0.5.0-alpha.2`：`query_entity` 读取当前属性；`read_session_state` 与 `read_resource_bytes` 提供绑定 revision 的模型和主资源字节。事务后必须读回所改字段，不能只用成功返回或 revision 变化证明结果。
 - Dashboard 的“预览会话”和 `open_session_preview` 可预览未保存修改。模型和所选组件资源来自公开 Backend 接口；编辑、保存或关闭会话会使旧 renderer 失效，刷新后读取新版本。详情见 [会话预览](./docs/session-preview.md)。
 - Maker 与 Backend 工具通过同一 MCP 服务发现；Host 使用公开 `instructions` 和 `toolPolicies` 接口保留自己的指引及保存授权结果。批准后由 Backend 执行一次保存，保留 revision、路径和磁盘检查；完整读回、预览、授权保存与重开验收见[会话预览接入验收](./docs/session-preview.md)。
@@ -303,6 +309,8 @@ npm uninstall --global @openfairygui/fairygui-maker
 `npx` 使用者没有全局包需要卸载。卸载不会删除 `--data-dir` 或 `.fairygui-maker`；确认不再需要其中的 Artifact 后再由用户手动删除该目录。
 
 ## 发布 npm 包
+
+当前版本按早期实验版本定位。发布说明应明确“开发初期，暂不能用于实际项目开发”；通过发布门禁或分发 npm 包不代表项目已经成熟可用。
 
 FairyGUI Maker 自身采用 [MIT License](./LICENSE)，公开仓库为 [OpenFairyGUI/FairyGUI-Maker](https://github.com/OpenFairyGUI/FairyGUI-Maker)。npm 包名为 `@openfairygui/fairygui-maker`，发布者登录在 npm `openfairygui` 组织中有发布权限的账号后执行：
 

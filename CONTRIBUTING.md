@@ -1,5 +1,7 @@
 # 参与开发
 
+FairyGUI Maker 处于开发初期，暂不能用于实际项目开发或生产环境。欢迎使用测试工程参与功能验证、问题反馈和项目开发；现有功能及测试通过不代表完整工作流已成熟可用。试验导入、编辑或保存时请使用测试数据或已备份的工程副本。
+
 当前架构与功能边界见 [docs/architecture.md](docs/architecture.md) 和 [docs/workbench.md](docs/workbench.md)。历史提案位于 [docs/archive](docs/archive/design-to-fairygui-proposal.md)，不作为实现契约。
 
 使用 Node.js >=22.18、pnpm 10.14.0，先执行 `pnpm install --frozen-lockfile`。沿用所修改文件的格式；按责任边界提交，不顺带全仓格式化、升级依赖或改写用户已有工作。

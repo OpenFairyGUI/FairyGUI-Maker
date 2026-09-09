@@ -1,7 +1,7 @@
 {
 	"name": "@openfairygui/fairygui-maker",
 	"version": "0.1.1",
-	"description": "AI agent toolkit and preview workspace for FairyGUI projects and published artifacts.",
+	"description": "Early-stage experimental AI agent toolkit and preview workspace for FairyGUI; not yet suitable for real-world project development or production use.",
 	"license": "MIT",
 	"repository": {
 		"type": "git",

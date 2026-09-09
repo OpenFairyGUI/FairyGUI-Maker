@@ -1,7 +1,9 @@
 # FairyGUI Maker Workbench 架构与技术栈基线
 
-状态：核心栈、Viewer 与 Artifact-first Player 第一版已落地
-更新时间：2026-09-07
+状态：开发初期；核心栈、Viewer 与 Artifact-first Player 已有初步实现，暂不能用于实际项目开发或生产环境
+更新时间：2026-09-09
+
+本文记录当前实现与架构基线，供实验评估和参与项目开发；功能落地及测试通过不代表工作流已成熟可用。试用范围与限制见 [README](../README.md#当前状态与边界)。
 
 本文记录 FairyGUI Maker 浏览器界面层 Maker Workbench 的架构基线和已确认技术选案。Hono、React、TanStack Router/Query/Table/Virtual、Zod、Radix、Pino、react-resizable-panels 与 shadcn/ui 已进入第一版运行链路。
 
