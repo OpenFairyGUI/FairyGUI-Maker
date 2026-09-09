@@ -1,8 +1,11 @@
 // Shared persisted byte encoding for CLI snapshots and Host drafts.
 export function stringifyImportJson(value: unknown): string {
-  return `${JSON.stringify(value, (_key, item) => (
-    item instanceof Uint8Array ? { $uint8: Buffer.from(item.buffer, item.byteOffset, item.byteLength).toString('base64') } : item
-  ), 2)}\n`;
+  return `${JSON.stringify(value, function (this: Record<string, unknown>, key, item) {
+    const original = this[key];
+    return original instanceof Uint8Array
+      ? { $uint8: Buffer.from(original.buffer, original.byteOffset, original.byteLength).toString('base64') }
+      : item;
+  }, 2)}\n`;
 }
 
 export function parseImportJson(text: string): unknown {

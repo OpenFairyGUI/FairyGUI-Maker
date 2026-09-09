@@ -1,7 +1,7 @@
 # Third-party fixtures
 
-这些文件保持上游原始字节，用于验证真实 `.fig` 和 `.psd` 解析。所有文件均来自 MIT
-许可的测试语料，并固定到具体上游提交。
+这些文件用于验证真实 `.fig` 和 `.psd` 解析。除注明为衍生作品的 Racing UI Showcase
+外，文件均保持上游原始字节并固定到具体上游提交。
 
 | File | Source | SHA-256 |
 | --- | --- | --- |
@@ -12,6 +12,18 @@
 | `artboard.psd` | [psd-tools](https://github.com/psd-tools/psd-tools/blob/21114abe96b1d88a4d2a5df4001c30941f9c2bec/tests/psd_files/artboard.psd) | `86d3ccc572cfeec57b271467ba103fb9e32c4f33351276abbf4f962913072b81` |
 | `mask.psd` | [psd-tools](https://github.com/psd-tools/psd-tools/blob/21114abe96b1d88a4d2a5df4001c30941f9c2bec/tests/psd_files/mask.psd) | `a6928c0e306022d474876e61f4b1dc5b7c1ed1e1cb422e6e72511da0a6aae90b` |
 | `effects-enabled.psd` | [psd-tools](https://github.com/psd-tools/psd-tools/blob/21114abe96b1d88a4d2a5df4001c30941f9c2bec/tests/psd_files/effects/effects-enabled.psd) | `42815f35af3998fd2fa4785bca94bb79124063e228d43c1fd206f71cdc43de87` |
+| `racing-ui-showcase.psd` | Derived from [Racing UI Kit](https://villesep.itch.io/racing-ui-kit) by Ville Seppänen, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | `134ddb75b1021e2e26d899dcd43da8787570a85c8fba669d6bd9a3d6ef495a9b` |
+
+## License: Racing UI Showcase
+
+`racing-ui-showcase.psd` is an adaptation of **Racing UI Kit** by Ville Seppänen,
+licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The source
+PSD SHA-256 is
+`41a72978d99dea5ecb33dfcde4a1919b75c90d37ef7489d1eec29e5ed460ae4d`.
+The adaptation selects and converts source raster layers to 8-bit RGB, arranges
+them into six new 1280×720 artboards, and adds editable text plus `@fgui`
+role/state annotations. It is not an unmodified upstream file and is not endorsed
+by the original creator.
 
 ## License: psd-tools fixtures
 

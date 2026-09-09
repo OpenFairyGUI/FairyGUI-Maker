@@ -133,6 +133,49 @@ test('converts the pinned third-party PSD corpus into readable FairyGUI projects
   }
 });
 
+test('imports the racing showcase artboards with editable controls and list content', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'fairygui-maker-racing-showcase-'));
+  try {
+    const input = join(process.cwd(), 'test', 'fixtures', 'design-import', 'racing-ui-showcase.psd');
+    const output = join(directory, 'Racing UI Showcase.fairy');
+    const document = parsePsdFile(await readFile(input), 'Racing UI Showcase');
+    assert.deepEqual(document.pages[0].roots.map(({ name }) => name), [
+      '01 Lobby', '02 Garage Inventory', '03 Race HUD',
+      '04 Results', '05 Settings Popup', '06 Components',
+    ]);
+
+    const converted = convertDocument(document);
+    assert.equal(converted.report.editableText, 50);
+    const components = converted.project.packages.flatMap(({ resources }) => resources)
+      .filter((resource) => resource.kind === 'component');
+    assert.equal(components.filter(({ exported }) => exported).length, 6);
+    const buttons = components.filter(({ component }) => component.properties.extensionType === 'Button');
+    assert.equal(buttons.length, 5);
+    assert.ok(buttons.every(({ component }) => component.controllers.some((controller) =>
+      controller.name === 'button'
+      && controller.pages.map(({ name }) => name).join(',') === 'up,over,down,disabled')));
+    assert.ok(buttons.every(({ component }) => new Set(component.displayList
+      .filter((node) => node.kind === 'image')
+      .map(({ position, size }) => `${position.x},${position.y},${size.width},${size.height}`)).size === 1));
+    assert.equal(components.filter(({ component }) => component.properties.extensionType === 'ProgressBar').length, 2);
+    const editableText = components.flatMap(({ component }) => component.displayList)
+      .filter((node) => node.kind === 'text' || node.kind === 'richText' || node.kind === 'textInput');
+    assert.equal(editableText.length, 50);
+    assert.ok(editableText.every(({ size }) => size.width > 0 && size.height > 0));
+    const garage = components.find(({ name }) => name === '02 Garage Inventory');
+    const inventory = garage?.component.displayList.find((node) => node.kind === 'list');
+    assert.ok(inventory?.kind === 'list');
+    assert.equal(inventory.listItems.length, 3);
+
+    await writeProjectFromUam(new NodeIO(), converted.project, output);
+    const reloaded = await readProjectAsUam(new NodeIO(), output, { hydrateResourceBytes: true });
+    assert.equal(reloaded.packages.flatMap(({ resources }) => resources)
+      .filter((resource) => resource.kind === 'component' && resource.exported).length, 6);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('PSD text-layer pixel budgets reject oversized 8/16/32-bit inputs before creating a project', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'maker-psd-text-budget-'));
   try {

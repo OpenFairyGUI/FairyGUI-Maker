@@ -11,7 +11,32 @@ import { digestReimportPath } from '../../src/design-import/node';
 import { MAKER_IMPORT_GENERATED_SNAPSHOT } from '../../src/design-import/import-state';
 
 const fixture = path.join(process.cwd(), 'test', 'fixtures', 'design-import', 'basic-shapes.fig');
+const psdFixture = path.join(process.cwd(), 'test', 'fixtures', 'design-import', 'artboard.psd');
 const exists = (filePath: string) => access(filePath).then(() => true, () => false);
+
+test('persists PSD raster bytes through draft reload and compile', async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'maker-psd-draft-'));
+  try {
+    const store = new ImportDraftStore(dataDir);
+    await store.init();
+    let draft = await store.create(psdFixture);
+    draft = await store.parse(draft.draftId, draft.revision);
+    assert.ok(draft.diagnostics.some(({ code }) => code === 'RASTERIZED_NODE'));
+    draft = (await store.plan(draft.draftId, draft.revision)).draft;
+
+    const restarted = new ImportDraftStore(dataDir);
+    await restarted.init();
+    draft = await restarted.compile(draft.draftId, draft.revision);
+    const project = await readProjectAsUam(
+      new NodeIO(),
+      path.join(restarted.getGeneratedProjectPath(draft.draftId)!, draft.generated!.fairyFile),
+      { hydrateResourceBytes: true },
+    );
+    assert.ok(project.packages.flatMap(({ resources }) => resources).some(({ kind }) => kind === 'image'));
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
 
 test('materialize reports committed files and recovers the exact result after metadata failure and restart', async (t) => {
   const parent = await mkdtemp(path.join(tmpdir(), 'maker-materialize-recovery-'));
