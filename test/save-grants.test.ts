@@ -103,6 +103,55 @@ test("save grants bind exact operations, expire, revoke, invalidate and stay bou
   assert.equal(bounded.list().length, 0)
 })
 
+test("session permission survives ordinary edits but never authorizes another target, mode or session", async (t) => {
+  const runtime = new BackendRuntime()
+  const project = liftDocumentToUamProject(new Document())
+  runtime.openProjectSession({ project, sessionId: "continuous", canonicalProjectPath: "original.fairy" })
+  runtime.openProjectSession({ project, sessionId: "other" })
+  const grants = new HostSaveGrants(runtime)
+  const input = { sessionId: "continuous", expectedRevision: 0 }
+  const request = approval(grants.authorize("saveSession", input))
+  assert.equal(request.sessionEligible, true)
+  grants.decide(request.approvalRequestId, "approve-session")
+  assert.equal(grants.list()[0].scope, "session")
+  assert.equal(grants.list()[0].expiresAt, null)
+  assert.equal(grants.authorize("saveSession", input), undefined)
+  assert.ok((await runtime.applyTransaction({ ...input, operations: [{ kind: "addBranch", branch: "edited" }] })).ok)
+  assert.equal(errorCode(grants.authorize("saveSession", input)), "save_revision_stale")
+  const edited = { ...input, expectedRevision: 1 }
+  for (let i = 0; i < 3; i++) assert.equal(grants.authorize("saveSession", { ...edited, force: false }), undefined)
+  assert.equal(errorCode(grants.authorize("saveSession", { sessionId: input.sessionId })), "save_input_invalid")
+  for (const options of [{ force: true }, { targetPath: "other.fairy" }, { targetPath: "original.fairy" }, { mode: "materializeCleanSession" }]) {
+    const single = approval(grants.authorize("saveSession", { ...edited, ...options }))
+    assert.equal(single.sessionEligible, false)
+    assert.equal(grants.decide(single.approvalRequestId, "approve-session").status, 409)
+  }
+  const materialize = approval(grants.authorize("materializeSession", edited))
+  assert.equal(grants.decide(materialize.approvalRequestId, "approve-session").status, 409)
+  approval(grants.authorize("saveSession", { sessionId: "other", expectedRevision: 0 }))
+  const now = Date.now()
+  const clock = t.mock.method(Date, "now", () => now + SAVE_GRANT_TTL_MS + 1)
+  assert.equal(grants.authorize("saveSession", edited), undefined)
+  clock.mock.restore()
+  grants.decide(request.approvalRequestId, "revoke")
+  const next = approval(grants.authorize("saveSession", edited))
+  grants.decide(next.approvalRequestId, "approve-session")
+  const snapshot = runtime.getSession(edited)
+  assert.ok(snapshot.ok)
+  const changedPath = t.mock.method(runtime, "getSession", () => ({ ...snapshot, data: { ...snapshot.data, canonicalProjectPath: "changed.fairy" } }))
+  approval(grants.authorize("saveSession", edited))
+  assert.equal(grants.list().find(item => item.approvalRequestId === next.approvalRequestId)!.status, "stale")
+  changedPath.mock.restore()
+  const closing = approval(grants.authorize("saveSession", edited))
+  grants.decide(closing.approvalRequestId, "approve-session")
+  grants.beginClose(input.sessionId)
+  assert.equal(errorCode(grants.authorize("saveSession", edited)), "save_session_closing")
+  grants.endClose(input.sessionId)
+  approval(grants.authorize("saveSession", edited))
+  grants.close()
+  assert.equal(grants.list().length, 0)
+})
+
 test("a failed or throwing backend attempt consumes its grant and never auto-retries", async (t) => {
   const runtime = new BackendRuntime()
   runtime.openProjectSession({ project: liftDocumentToUamProject(new Document()), sessionId: "failure" })
@@ -229,7 +278,7 @@ test("real Host MCP saves require independent owner approval and preserve backen
     assert.ok((await call("open_project_session", memoryInput)).ok)
     const memorySave = { sessionId: memoryInput.sessionId, expectedRevision: 0 }
     const old = approval(await call("save_session", memorySave))
-    await decision(old.approvalRequestId, host.approvalToken)
+    await decision(old.approvalRequestId, host.approvalToken, "approve-session")
     assert.ok((await call("close_session", { sessionId: memoryInput.sessionId })).ok)
     assert.ok((await call("open_project_session", memoryInput)).ok)
     assert.notEqual(approval(await call("save_session", memorySave)).approvalRequestId, old.approvalRequestId)
@@ -241,6 +290,56 @@ test("real Host MCP saves require independent owner approval and preserve backen
     await client.close()
     await host.close()
   }
+})
+
+test("owner verification uses a separate revocable Host-local cookie with same-origin decisions", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "maker-owner-session-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const runtime = new BackendRuntime()
+  runtime.openProjectSession({ project: liftDocumentToUamProject(new Document()), sessionId: "owner-test" })
+  const options = { port: 0, token: "normal-mcp-token-with-24-characters", approvalToken: "independent-owner-key-with-24-characters", runtime, dataDir: root }
+  const host = await startMakerHost(options)
+  const headers = { Authorization: `Bearer ${host.token}` }
+  const endpoint = `${host.origin}/api/save-approvals`
+  const unlock = (key: string, cookie = "") => fetch(`${endpoint}/owner-session`, {
+    method: "POST", headers: { ...headers, "x-maker-approval-token": key, Cookie: cookie },
+  })
+  try {
+    for (const key of ["", host.token, "wrong-owner-key-with-24-characters"]) assert.equal((await unlock(key)).status, 403)
+    const response = await unlock(host.approvalToken)
+    assert.equal(response.status, 200)
+    const setCookie = response.headers.get("set-cookie")!
+    assert.match(setCookie, /HttpOnly/i)
+    assert.match(setCookie, /SameSite=Strict/i)
+    assert.match(setCookie, /Path=\/api\/save-approvals/i)
+    assert.doesNotMatch(setCookie, /Max-Age|Expires/i)
+    const cookie = setCookie.split(";", 1)[0]
+    assert.ok(!cookie.includes(host.approvalToken) && !cookie.includes(host.token))
+    assert.equal((await unlock(host.approvalToken, cookie)).headers.get("set-cookie"), null, "verification reuses an existing owner session")
+    const get = async (cookie = "") => (await fetch(endpoint, { headers: { ...headers, Cookie: cookie } })).json()
+    assert.equal((await get()).ownerVerified, false)
+    assert.equal((await get(cookie)).ownerVerified, true)
+    const decide = (origin?: string) => fetch(`${endpoint}/missing/decision`, {
+      method: "POST", headers: { ...headers, Cookie: cookie, "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) }, body: '{"decision":"approve-session"}',
+    })
+    assert.equal((await decide()).status, 403)
+    assert.equal((await decide("https://evil.invalid")).status, 403)
+    assert.equal((await decide(host.origin)).status, 404, "owner cookie reaches the decision handler without the owner key")
+    assert.equal((await fetch(`${endpoint}/owner-session`, { method: "DELETE", headers: { ...headers, Cookie: cookie } })).status, 403)
+    const locked = await fetch(`${endpoint}/owner-session`, { method: "DELETE", headers: { ...headers, Cookie: cookie, Origin: host.origin } })
+    assert.equal(locked.status, 200)
+    assert.equal((await get(cookie)).ownerVerified, false)
+    assert.equal((await decide(host.origin)).status, 403, "locking revokes even a copied session cookie")
+    const restartCookie = (await unlock(host.approvalToken)).headers.get("set-cookie")!.split(";", 1)[0]
+    const publicState = JSON.stringify(await get(restartCookie))
+    for (const value of [host.token, host.approvalToken, restartCookie.split("=", 2)[1]]) assert.ok(!publicState.includes(value))
+    await host.close()
+    const restarted = await startMakerHost(options)
+    try {
+      const result = await fetch(`${restarted.origin}/api/save-approvals`, { headers: { ...headers, Cookie: restartCookie } })
+      assert.equal((await result.json()).ownerVerified, false, "fixed configured keys do not preserve owner verification across Host restart")
+    } finally { await restarted.close() }
+  } finally { await host.close() }
 })
 
 test("read-only Hosts cannot issue grants and normal and approval credentials must differ", async (t) => {
@@ -255,7 +354,8 @@ test("read-only Hosts cannot issue grants and normal and approval credentials mu
   const host = await startMakerHost({ port: 0, token, dataDir: path.join(root, "data"), projectPath: path.join(root, "project") })
   try {
     const headers = { Authorization: `Bearer ${token}`, "x-maker-approval-token": host.approvalToken, "Content-Type": "application/json" }
-    assert.deepEqual(await (await fetch(`${host.origin}/api/save-approvals`, { headers })).json(), { enabled: false, approvals: [] })
+    assert.deepEqual(await (await fetch(`${host.origin}/api/save-approvals`, { headers })).json(), { enabled: false, ownerVerified: false, approvals: [] })
+    assert.equal((await fetch(`${host.origin}/api/save-approvals/owner-session`, { method: "POST", headers })).status, 403)
     assert.equal((await fetch(`${host.origin}/api/save-approvals/anything/decision`, { method: "POST", headers, body: '{"decision":"approve"}' })).status, 403)
   } finally { await host.close() }
 })

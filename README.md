@@ -23,7 +23,7 @@ Maker 的目标是让人和 Agent 使用同一组稳定 ID、revision 与 render
 
 | 目标 | 使用入口 | 持久化边界 |
 |---|---|---|
-| 检查、编辑或保存工程 | OpenFairyGUI backend session | save 需要显式 revision 与一次性 Host Save Grant |
+| 检查、编辑或保存工程 | OpenFairyGUI backend session | save 需要显式 revision；普通保存可用会话授权，特殊操作单次确认 |
 | 预览尚未发布的组件 | Viewer | 只修改 render session 内存，不写工程 |
 | 检查资源健康度 | Asset Manager | 固定 source revision 的只读分析 |
 | 验证发布目录 | Player | Artifact 不可变，操作只影响 render session |
@@ -83,11 +83,15 @@ Backend 还会排除 Maker 私有数据目录、其后代，以及包含该目�
 
 ### 保存确认（Host Save Grant）
 
-Agent 的 `save_session` / `materialize_session` 必须携带 `expectedRevision`。首次调用返回 `save_approval_required`，不写盘；所有者在 Dashboard 的 **Host Save Grant** 卡片核对会话、revision、目标和选项，输入独立的确认密钥并批准后，Agent 才能用相同参数重试一次。
+Agent 的 `save_session` / `materialize_session` 必须携带 `expectedRevision`。没有对应权限时返回 `save_approval_required`，不写盘；所有者在 Dashboard 的 **工程保存权限** 卡片验证一次身份，再选择“批准一次保存”或“允许本次会话连续保存”。授权本身不写盘，Agent 确认后重试原参数。
 
 完整 Host 在本地交互终端单独显示随机确认密钥；它不是 `FAIRYGUI_MAKER_TOKEN`，不要交给 Agent。非交互启动时，所有者须另行设置 `FAIRYGUI_MAKER_APPROVAL_TOKEN`（24–256 字符，必须与 MCP token 不同），该值不会输出到日志；没有配置则保存保持阻断。不要把确认密钥放入 MCP 客户端环境、仓库配置或启动 URL。
 
-每个请求从创建起 5 分钟内有效，批准后最多尝试执行一次，失败或响应丢失也会消耗授权。修改 revision/选项、关闭会话、撤销或重启 Host 后需重新确认。普通保存、force-save 和完整物化均受此约束；Viewer/Player 的只读绑定不会因此获得写权限。完整规则见 [Host Save Grant](./docs/workbench.md#210-host-save-grant批次-15)。
+验证后，浏览器以独立的 HttpOnly、SameSite=Strict 会话 Cookie 管理授权，刷新无需重输密钥。该 Cookie 不包含确认密钥，Host 重启后失效；“锁定授权管理”撤销当前浏览器的所有者验证，但不撤销已授予的工程权限。
+
+“允许本次会话连续保存”仅覆盖当前 Backend 会话向原工程执行的普通保存，包括后续编辑产生的资源移除；revision 改变不需要重新授权，但每次仍校验最新 revision、路径与磁盘冲突。撤销、关闭/重开工程或重启 Host 后失效，不是永久信任目录，也不改变 Viewer/Player 的只读权限。
+
+`force: true`、任何显式 `targetPath`、`materializeCleanSession` 和 `materialize_session` 始终单次确认。待确认请求及单次授权从请求创建起 5 分钟内有效，单次授权在执行前消耗，失败或响应不确定时先读回状态，不自动重试。完整规则见 [Host Save Grant](./docs/workbench.md#210-host-save-grant批次-15)。
 
 ## Agent 与 MCP
 
@@ -229,7 +233,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 - Maker 与 Backend 工具通过同一 MCP 服务发现；Host 使用公开 `instructions` 和 `toolPolicies` 接口保留自己的指引及保存授权结果。批准后由 Backend 执行一次保存，保留 revision、路径和磁盘检查；完整读回、预览、授权保存与重开验收见[会话预览接入验收](./docs/session-preview.md)。
 - Host 只绑定 `127.0.0.1`，并校验 Host、Origin 和访问令牌。
 - 同一 Host 最多保留 32 个 MCP session；客户端应正常发送 MCP `DELETE` 关闭不再使用的 session。
-- Host 强制执行一次性保存授权；仅持有 MCP token 或普通 Workbench Cookie 不能批准保存。授权状态仅存内存，最多保留 128 条记录。
+- Host 支持工程会话普通保存授权及特殊操作单次确认；仅持有 MCP token 或普通 Workbench Cookie 不能授予权限。授权状态仅存内存，最多保留 128 条记录；所有者验证最多保留 32 个浏览器会话。
 - Viewer 使用原始工程 UAM；Player 只消费固定 Artifact，两条渲染链路不会互相降级。
 - Viewer 和 Player 都只接受白名单语义操作，不执行任意 JavaScript、表达式或业务 JSON。
 - Workbench 与 Agent 共用 Broker；语义状态和 zoom/background/viewport 分别计版本，截图记录实际捕获的双版本。`stateVersion` 保留为语义版本别名，详见[统一 Broker 状态](./docs/workbench.md#28-统一-broker-状态批次-13)。

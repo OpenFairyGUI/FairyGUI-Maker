@@ -79,22 +79,34 @@ export async function saveGrantSmoke(context: BrowserContext, host: { origin: st
     await row.getByText("待确认", { exact: true }).waitFor()
     assert.ok((await row.innerText()).includes(projectRoot))
     const key = page.getByLabel("Host 所有者确认密钥", { exact: true })
-    const act = async (button: string, token: string, requestRow = row) => {
+    const unlock = async (token: string) => {
       await key.fill(token)
+      const response = page.waitForResponse((response) => response.url().endsWith("/owner-session") && response.request().method() === "POST")
+      await page.getByRole("button", { name: "验证所有者", exact: true }).click()
+      return response
+    }
+    const act = async (button: string, requestRow = row) => {
       const response = page.waitForResponse((response) => response.url().endsWith("/decision") && response.request().method() === "POST")
       await requestRow.getByRole("button", { name: button, exact: true }).click()
-      const result = await response
-      assert.equal(await key.inputValue(), "", "owner token must not be retained in the input")
-      return result
+      return response
     }
-    assert.equal((await act("批准一次保存", host.token)).status(), 403)
+    assert.equal((await unlock(host.token)).status(), 403)
     await page.getByRole("alert").filter({ hasText: "Host owner approval token required" }).waitFor()
-    assert.equal((await act("批准一次保存", host.approvalToken)).status(), 200)
+    assert.equal(await key.inputValue(), "")
+    assert.equal((await unlock(host.approvalToken)).status(), 200)
+    await page.getByText("所有者已验证", { exact: true }).waitFor()
+    assert.equal(await key.count(), 0, "the owner key input is removed after verification")
+    const ownerCookie = (await context.cookies()).find(cookie => cookie.name === "fairygui_maker_owner")
+    assert.equal(ownerCookie?.httpOnly, true)
+    assert.equal(ownerCookie?.sameSite, "Strict")
+    assert.equal(await page.evaluate(() => globalThis.document.cookie.includes("fairygui_maker_owner")), false)
+    assert.equal((await act("批准一次保存")).status(), 200)
     await row.getByText("已授权 · 待执行", { exact: true }).waitFor()
     assert.equal(await readFile(xmlPath, "utf8"), before)
     await page.reload({ waitUntil: "domcontentloaded" })
     await row.getByText("已授权 · 待执行", { exact: true }).waitFor()
-    assert.equal(await key.inputValue(), "")
+    await page.getByText("所有者已验证", { exact: true }).waitFor()
+    assert.equal(await key.count(), 0)
     assert.ok((await call("save_session", input)).ok)
     assert.match(await readFile(xmlPath, "utf8"), /Saved after approval/)
     await previewPage.getByText("Viewer 已停止", { exact: true }).waitFor()
@@ -112,16 +124,50 @@ export async function saveGrantSmoke(context: BrowserContext, host: { origin: st
     assert.equal(retried.error.code, "save_approval_required")
     const retryRow = page.getByTestId(`save-approval-${retried.error.approval.approvalRequestId}`)
     await retryRow.getByText("待确认", { exact: true }).waitFor()
-    assert.equal((await act("批准一次保存", host.approvalToken, retryRow)).status(), 200)
+    assert.equal((await act("批准一次保存", retryRow)).status(), 200)
     await retryRow.getByText("已授权 · 待执行", { exact: true }).waitFor()
-    assert.equal((await act("撤销授权", host.approvalToken, retryRow)).status(), 200)
+    assert.equal((await act("撤销授权", retryRow)).status(), 200)
     await retryRow.getByText("已撤销", { exact: true }).waitFor()
     const rejected = await call("save_session", input)
     assert.equal(rejected.error.code, "save_approval_required")
     const rejectRow = page.getByTestId(`save-approval-${rejected.error.approval.approvalRequestId}`)
     await rejectRow.getByText("待确认", { exact: true }).waitFor()
-    assert.equal((await act("拒绝", host.approvalToken, rejectRow)).status(), 200)
+    assert.equal((await act("拒绝", rejectRow)).status(), 200)
     await rejectRow.getByText("已拒绝", { exact: true }).waitFor()
+
+    const continuous = await call("save_session", input)
+    assert.equal(continuous.error.code, "save_approval_required")
+    const continuousRow = page.getByTestId(`save-approval-${continuous.error.approval.approvalRequestId}`)
+    await continuousRow.getByText("待确认", { exact: true }).waitFor()
+    assert.equal((await act("允许本次会话连续保存", continuousRow)).status(), 200)
+    await continuousRow.getByText("本次会话允许普通保存", { exact: true }).waitFor()
+    let revision = input.expectedRevision
+    for (const text of ["Saved with session permission", "Saved again with session permission"]) {
+      const edit = await call("apply_transaction", { sessionId, expectedRevision: revision, operations: [{ kind: "setDisplayNodeProps", selector: {
+        packageId: "SAVE0001", componentResourceId: "MAIN0001", displayNodeId: "TEXT0001",
+      }, props: { text } }] })
+      assert.ok(edit.ok, JSON.stringify(edit))
+      revision = edit.data.revision
+      const saved = await call("save_session", { sessionId, expectedRevision: revision })
+      assert.ok(saved.ok, JSON.stringify(saved))
+      assert.ok((await readFile(xmlPath, "utf8")).includes(text))
+    }
+    await page.reload({ waitUntil: "domcontentloaded" })
+    await continuousRow.getByText("本次会话允许普通保存", { exact: true }).waitFor()
+    await page.getByText("所有者已验证", { exact: true }).waitFor()
+    await continuousRow.scrollIntoViewIfNeeded()
+    await page.locator("#save-approvals").screenshot({ path: path.join(evidence, "session-save-permission.png") })
+    const forced = await call("save_session", { sessionId, expectedRevision: revision, force: true })
+    assert.equal(forced.error.code, "save_approval_required")
+    const forcedRow = page.getByTestId(`save-approval-${forced.error.approval.approvalRequestId}`)
+    await forcedRow.getByText("待确认", { exact: true }).waitFor()
+    assert.equal(await forcedRow.getByRole("button", { name: "允许本次会话连续保存", exact: true }).count(), 0)
+    assert.equal((await act("撤销授权", continuousRow)).status(), 200)
+    const revoked = await call("save_session", { sessionId, expectedRevision: revision })
+    assert.equal(revoked.error.code, "save_approval_required")
+    const revokedRow = page.getByTestId(`save-approval-${revoked.error.approval.approvalRequestId}`)
+    await revokedRow.getByText("待确认", { exact: true }).waitFor()
+    assert.equal((await act("允许本次会话连续保存", revokedRow)).status(), 200)
     await previewPage.close()
     assert.ok((await call("close_session", { sessionId })).ok)
     sessionId = ""
@@ -134,9 +180,21 @@ export async function saveGrantSmoke(context: BrowserContext, host: { origin: st
     } })
     assert.ok(readback.ok, JSON.stringify(readback))
     assert.equal(readback.data.revision, reopened.data.revision)
-    assert.equal(readback.data.entity.properties.text, "Saved after approval")
+    assert.equal(readback.data.entity.properties.text, "Saved again with session permission")
+    const afterReopen = await call("save_session", { sessionId, expectedRevision: reopened.data.revision })
+    assert.equal(afterReopen.error.code, "save_approval_required", "reopening does not inherit permission")
+    const locked = page.waitForResponse(response => response.url().endsWith("/owner-session") && response.request().method() === "DELETE")
+    await page.getByRole("button", { name: "锁定授权管理", exact: true }).click()
+    assert.equal((await locked).status(), 200)
+    await key.waitFor()
+    assert.equal(await key.inputValue(), "")
+    const reopenedRow = page.getByTestId(`save-approval-${afterReopen.error.approval.approvalRequestId}`)
+    await reopenedRow.getByText("待确认", { exact: true }).waitFor()
+    assert.equal(await reopenedRow.getByRole("button", { name: "允许本次会话连续保存", exact: true }).isEnabled(), false)
+    assert.equal((await context.cookies()).some(cookie => cookie.name === "fairygui_maker_owner"), false)
     assert.deepEqual(errors, [])
-    return { ownerConfirmation: true, noWriteBeforeApproval: true, realDiskSave: true, singleUse: true, reload: true, revoke: true, reject: true, reopenReadback: true, saveInvalidatesPreview: true }
+    return { ownerConfirmation: true, ownerCookie: true, ownerLock: true, sessionPermission: true, repeatedDiskSaves: true, forceStillRequiresApproval: true,
+      noWriteBeforeApproval: true, realDiskSave: true, singleUse: true, reload: true, revoke: true, reject: true, reopenReadback: true, saveInvalidatesPreview: true }
   } finally {
     if (sessionId) await call("close_session", { sessionId }).catch(() => undefined)
     await transport.terminateSession().catch(() => undefined)

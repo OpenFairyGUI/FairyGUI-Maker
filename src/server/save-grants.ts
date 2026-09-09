@@ -21,8 +21,10 @@ const saveApprovalSchema = z.strictObject({
   operation: z.enum(["saveSession", "materializeSession"]), canonicalProjectPath: z.string().max(4_096),
   targetPath: z.string().max(4_096).nullable(), force: z.boolean(), mode: z.string().nullable(), reason: z.string().max(1_000).nullable(),
   operationDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  scope: z.enum(["once", "session"]),
+  sessionEligible: z.boolean(),
   status: z.enum(["pending", "approved", "consumed", "rejected", "revoked", "expired", "stale"]),
-  createdAt: z.string().datetime(), expiresAt: z.string().datetime(), approvalGrantId: z.string().uuid().optional(),
+  createdAt: z.string().datetime(), expiresAt: z.string().datetime().nullable(), approvalGrantId: z.string().uuid().optional(),
   decidedAt: z.string().datetime().optional(), consumedAt: z.string().datetime().optional(),
 })
 export type SaveApproval = z.infer<typeof saveApprovalSchema>
@@ -52,7 +54,11 @@ export function hostBackendFailure(code: string, message: string, approval?: Sav
 
 const active = (request: SaveApproval) => request.status === "pending" || request.status === "approved"
 
-// Host-local, single-use authority. It is deliberately not persisted or exposed as an MCP approval tool.
+function isOrdinarySave(request: Pick<SaveApproval, "operation" | "targetPath" | "force" | "mode">) {
+  return request.operation === "saveSession" && request.targetPath === null && !request.force && request.mode === null
+}
+
+// Host-local authority; neither owner verification nor grants are exposed as MCP tools or persisted.
 export class HostSaveGrants {
   private readonly requests = new Map<string, SaveApproval>()
   private readonly closing = new Map<string, number>()
@@ -67,9 +73,9 @@ export class HostSaveGrants {
   prune() {
     for (const request of this.requests.values()) {
       if (!active(request)) continue
-      if (Date.parse(request.expiresAt) <= Date.now()) { request.status = "expired"; continue }
+      if (request.expiresAt !== null && Date.parse(request.expiresAt) <= Date.now()) { request.status = "expired"; continue }
       const session = this.runtime.getSession({ sessionId: request.sessionId })
-      if (this.closing.has(request.sessionId) || !session.ok || session.data.revision !== request.revision
+      if (this.closing.has(request.sessionId) || !session.ok || (request.scope === "once" && session.data.revision !== request.revision)
         || session.data.canonicalProjectPath !== request.canonicalProjectPath) request.status = "stale"
     }
   }
@@ -92,16 +98,21 @@ export class HostSaveGrants {
     this.invalidateSession(sessionId)
   }
 
-  decide(id: string, decision: "approve" | "reject" | "revoke") {
+  decide(id: string, decision: "approve" | "approve-session" | "reject" | "revoke") {
     this.prune()
     const request = this.requests.get(id)
     if (!request) return { error: "Save approval not found", status: 404 as const }
     if ((decision === "revoke" && request.status !== "approved") || (decision !== "revoke" && request.status !== "pending")) {
       return { error: `Save approval is ${request.status}; request a fresh approval if needed`, status: 409 as const }
     }
-    request.status = decision === "approve" ? "approved" : decision === "reject" ? "rejected" : "revoked"
+    if (decision === "approve-session" && !isOrdinarySave(request)) {
+      return { error: "Only ordinary saves to the original project can receive session permission", status: 409 as const }
+    }
+    const approved = decision === "approve" || decision === "approve-session"
+    request.status = approved ? "approved" : decision === "reject" ? "rejected" : "revoked"
     request.decidedAt = new Date().toISOString()
-    if (decision === "approve") request.approvalGrantId = randomUUID()
+    if (approved) request.approvalGrantId = randomUUID()
+    if (decision === "approve-session") { request.scope = "session"; request.expiresAt = null }
     return { approval: { ...request } }
   }
 
@@ -123,7 +134,9 @@ export class HostSaveGrants {
       reason: "reason" in parsed.data ? parsed.data.reason ?? null : null,
     }
     const operationDigest = createHash("sha256").update(JSON.stringify(details)).digest("hex")
-    let request = [...this.requests.values()].find((candidate) => active(candidate) && candidate.operationDigest === operationDigest)
+    if (isOrdinarySave(details) && [...this.requests.values()].some((candidate) => candidate.scope === "session" && candidate.status === "approved"
+      && candidate.sessionId === sessionId && candidate.canonicalProjectPath === details.canonicalProjectPath)) return undefined
+    let request = [...this.requests.values()].find((candidate) => candidate.scope === "once" && active(candidate) && candidate.operationDigest === operationDigest)
     if (request?.status === "approved") {
       // Consume synchronously; the MCP policy delegates the one Backend call after authorization.
       request.status = "consumed"
@@ -137,12 +150,12 @@ export class HostSaveGrants {
         else return hostBackendFailure("save_approval_limit", "Too many pending save approvals. Resolve them in Workbench or wait for expiry.")
       }
       request = {
-        ...details, operationDigest, approvalRequestId: randomUUID(), status: "pending",
+        ...details, operationDigest, approvalRequestId: randomUUID(), status: "pending", scope: "once", sessionEligible: isOrdinarySave(details),
         createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + SAVE_GRANT_TTL_MS).toISOString(),
       }
       this.requests.set(request.approvalRequestId, request)
     }
-    return hostBackendFailure("save_approval_required", "No files were written. Ask the Host owner to approve this exact request in Workbench using their separate approval token, then retry the same tool arguments once. Never obtain or supply the owner's approval token yourself.", request)
+    return hostBackendFailure("save_approval_required", "No files were written. Ask the Host owner to verify once in Workbench, then approve this save or permit ordinary saves for this project session. Force-save, explicit target paths and materialization always need one-time approval. Retry the same tool arguments after confirmation; never obtain the owner's credentials or approve yourself.", request)
   }
 
   close() {

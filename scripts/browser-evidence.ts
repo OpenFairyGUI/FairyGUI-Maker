@@ -36,8 +36,8 @@ export function expectedDiagnostic(d: BrowserDiagnostic): string | undefined {
   if (d.phase.startsWith("delivery-") && /\/api\/render-sessions\/[^/]+\/(results|interactions)$/.test(url)
     && (d.kind === "requestfailed" && d.message === "net::ERR_FAILED"
       || d.kind === "http" && d.status === 503 || d.kind === "console.error" && /ERR_FAILED|503/.test(d.message))) return "injected delivery/ACK loss"
-  if (d.phase === "save-grants" && /\/api\/save-approvals\/[^/]+\/decision$/.test(url)
-    && (d.kind === "http" && d.status === 403 || d.kind === "console.error" && /403/.test(d.message))) return "ordinary token cannot approve saves"
+  if (d.phase === "save-grants" && /\/api\/save-approvals\/(?:owner-session|[^/]+\/decision)$/.test(url)
+    && (d.kind === "http" && d.status === 403 || d.kind === "console.error" && /403/.test(d.message))) return "ordinary token cannot verify ownership or approve saves"
   if (d.phase === "save-grants" && d.kind === "requestfailed" && d.method === "GET" && /\/api\/save-approvals$/.test(url)
     && d.message === "net::ERR_ABORTED" && d.resourceType === "fetch" && d.navigation === false) return "approval decision invalidates and replaces the background list query"
   const probeTarget = /http:\/\/127\.0\.0\.1:\d+\/(?:mcp|api\/(?:status|projects(?:\/[^/]+\/source-index)?|save-approvals(?:\/forged\/decision)?|artifacts\/[^/]+\/files\/Smoke\.fui))(?:[.'"\s]|$)/

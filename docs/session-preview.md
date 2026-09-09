@@ -8,7 +8,7 @@ Maker 固定安装公开发布的 `@openfairygui/core/backend/mcp@0.5.0-alpha.2`
 2. Dashboard 活跃工程会话行点击“预览会话”；MCP 等价入口是 `open_session_preview({sessionId, expectedRevision})`。
 3. 打开返回的 `project.viewerUrl`。浏览器注册 renderer 后，复用 `list_viewer_components`、`render_component_preview`、observation、capture 和 `run_ui_scenario`。
 4. Backend 修改或保存使旧 renderer 失效；点击“刷新工程”读取新版本。页面显示真实 Backend revision 和 dirty 状态。关闭会话会删除对应预览。
-5. 用户请求保存时，以明确的 `expectedRevision` 调用 save/materialize。所有者在 Workbench 确认后，重试完全相同的参数一次；保存成功后检查结果及 dirty/save 状态。需要持久化验收时，关闭、重开同一授权工程，读回保存字段并核对重开 revision。
+5. 用户请求保存时，以明确的 `expectedRevision` 调用 save/materialize。没有权限时，由所有者在 Workbench 验证一次身份并选择会话普通保存授权或单次确认，再重试原参数；已有会话权限时，后续普通保存不重复确认。保存成功后检查结果及 dirty/save 状态。需要持久化验收时，关闭、重开同一授权工程，读回保存字段并核对重开 revision；重开不会继承旧会话保存权限。
 
 `open_session_preview` 不保存、不请求 Save Grant，不把临时 Viewer 操作写回 Backend。文件目录绑定与 CLI 快照仍有自己的刷新规则。Asset Manager 需要完整资源扫描，因此不接受按组件加载字节的会话预览。
 
@@ -24,7 +24,7 @@ Host 的 `sourceRevision` 是绑定 ID、预览代次和 Backend 元数据的身
 
 ## MCP 与授权边界
 
-Host 通过公共 `instructions` 提供 Agent 指引，通过 `toolPolicies` 为 save/materialize 分别声明 Host 失败 schema。授权存储只读取会话元数据，在 `beforeCall` 同步消费完整操作、revision 和选项绑定的授权；返回 `undefined` 后由 MCP 调用 Backend 一次。会话不可用时返回 `save_session_unavailable`，不放行写入。
+Host 通过公共 `instructions` 提供 Agent 指引，通过 `toolPolicies` 为 save/materialize 分别声明 Host 失败 schema。`beforeCall` 检查当前 revision，允许已授权会话向原工程普通保存，或同步消费完整操作、revision 和选项绑定的单次授权；返回 `undefined` 后由 MCP 调用 Backend 一次。force、显式 targetPath 和完整物化不借用会话权限。会话不可用时返回 `save_session_unavailable`，不放行写入。
 
 原运行时结果跟踪仍负责 dirty/save 元数据、关闭保护及预览失效。Host 失败在进入 Backend 前停止；授权后的 Backend 结果继续通过上游权威 schema，保留 revision 队列、路径、磁盘与事务边界。读取及预览不需要 Save Grant。
 
@@ -46,7 +46,7 @@ pnpm test:browser
 |---|---|
 | 公开 MCP 组合 | 初始化指引、连接后新增工具及注册句柄生命周期、安装包文档资源与 prompts |
 | 完整 Host 发现 | Backend 入口与全部 12 个 Maker 工具 |
-| 保存授权 | 独立所有者凭证、完整选项绑定、并发仅一次、失败消耗、撤销/拒绝/过期、同 ID 重开失效 |
+| 保存授权 | 独立所有者验证及 Cookie 锁定、跨 revision 连续普通保存、特殊操作单次确认、单次并发仅一次/失败消耗、撤销/拒绝/过期、同 ID 重开失效 |
 | Backend 写入边界 | revision 队列、目标路径、磁盘及 Host 私有目录隔离 |
 | 会话预览 | 模型与资源 revision 一致、跨包资源、字体依赖、编辑/保存/关闭失效、PNG 及保存后重开读回 |
 

@@ -10,8 +10,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { createNodeBackendRuntime } from "@openfairygui/backend/node"
 import { createOpenFairyGuiMcpServer, type OpenFairyGuiBackendRuntime, type OpenFairyGuiMcpToolPolicy } from "@openfairygui/mcp"
-import { Hono } from "hono"
-import { getCookie, setCookie } from "hono/cookie"
+import { Hono, type Context } from "hono"
+import { deleteCookie, getCookie, setCookie } from "hono/cookie"
 import { HTTPException } from "hono/http-exception"
 import pino from "pino"
 import { z } from "zod"
@@ -45,10 +45,13 @@ import {
 const require = createRequire(import.meta.url)
 const { version: PACKAGE_VERSION } = require("../../package.json") as { version: string }
 const COOKIE_NAME = "fairygui_maker_token"
+const OWNER_COOKIE_NAME = "fairygui_maker_owner"
+const OWNER_COOKIE_PATH = "/api/save-approvals"
+const MAX_OWNER_SESSIONS = 32
 const WEB_DIST = fileURLToPath(new URL("../../dist/web", import.meta.url))
 const MAX_MCP_SESSIONS = 32
 export const MCP_SESSION_IDLE_TTL_MS = 30 * 60_000
-const HOST_INSTRUCTIONS = "FairyGUI authoring, Viewer, and Player service. Use backend sessions for revision-checked project edits. Save and materialize require expectedRevision and a one-time Host Save Grant. On save_approval_required, ask the user to confirm the exact request in Workbench, then retry unchanged arguments; never obtain or supply their separate approval token. Use stable IDs returned by list/inspect tools; Viewer and Player operations affect render-session memory only."
+const HOST_INSTRUCTIONS = "FairyGUI authoring, Viewer, and Player service. Use backend sessions for revision-checked project edits. Every save requires expectedRevision. The owner can allow ordinary saves for one project session in Workbench; force-save, explicit target paths and materialization still require a one-time Host Save Grant. On save_approval_required, ask the owner to verify once in Workbench and choose the save permission, then retry unchanged arguments; never obtain owner credentials or approve yourself. Session permission ends on revoke, project close/reopen or Host restart. Use stable IDs returned by list/inspect tools; Viewer and Player operations affect render-session memory only."
 const VIEW_ONLY_INSTRUCTIONS = "Read-only FairyGUI Viewer and Player service. Use stable IDs returned by list tools. Viewer operations never write project files; backend authoring and save tools are unavailable in this mode."
 const logger = pino({ level: process.env.FAIRYGUI_MAKER_LOG_LEVEL ?? "info" })
 const TRACKED_METHODS = new Set([
@@ -342,6 +345,7 @@ function registerApi(
     importsEnabled: boolean
     saveGrants: HostSaveGrants
     approvalToken: string
+    ownerSessions: Set<string>
     saveApprovalsEnabled: boolean
     runtime: OpenFairyGuiBackendRuntime
     ensureSessionPreview(sessionId: string, expectedRevision: number): { ok: true; project: RegisteredProject } | Extract<ReturnType<typeof sessionPreviewResult>, { ok: false }>
@@ -349,6 +353,9 @@ function registerApi(
     removeDraftPreview(draftId: string): void
   },
 ) {
+  const ownerVerified = (c: Context) => readState().ownerSessions.has(getCookie(c, OWNER_COOKIE_NAME) ?? "")
+  const canApprove = (c: Context) => tokensMatch(c.req.header("x-maker-approval-token"), readState().approvalToken)
+    || (c.req.header("origin") === readState().origin && ownerVerified(c))
   return registerImportDraftApi(app, () => {
     const { importDraftStore, importsEnabled, ensureDraftPreview, removeDraftPreview } = readState()
     return { importDraftStore, importsEnabled, ensureDraftPreview, removeDraftPreview }
@@ -389,13 +396,30 @@ function registerApi(
     })
     .get("/api/save-approvals", (c) => {
       const { saveGrants, saveApprovalsEnabled } = readState()
-      return c.json({ enabled: saveApprovalsEnabled, approvals: saveApprovalsEnabled ? saveGrants.list() : [] })
+      return c.json({ enabled: saveApprovalsEnabled, ownerVerified: saveApprovalsEnabled && ownerVerified(c), approvals: saveApprovalsEnabled ? saveGrants.list() : [] })
     })
-    .post("/api/save-approvals/:approvalRequestId/decision", zValidator("json", z.object({ decision: z.enum(["approve", "reject", "revoke"]) }).strict()), (c) => {
-      const { saveGrants, approvalToken, saveApprovalsEnabled } = readState()
+    .post("/api/save-approvals/owner-session", (c) => {
+      const { approvalToken, ownerSessions, saveApprovalsEnabled } = readState()
+      if (!saveApprovalsEnabled) return c.json({ error: "Owner verification is unavailable in read-only mode" }, 403)
+      if (!tokensMatch(c.req.header("x-maker-approval-token"), approvalToken)) return c.json({ error: "Host owner approval token required; the MCP token cannot verify ownership" }, 403)
+      if (ownerVerified(c)) return c.json({ ownerVerified: true })
+      if (ownerSessions.size >= MAX_OWNER_SESSIONS) return c.json({ error: "Owner session limit reached; lock an existing browser session or restart Host" }, 503)
+      const session = randomBytes(24).toString("base64url")
+      ownerSessions.add(session)
+      setCookie(c, OWNER_COOKIE_NAME, session, { httpOnly: true, sameSite: "Strict", path: OWNER_COOKIE_PATH })
+      return c.json({ ownerVerified: true })
+    })
+    .delete("/api/save-approvals/owner-session", (c) => {
+      if (c.req.header("origin") !== readState().origin) return c.json({ error: "Same-origin owner session required" }, 403)
+      readState().ownerSessions.delete(getCookie(c, OWNER_COOKIE_NAME) ?? "")
+      deleteCookie(c, OWNER_COOKIE_NAME, { path: OWNER_COOKIE_PATH })
+      return c.json({ ownerVerified: false })
+    })
+    .post("/api/save-approvals/:approvalRequestId/decision", zValidator("json", z.object({ decision: z.enum(["approve", "approve-session", "reject", "revoke"]) }).strict()), (c) => {
+      const { saveGrants, saveApprovalsEnabled } = readState()
       if (!saveApprovalsEnabled) return c.json({ error: "Save approvals are unavailable in read-only mode" }, 403)
-      // Normal bearer/cookie auth is insufficient: an MCP client can bootstrap that cookie itself.
-      if (!tokensMatch(c.req.header("x-maker-approval-token"), approvalToken)) return c.json({ error: "Host owner approval token required; the MCP token cannot approve saves" }, 403)
+      // Cookie decisions need an exact Origin; normal bearer/cookie auth cannot create owner authority.
+      if (!canApprove(c)) return c.json({ error: "Verify Host ownership in Workbench before changing save permissions" }, 403)
       const result = saveGrants.decide(c.req.param("approvalRequestId"), c.req.valid("json").decision)
       return "error" in result ? c.json({ error: result.error }, result.status) : c.json(result)
     })
@@ -714,6 +738,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     allowedProjectRoots: [allowedProjectRoot], fileSystem: await createHostBackendFileSystem(dataDir),
   })
   const saveGrants = new HostSaveGrants(backend)
+  const ownerSessions = new Set<string>()
   const savePolicy = (operation: "saveSession" | "materializeSession"): OpenFairyGuiMcpToolPolicy => ({
     failureSchema: saveGrantFailureSchema,
     beforeCall(input) {
@@ -968,6 +993,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     importsEnabled: !viewOnly,
     saveGrants,
     approvalToken,
+    ownerSessions,
     saveApprovalsEnabled: !viewOnly,
     runtime,
     ensureSessionPreview,
@@ -1047,6 +1073,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
       closing = true
       clearInterval(uploadCleanup)
       saveGrants.close()
+      ownerSessions.clear()
       await Promise.all([artifactStore.close(), importDraftStore.close()])
       renderBroker.close()
       await Promise.allSettled([...mcpSessions.values()].map((record) => record.server.close()))
@@ -1167,7 +1194,7 @@ Options:
   --version          Print the installed Maker version
 
 Environment: FAIRYGUI_MAKER_TOKEN, FAIRYGUI_MAKER_APPROVAL_TOKEN, FAIRYGUI_MAKER_PORT, FAIRYGUI_MAKER_DATA_DIR, FAIRYGUI_MAKER_LOG_LEVEL
-Host save approval: the owner confirms each revision-bound save in Workbench using a separate approval token, never the MCP token.
+Host save approval: verify ownership once in Workbench using the separate approval token, then allow ordinary saves for a project session or approve once. Force-save, explicit target paths and materialization still require one-time approval. Every save remains revision-checked.
 CLI reimport approval: close the project in Host/editor, review --dry-run, then explicitly run --apply <planDigest>. This is a local owner command, not an MCP save approval bypass.
 `)
     return null
@@ -1228,7 +1255,7 @@ CLI reimport approval: close the project in Host/editor, review --dry-run, then 
       process.stdout.write(`Host save approval token (owner only; do not give to MCP clients): ${host.approvalToken}\n`)
     } else {
       process.stdout.write(process.env.FAIRYGUI_MAKER_APPROVAL_TOKEN
-        ? "Host saves require Workbench confirmation with the separately configured FAIRYGUI_MAKER_APPROVAL_TOKEN.\n"
+        ? "Verify ownership once in Workbench with FAIRYGUI_MAKER_APPROVAL_TOKEN, then choose session or one-time save permission.\n"
         : "Host saves are blocked: restart interactively or set a separate FAIRYGUI_MAKER_APPROVAL_TOKEN for owner confirmation.\n")
     }
   }
