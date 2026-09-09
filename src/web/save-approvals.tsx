@@ -30,8 +30,8 @@ export function SaveApprovalsCard() {
       const response = await client.api["save-approvals"][":approvalRequestId"].decision.$post({
         param: { approvalRequestId: id }, json: { decision: action },
       }, { init: { signal: AbortSignal.timeout(10_000) } })
+      const body = await response.json()
       if (!response.ok) {
-        const body = await response.json()
         throw new Error("error" in body && typeof body.error === "string" ? body.error : `保存授权失败 (${response.status})`)
       }
     },
@@ -47,8 +47,8 @@ export function SaveApprovalsCard() {
       const response = action === "unlock"
         ? await endpoint.$post({}, { headers: { "x-maker-approval-token": token }, init: { signal: AbortSignal.timeout(10_000) } })
         : await endpoint.$delete({}, { init: { signal: AbortSignal.timeout(10_000) } })
+      const body = await response.json()
       if (!response.ok) {
-        const body = await response.json()
         throw new Error("error" in body ? body.error : "所有者验证失败")
       }
       decision.reset()
