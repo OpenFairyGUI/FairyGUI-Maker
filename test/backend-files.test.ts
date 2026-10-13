@@ -76,6 +76,6 @@ test("Host project writes exclude private data, ancestors and aliases while sibl
     throw error
   } finally {
     if (sessionId) await call("close_session", { sessionId })
-    await client.close(); await host.close(); await rm(root, { recursive: true, force: true })
+    await client.close(); await host.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 })
   }
 })
