@@ -94,6 +94,7 @@ const runtime = {
   objectPaths: new WeakMap<object, string>(),
   records: new Map<string, ComponentRecord>(),
   recordByObject: new WeakMap<object, ComponentRecord>(),
+  gearBaselines: new WeakMap<object, Map<UamGearBinding, () => void>>(),
   controls: new Map<string, InteractiveControl>(),
   scrollAreas: new Map<string, ScrollState>(),
   listItemOwners: new Map<string, { listPath: string; index: number }>(),
@@ -1164,6 +1165,12 @@ function applyRecordGears(record: ComponentRecord) {
     const object = record.nodes.get(node.id)
     if (!object) continue
     let visible = node.visible
+    // Capture before any gear writes: a null page value restores the owner's initial property.
+    let baselines = runtime.gearBaselines.get(object)
+    if (!baselines) runtime.gearBaselines.set(object, baselines = new Map())
+    for (const gear of node.gears) {
+      if (gear.kind !== "display" && gear.kind !== "display2" && !baselines.has(gear)) baselines.set(gear, captureGearBaseline(object, gear))
+    }
     for (const gear of node.gears) {
       const controller = record.resource.component.controllers.find(({ name }) => name === gear.controllerName)
       const selectedIndex = controller ? record.controllers.get(controller.name) ?? controller.selectedIndex : -1
@@ -1182,9 +1189,63 @@ function applyRecordGears(record: ComponentRecord) {
       }
       const value = gear.states.find((state) => state.pageId === pageId)?.value ?? gear.defaultValue
       if (value) applyGearValue(object, gear, value)
+      else baselines.get(gear)?.()
     }
     object.visible = visible
   }
+}
+
+function captureGearBaseline(object: any, gear: Exclude<UamGearBinding, { kind: "display" | "display2" }>): () => void {
+  if (gear.kind === "look") {
+    const { alpha, rotation, grayed, touchable } = object
+    return () => applyGearValue(object, gear, { alpha, rotation, grayed, touchable })
+  }
+  if (gear.kind === "xy") {
+    const { x, y } = object
+    return () => applyGearValue(object, gear, { x, y })
+  }
+  if (gear.kind === "size") {
+    const { width, height, scaleX, scaleY } = object
+    return () => applyGearValue(object, gear, { width, height, scaleX, scaleY })
+  }
+  if (gear.kind === "color") {
+    const color = "color" in object ? object.color : object.getProp?.(fgui.ObjectPropID.Color)
+    const outlineColor = "strokeColor" in object ? object.strokeColor : null
+    return () => {
+      if (color !== undefined) setObjectColor(object, color)
+      if (outlineColor !== null) object.strokeColor = outlineColor
+    }
+  }
+  if (gear.kind === "animation") {
+    const { frame, playing } = object
+    return () => applyGearValue(object, gear, { frame, playing })
+  }
+  if (gear.kind === "fontSize") {
+    const target = "fontSize" in object ? object : findChildByName(object, "title")
+    const fontSize = target?.fontSize
+    return () => { if (target) target.fontSize = fontSize }
+  }
+  if (gear.kind === "text") {
+    const target = typeof object?.text === "string" ? object : findChildByName(object, "title")
+    const text = target && "text" in target ? target.text : undefined
+    return () => { if (text !== undefined) target.text = text }
+  }
+  const target = (object instanceof fgui.GLoader || object instanceof fgui.GImage) ? object : findChildByName(object, "icon")
+  if (target instanceof fgui.GImage) {
+    const texture = target.image.texture
+    return () => { target.image.texture = texture }
+  }
+  if (target instanceof fgui.GLoader) {
+    const { texture } = target.content
+    const { sourceWidth, sourceHeight } = target
+    return () => {
+      target.content.texture = texture
+      target.sourceWidth = sourceWidth
+      target.sourceHeight = sourceHeight
+      target.updateLayout?.()
+    }
+  }
+  return () => {}
 }
 
 function applyGearValue(object: any, gear: Exclude<UamGearBinding, { kind: "display" | "display2" }>, value: any) {
@@ -1633,6 +1694,7 @@ function resetScene() {
   runtime.objectPaths = new WeakMap()
   runtime.records.clear()
   runtime.recordByObject = new WeakMap()
+  runtime.gearBaselines = new WeakMap()
   runtime.controls.clear()
   runtime.scrollAreas.clear()
   runtime.listItemOwners.clear()

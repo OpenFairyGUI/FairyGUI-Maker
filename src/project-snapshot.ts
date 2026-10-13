@@ -47,11 +47,20 @@ export function snapshotFileSystem(paths: Iterable<string>, read: (path: string)
     readFile: async (path) => decoder.decode(await read(projectPath(path))),
     readFileRaw: (path) => read(projectPath(path)),
     writeFile: readonly, writeFileRaw: readonly, mkdir: readonly,
-    readdir: async (path) => { const entries = directories.get(projectPath(path)); if (!entries) throw new Error("project_directory_not_found"); return [...entries].sort() },
+    readdir: async (path) => {
+      const entries = directories.get(projectPath(path))
+      if (!entries) throw fileSystemError(files.has(projectPath(path)) ? "ENOTDIR" : "ENOENT", "project_directory_not_found")
+      return [...entries].sort()
+    },
     exists: async (path) => files.has(projectPath(path)) || directories.has(projectPath(path)),
     join: (...paths) => projectPath(paths.filter(Boolean).join("/")),
     dirname: (path) => projectPath(path).split("/").slice(0, -1).join("/"),
   }
+}
+
+// Core distinguishes absent optional directories (ENOENT) and file probes (ENOTDIR) from read failures.
+function fileSystemError(code: "ENOENT" | "ENOTDIR", message: string) {
+  return Object.assign(new Error(message), { code })
 }
 
 export async function captureProjectSnapshot(source: ProjectSnapshotSource, options: ProjectScanOptions = {}) {
