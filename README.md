@@ -228,7 +228,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 ## 当前状态与边界
 
 - 项目整体仍处于开发初期，暂不能用于实际项目开发。下列内容描述已接入的能力与当前限制，不构成完整性、稳定性或生产可用性承诺。
-- 已接入 Backend `0.5.0-alpha.2`：`query_entity` 读取当前属性；`read_session_state` 与 `read_resource_bytes` 提供绑定 revision 的模型和主资源字节。事务后必须读回所改字段，不能只用成功返回或 revision 变化证明结果。
+- 已接入 Backend `0.6.3`：`query_entity` 读取当前属性；`read_session_state` 与 `read_resource_bytes` 提供绑定 revision 的模型和主资源字节。事务后必须读回所改字段，不能只用成功返回或 revision 变化证明结果。
 - Dashboard 的“预览会话”和 `open_session_preview` 可预览未保存修改。模型和所选组件资源来自公开 Backend 接口；编辑、保存或关闭会话会使旧 renderer 失效，刷新后读取新版本。详情见 [会话预览](./docs/session-preview.md)。
 - Maker 与 Backend 工具通过同一 MCP 服务发现；Host 使用公开 `instructions` 和 `toolPolicies` 接口保留自己的指引及保存授权结果。批准后由 Backend 执行一次保存，保留 revision、路径和磁盘检查；完整读回、预览、授权保存与重开验收见[会话预览接入验收](./docs/session-preview.md)。
 - Host 只绑定 `127.0.0.1`，并校验 Host、Origin 和访问令牌。
@@ -248,7 +248,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 | 项目 | `0.1.x` 基线 |
 |---|---|
 | Node.js | `>=22.18`；CI 覆盖 Node 22 与 24 |
-| OpenFairyGUI | `@openfairygui/core/backend/mcp` `0.5.0-alpha.2` |
+| OpenFairyGUI | `@openfairygui/core/backend/mcp` `0.6.3` |
 | MCP | Streamable HTTP；Viewer protocol v7 |
 | Viewer / Player runtime | 冻结的 LayaAir 3.3.10 + FairyGUI Web runtime |
 | 浏览器 | 当前稳定版 Chrome 与 Edge；自动门禁使用 Chromium |

@@ -11,6 +11,11 @@ function normalize(path: string): string {
   return `/${parts.join('/')}`;
 }
 
+// Core distinguishes absent optional directories (ENOENT) and file probes (ENOTDIR) from read failures.
+function fileSystemError(code: 'ENOENT' | 'ENOTDIR', message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
 export class MemoryFileSystem implements FileSystem {
   private readonly files = new Map<string, string | Uint8Array>();
   private readonly directories = new Set(['/']);
@@ -45,19 +50,19 @@ export class MemoryFileSystem implements FileSystem {
 
   async readFile(path: string): Promise<string> {
     const value = this.files.get(normalize(path));
-    if (value === undefined) throw new Error(`File not found: ${path}`);
+    if (value === undefined) throw fileSystemError('ENOENT', `File not found: ${path}`);
     return typeof value === 'string' ? value : new TextDecoder().decode(value);
   }
 
   async readFileRaw(path: string): Promise<Uint8Array> {
     const value = this.files.get(normalize(path));
-    if (value === undefined) throw new Error(`File not found: ${path}`);
+    if (value === undefined) throw fileSystemError('ENOENT', `File not found: ${path}`);
     return typeof value === 'string' ? new TextEncoder().encode(value) : new Uint8Array(value);
   }
 
   async readdir(path: string): Promise<string[]> {
     const directory = normalize(path);
-    if (!this.directories.has(directory)) throw new Error(`Not a directory: ${path}`);
+    if (!this.directories.has(directory)) throw fileSystemError(this.files.has(directory) ? 'ENOTDIR' : 'ENOENT', `Not a directory: ${path}`);
     const prefix = directory === '/' ? '/' : `${directory}/`;
     const children = new Set<string>();
     for (const candidate of [...this.directories, ...this.files.keys()]) {

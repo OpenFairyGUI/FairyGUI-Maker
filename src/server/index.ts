@@ -70,9 +70,6 @@ const TRACKED_METHODS = new Set([
   "materializeSession",
   "closeSession",
   "getEvents",
-  "getJob",
-  "listJobs",
-  "cancelJob",
   "getCacheSnapshot",
   "refreshCache",
 ])
