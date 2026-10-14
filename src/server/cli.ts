@@ -16,6 +16,7 @@ export function readCliArguments(argv: string[]) {
   let applyDigest: string | undefined
   let headlessDisabled = false
   let headlessChannel: HeadlessBrowserChannel | undefined
+  const allowSave: string[] = []
   const positional: string[] = []
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -56,6 +57,12 @@ export function readCliArguments(argv: string[]) {
       headlessChannel = channel as HeadlessBrowserChannel
       continue
     }
+    if (argument === "--allow-save") {
+      const project = argv[++index]
+      if (!project) throw new Error("--allow-save requires a project directory or .fairy path")
+      allowSave.push(project)
+      continue
+    }
     if (argument.startsWith("-")) throw new Error(`Unknown option: ${argument}`)
     positional.push(argument)
   }
@@ -63,6 +70,7 @@ export function readCliArguments(argv: string[]) {
   if ((positional[0] === "import" || positional[0] === "reimport") && (headlessDisabled || headlessChannel)) {
     throw new Error("--no-headless and --headless-browser apply only when starting the Host")
   }
+  if (allowSave.length && positional.length) throw new Error("--allow-save applies only to the full Host; view, import and reimport never use Host saves")
   // The Host renders headlessly by default from the CLI; the startMakerHost API stays opt-in.
   const headless = headlessDisabled ? false : headlessChannel ? { channel: headlessChannel } : true
   if (positional[0] === "import") {
@@ -102,7 +110,7 @@ export function readCliArguments(argv: string[]) {
   }
   if (applyDigest !== undefined) throw new Error("--apply requires a reimport command")
   if (outputPath !== undefined || dryRun) throw new Error("--out and --dry-run require an import or reimport command")
-  if (positional.length === 0) return { help: false as const, port, dataDir, projectPath: undefined, headless }
+  if (positional.length === 0) return { help: false as const, port, dataDir, projectPath: undefined, headless, ...(allowSave.length ? { allowSave } : {}) }
   if (positional[0] !== "view" || positional.length !== 2) throw new Error("Usage: fairygui-maker view <project-path> [--port <port>] [--data-dir <path>]")
   return { help: false as const, port, dataDir, projectPath: positional[1], headless }
 }
@@ -115,7 +123,8 @@ export async function runCli(argv = process.argv.slice(2)) {
   }
   if (options.help) {
     process.stdout.write(`Usage:
-  fairygui-maker [view <project-path>] [--port <port>] [--data-dir <path>] [--no-headless | --headless-browser <chrome|msedge|chromium>]
+  fairygui-maker [--allow-save <project>]... [--port <port>] [--data-dir <path>] [--no-headless | --headless-browser <chrome|msedge|chromium>]
+  fairygui-maker view <project-path> [--port <port>] [--data-dir <path>] [--no-headless | --headless-browser <chrome|msedge|chromium>]
   fairygui-maker import <source.fig|source.psd|bundle-directory> --out <new-directory> [--data-dir <path>]
   fairygui-maker import <source.fig|source.psd|bundle-directory> --dry-run [--data-dir <path>]
   fairygui-maker import inspect <source.fig|source.psd|bundle-directory> [--data-dir <path>]
@@ -129,6 +138,9 @@ Options:
   --apply <digest>   Explicitly approve the exact reimport planDigest from --dry-run; conflicts and stale inputs are refused
   --port <port>      Localhost port (default: 3847)
   --data-dir <path>  Private artifact, draft, and runtime data directory (default: .fairygui-maker)
+  --allow-save <project>
+                     Pre-authorize ordinary saves to this project directory (or .fairy file) for this Host process.
+                     Repeatable. Force-save, explicit target paths and materialization still need one-time approval
   --no-headless      Never open a Host-owned headless browser; render tools then need an open Workbench page
   --headless-browser <name>
                      Browser for headless rendering: chrome, msedge, or chromium (Playwright's, installed separately).
@@ -193,12 +205,17 @@ CLI reimport approval: close the project in Host/editor, review --dry-run, then 
     if (host.project) process.stdout.write(`Open Viewer: ${host.project.viewerUrl}\n`)
   }
   if (!host.project) {
+    if (host.preauthorizedProjects.length) {
+      process.stdout.write(`Ordinary saves pre-authorized (--allow-save): ${host.preauthorizedProjects.join(", ")}\n`)
+    }
     if (!process.env.FAIRYGUI_MAKER_APPROVAL_TOKEN && process.stdout.isTTY) {
       process.stdout.write(`Host save approval token (owner only; do not give to MCP clients): ${host.approvalToken}\n`)
     } else {
       process.stdout.write(process.env.FAIRYGUI_MAKER_APPROVAL_TOKEN
         ? "Verify ownership once in Workbench with FAIRYGUI_MAKER_APPROVAL_TOKEN, then choose session or one-time save permission.\n"
-        : "Host saves are blocked: restart interactively or set a separate FAIRYGUI_MAKER_APPROVAL_TOKEN for owner confirmation.\n")
+        : host.preauthorizedProjects.length
+          ? "Other saves are blocked: restart interactively or set a separate FAIRYGUI_MAKER_APPROVAL_TOKEN for owner confirmation.\n"
+          : "Host saves are blocked: restart interactively or set a separate FAIRYGUI_MAKER_APPROVAL_TOKEN for owner confirmation.\n")
     }
   }
   let stopping = false

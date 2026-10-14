@@ -583,6 +583,12 @@ test("CLI view registers one bounded read-only project snapshot", async () => {
     assert.throws(() => readCliArguments(["--headless-browser", "firefox"]), /requires one of: chrome, msedge, chromium/)
     assert.throws(() => readCliArguments(["--no-headless", "--headless-browser", "chrome"]), /cannot be combined/)
     assert.throws(() => readCliArguments(["import", "source.fig", "--out", "generated", "--no-headless"]), /only when starting the Host/)
+    assert.deepEqual(readCliArguments(["--allow-save", "a", "--allow-save", "b/Demo.fairy"]), {
+      help: false, port: undefined, dataDir: undefined, projectPath: undefined, headless: true, allowSave: ["a", "b/Demo.fairy"],
+    })
+    assert.throws(() => readCliArguments(["--allow-save"]), /requires a project directory/)
+    assert.throws(() => readCliArguments(["view", projectRoot, "--allow-save", projectRoot]), /only to the full Host/)
+    assert.throws(() => readCliArguments(["reimport", projectRoot, "--dry-run", "--allow-save", projectRoot]), /only to the full Host/)
     assert.deepEqual(readCliArguments(["import", "source.fig", "--out", "generated"]), {
       help: false,
       importSource: "source.fig",

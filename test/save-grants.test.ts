@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import test from "node:test"
@@ -354,8 +354,69 @@ test("read-only Hosts cannot issue grants and normal and approval credentials mu
   const host = await startMakerHost({ port: 0, token, dataDir: path.join(root, "data"), projectPath: path.join(root, "project") })
   try {
     const headers = { Authorization: `Bearer ${token}`, "x-maker-approval-token": host.approvalToken, "Content-Type": "application/json" }
-    assert.deepEqual(await (await fetch(`${host.origin}/api/save-approvals`, { headers })).json(), { enabled: false, ownerVerified: false, approvals: [] })
+    assert.deepEqual(await (await fetch(`${host.origin}/api/save-approvals`, { headers })).json(), { enabled: false, ownerVerified: false, approvals: [], preauthorizedProjects: [] })
     assert.equal((await fetch(`${host.origin}/api/save-approvals/owner-session`, { method: "POST", headers })).status, 403)
     assert.equal((await fetch(`${host.origin}/api/save-approvals/anything/decision`, { method: "POST", headers, body: '{"decision":"approve"}' })).status, 403)
   } finally { await host.close() }
+})
+
+test("pre-authorized projects allow only ordinary saves to exactly those project directories", () => {
+  const runtime = new BackendRuntime()
+  const project = liftDocumentToUamProject(new Document())
+  const allowed = path.resolve("projects", "allowed")
+  runtime.openProjectSession({ project, sessionId: "allowed", canonicalProjectPath: allowed })
+  runtime.openProjectSession({ project, sessionId: "nested", canonicalProjectPath: path.join(allowed, "nested") })
+  runtime.openProjectSession({ project, sessionId: "other", canonicalProjectPath: path.resolve("projects", "other") })
+  const grants = new HostSaveGrants(runtime, [allowed])
+  assert.deepEqual(grants.preauthorized(), [allowed])
+  assert.equal(grants.authorize("saveSession", { sessionId: "allowed", expectedRevision: 0 }), undefined)
+  // Pre-authorization replaces the owner step only; revisions and inputs are still checked.
+  assert.equal(errorCode(grants.authorize("saveSession", { sessionId: "allowed", expectedRevision: 1 })), "save_revision_stale")
+  assert.equal(errorCode(grants.authorize("saveSession", { sessionId: "allowed" })), "save_input_invalid")
+  for (const special of [{ force: true }, { targetPath: "elsewhere.fairy" }, { mode: "materializeCleanSession" }]) {
+    approval(grants.authorize("saveSession", { sessionId: "allowed", expectedRevision: 0, ...special }))
+  }
+  approval(grants.authorize("materializeSession", { sessionId: "allowed", expectedRevision: 0 }))
+  approval(grants.authorize("saveSession", { sessionId: "nested", expectedRevision: 0 }))
+  approval(grants.authorize("saveSession", { sessionId: "other", expectedRevision: 0 }))
+  if (process.platform === "win32") {
+    assert.equal(new HostSaveGrants(runtime, [allowed.toUpperCase()]).authorize("saveSession", { sessionId: "allowed", expectedRevision: 0 }), undefined)
+  }
+})
+
+test("--allow-save lets a real Host save ordinary edits without Workbench approval", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "maker-allow-save-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const projectDir = path.join(root, "project")
+  await mkdir(projectDir)
+  const document = new Document()
+  document.getRoot().setProjectId("allow-save-test")
+  document.createPackage("Demo").setId("DEMO0001").addResource(document.createComponent("Before").setId("MAIN0001").setSize(100, 100))
+  await new NodeIO().writeProject(document, path.join(projectDir, "Demo.fairy"))
+  const runtime = () => createNodeBackendRuntime({ allowedProjectRoots: [root] })
+  await assert.rejects(startMakerHost({ port: 0, runtime: runtime(), dataDir: path.join(root, "missing-data"), allowSave: [path.join(root, "missing")] }), /--allow-save project not found/)
+  await assert.rejects(startMakerHost({ port: 0, dataDir: path.join(root, "view-data"), projectPath: projectDir, allowSave: [projectDir] }), /view mode never writes projects/)
+
+  // A .fairy path names its project directory, which is what Backend sessions report.
+  const host = await startMakerHost({ port: 0, runtime: runtime(), dataDir: path.join(root, "host-data"), allowSave: [path.join(projectDir, "Demo.fairy")] })
+  const client = new Client({ name: "allow-save-test", version: "1" })
+  let sessionId = ""
+  const call = async (method: string, args: Record<string, unknown>) => ((await client.callTool({ name: `openfairygui_backend_${method}`, arguments: args })).structuredContent as any).backendResult
+  try {
+    assert.deepEqual(host.preauthorizedProjects, [await realpath(projectDir)])
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${host.origin}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${host.token}` } } }))
+    const listed = await (await fetch(`${host.origin}/api/save-approvals`, { headers: { Authorization: `Bearer ${host.token}` } })).json()
+    assert.deepEqual(listed.preauthorizedProjects, host.preauthorizedProjects)
+    sessionId = (await call("open_session", { projectPath: projectDir })).data.sessionId
+    assert.equal((await call("apply_transaction", { sessionId, expectedRevision: 0, operations: [{ kind: "renameResource", selector: { packageId: "DEMO0001", resourceId: "MAIN0001" }, newName: "After" }] })).ok, true)
+    const saved = await call("save_session", { sessionId, expectedRevision: 1 })
+    assert.equal(saved.ok, true, JSON.stringify(saved))
+    assert.match(await readFile(path.join(projectDir, "assets", "Demo", "After.xml"), "utf8"), /component/)
+    assert.equal((await call("save_session", { sessionId, expectedRevision: 1, force: true })).error.code, "save_approval_required")
+    assert.deepEqual((await (await fetch(`${host.origin}/api/save-approvals`, { headers: { Authorization: `Bearer ${host.token}` } })).json()).approvals.map(({ force }: { force: boolean }) => force), [true])
+  } finally {
+    if (sessionId) await call("close_session", { sessionId }).catch(() => undefined)
+    await client.close().catch(() => undefined)
+    await host.close()
+  }
 })

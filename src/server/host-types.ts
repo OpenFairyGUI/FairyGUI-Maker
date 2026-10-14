@@ -55,6 +55,8 @@ export type StartMakerHostOptions = {
   runtime?: OpenFairyGuiBackendRuntime
   dataDir?: string
   projectPath?: string
+  /** Project directories (or .fairy files) whose ordinary saves need no Workbench approval; force, targetPath and materialize still do. */
+  allowSave?: string[]
   /** Render with a Host-owned headless browser when no Workbench page is connected. Off unless requested. */
   headless?: boolean | { channel?: HeadlessBrowserChannel }
 }

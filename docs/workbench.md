@@ -285,7 +285,9 @@ Cookie: <normal Host Cookie and independent owner Cookie>
 
 状态为 `pending / approved / consumed / rejected / revoked / expired / stale`。会话权限在连续保存后仍为 approved，界面显示“本次会话允许普通保存”；单次的“已消耗”仅表示尝试执行过，应以 backend 结果及磁盘验证判定成功。网络结果不确定时先查询请求与 backend 状态，不自动再次批准或盲目重试。记录有界且只在内存，不是持久审计账本。
 
-`view <path>` 不注册 backend 写工具，也不能批准保存。现有 CLI/Import Draft 向**尚不存在的新目录**物化的工作流保持原边界，不被解释成已有工程的保存授权。当前 MCP 没有 `restore` 或独立的落盘 delete/move 工具；将来开放前必须先接入同一授权策略，不能直接注册。内存中的资源删除/移动会在本次授权保存时落盘，因此界面明确提示覆盖和删除风险。
+所有者也可以在启动 Host 时用 `--allow-save <工程>`（API 为 `allowSave`）预授权指定工程的普通保存：路径启动时解析为真实目录（`.fairy` 文件取其所在目录），必须存在；只与 Backend 会话报告的工程目录精确匹配（Windows 不区分大小写），不覆盖子目录或其他工程，只在本次进程有效，不持久化，MCP 与 REST 都无法授予或修改。命中时 `authorize` 跳过所有者确认，但 revision、输入与磁盘检查不变；force、显式 targetPath、`materializeCleanSession` 和物化仍走单次确认。`GET /api/save-approvals` 返回 `preauthorizedProjects`，Workbench 在“工程保存权限”卡片列出，CLI 启动时也会打印。
+
+`view <path>` 不注册 backend 写工具，也不能批准保存，也不接受 `--allow-save`。现有 CLI/Import Draft 向**尚不存在的新目录**物化的工作流保持原边界，不被解释成已有工程的保存授权。当前 MCP 没有 `restore` 或独立的落盘 delete/move 工具；将来开放前必须先接入同一授权策略，不能直接注册。内存中的资源删除/移动会在本次授权保存时落盘，因此界面明确提示覆盖和删除风险。
 
 此边界约束只持有 Maker API 凭证的客户端，不是针对可读 Host 进程环境/终端或可直接写工程的本机进程的 OS 沙箱；runtime iframe 权限隔离见批次 16，Workbench 自身的 XSS 不因此获得隔离。使用指南同步要求 Agent 等待所有者确认，不读取确认密钥或绕到文件系统自行写盘。
 
