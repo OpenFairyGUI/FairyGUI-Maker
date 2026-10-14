@@ -664,8 +664,9 @@ REST handler 与 MCP tools 调用同一组应用函数，不分别实现发布�
 | `get_render_observation` | 返回当前对象树、控件状态和 Controller page |
 | `capture_render_screenshot` | 返回实际捕获时双版本、组件/视图元数据与 MCP `image/png` content |
 | `run_ui_scenario` | 在已渲染的 Viewer/Player 中串联白名单操作、断言、条件等待和一次 PNG；返回逐步结果与失败定位 |
+| `publish_artifact` | 把已保存、无未保存修改的 Backend 会话按 LayaAir profile 发布并导入为 Artifact，返回 artifactId、playerUrl 和 `browserRequired` |
 
-`publish_artifact` 尚未实现，保留在后续阶段。`run_ui_scenario` 只编排临时运行态，不提供 Backend 会话未保存预览或工程写入能力。
+`publish_artifact` 只在完整模式注册：发布读取会话对应的工程目录，在 Maker 私有数据目录的临时目录输出，跳过工程插件与代码生成，再经 Artifact Store 的同一校验与提交流程固化；同一时间只运行一次发布。会话有未保存修改、revision 不符或发布期间变化时拒绝，不导入任何内容。REST 导入只能声明 `published-folder` / `browser-publish` 来源，`host-publish` 只由 Host 写入。`run_ui_scenario` 只编排临时运行态，不提供 Backend 会话未保存预览或工程写入能力。
 
 ### 5.3 MCP resources
 
@@ -783,10 +784,16 @@ scripts/            CLI、浏览器证据与安装包烟测入口
 
 已落地 Dashboard 只读工程绑定与发布目录导入、`/projects/:projectId/viewer`、`/artifacts/:artifactId/player`、原始工程 UAM Viewer、内容寻址 Artifact Store、原生 UIPackage Player、组件虚拟列表、缩放/背景/Transition 播放/PNG 截图，以及 Host 内存 Render Session Broker。Viewer 不发布工程、不生成或读取 `.fui`；Player 不读取或修改工程目录，只消费固定 Artifact。Artifact 在 Host 启动时重新校验实际文件并忽略被篡改内容，中断导入目录自动清理。浏览器通过 HTTP 长轮询领取严格递增命令，并用 MessageChannel 顺序驱动各自 iframe；MCP session 和 request ID 缓存均有固定上限。
 
-Maker MCP 已增加 `list_viewer_components`、`render_component_preview`、`list_artifact_components`、`open_artifact_player`、`render_artifact_component`、`update_render_session`、`set_render_view`、`get_render_observation` 和 `capture_render_screenshot`。组件使用 package/component resource ID 定位；临时更新只接受白名单 `set-property`、`set-controller-page`、`play-transition` 和 `dispatch-event`，不接受任意 JavaScript、坐标操作或显示名称猜测。`get_render_observation` 返回对象树、控件状态和 Controller page；未打开对应 Viewer / Player 时返回 `browser_required` 和稳定入口 URL。
+Maker MCP 已增加 `list_viewer_components`、`render_component_preview`、`list_artifact_components`、`open_artifact_player`、`render_artifact_component`、`update_render_session`、`set_render_view`、`get_render_observation`、`capture_render_screenshot`、`run_ui_scenario` 和 `publish_artifact`。组件使用 package/component resource ID 定位；临时更新只接受白名单 `set-property`、`set-controller-page`、`play-transition` 和 `dispatch-event`，不接受任意 JavaScript、坐标操作或显示名称猜测。`get_render_observation` 返回对象树、控件状态和 Controller page；未打开对应 Viewer / Player 时返回 `browser_required` 和稳定入口 URL。
 
-普通会话截图直接作为 MCP image content 返回，Render Session 只保存在 Host 内存；Draft Visual Evidence 与浏览器测试证据已单独持久化。持久 MCP ScreenshotRef digest/resource、条件等待/事件断言和 `run_ui_scenario` 尚未实现。Viewer 的 ComboBox 弹层由 Maker 提供通用工程态交互，未被 UAM 表达的业务脚本和宿主绑定不执行；发布后原生行为由 Player 验证。
+普通会话截图直接作为 MCP image content 返回，Render Session 只保存在 Host 内存；Draft Visual Evidence 与浏览器测试证据已单独持久化。持久 MCP ScreenshotRef digest/resource 尚未实现。Viewer 的 ComboBox 弹层由 Maker 提供通用工程态交互，未被 UAM 表达的业务脚本和宿主绑定不执行；发布后原生行为由 Player 验证。
 
 ## 10. 下一轮决策
 
-核心前后端栈、LayaAir 3.3.10/FairyGUI Web runtime、Dashboard 授权边界、Artifact-first Player 和 render session 数据通道已经完成第一版。Viewer 是 Maker 自有的 UAM Scene compiler 与直接 renderer；Player 是独立的原生 UIPackage runtime。FairyGUI Editor Online 只提供主 Canvas 的行为和视觉参考，不复用其 EditorShell、Resource Preview UI 或模块导出。Draft 视觉报告与 CI 双模式证据已持久化；下一轮决策聚焦自动发布接入及真实业务 UI 场景覆盖。
+核心前后端栈、LayaAir 3.3.10/FairyGUI Web runtime、Dashboard 授权边界、Artifact-first Player 和 render session 数据通道已经完成第一版。Viewer 是 Maker 自有的 UAM Scene compiler 与直接 renderer；Player 是独立的原生 UIPackage runtime。FairyGUI Editor Online 只提供主 Canvas 的行为和视觉参考，不复用其 EditorShell、Resource Preview UI 或模块导出。Draft 视觉报告与 CI 双模式证据已持久化。
+
+2026-10-14 起，主线定为「Agent 修改 → 保存 → 自动发布 → Player 验收」，在这条路径成熟前暂停其他方向的加固：
+
+- 自动发布由 Maker Host 直接调用 `@openfairygui/functions` 实现（`publish_artifact`），不等待上游另做发布宿主工具。
+- 设计源导入冻结在当前状态：保留功能与测试，只修复阻断性问题。
+- 视觉验证归口、Agent 任务评测、首批目标用户、无头渲染与按工程预授权保存尚待决定。
