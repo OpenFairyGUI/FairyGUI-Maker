@@ -152,8 +152,15 @@ try {
   const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1, locale: "en-US", timezoneId: "UTC", colorScheme: "light", reducedMotion: "reduce" })
   await evidence.attach(context)
   const iframeCredentials: Array<Promise<boolean>> = []
+  const unsettledIframeRequests: string[] = []
   context.on("request", (request) => {
-    if (request.frame().parentFrame()) iframeCredentials.push(request.allHeaders().then((headers) => !headers.cookie && !headers.authorization, () => false))
+    // blob:/data: never reach the Host, so they cannot carry its credentials, and may never report network headers.
+    if (!request.frame().parentFrame() || !/^https?:/.test(request.url())) return
+    iframeCredentials.push(Promise.race([
+      request.allHeaders().then((headers) => !headers.cookie && !headers.authorization, () => false),
+      // A request that never reports headers must fail this gate with its URL, not hang the whole run.
+      new Promise<boolean>((resolve) => setTimeout(() => { unsettledIframeRequests.push(request.url()); resolve(false) }, 30_000).unref()),
+    ]))
   })
   const page = await context.newPage()
   evidence.phase("workbench-import")
@@ -371,7 +378,11 @@ try {
   await evidence.step("import-recovery", () => importRecoverySmoke(context, host!.origin, evidence))
   await evidence.step("import-iteration", () => importIterationSmoke(context, host!.origin, evidence, (name, args) => callTool(host!.origin, sessionId, 904, name, args)))
   const saveGrants = await evidence.step("save-grants", () => saveGrantSmoke(context, host!, publishDir, evidence.directory))
-  if (!(await Promise.all(iframeCredentials)).every(Boolean)) throw new Error("Runtime iframe request carried Host credentials")
+  if (!(await Promise.all(iframeCredentials)).every(Boolean)) {
+    throw new Error(unsettledIframeRequests.length
+      ? `Runtime iframe request headers never settled: ${[...new Set(unsettledIframeRequests)].slice(0, 5).join(", ")}`
+      : "Runtime iframe request carried Host credentials")
+  }
   evidence.verify()
   await context.close()
   evidence.verify()
