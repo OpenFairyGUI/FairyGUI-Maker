@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto"
-import { access, readdir, realpath } from "node:fs/promises"
-import { resolve } from "node:path"
+import { access, readdir, realpath, stat } from "node:fs/promises"
+import { dirname, resolve } from "node:path"
 import { serve, type ServerType } from "@hono/node-server"
 import { serveStatic } from "@hono/node-server/serve-static"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
@@ -74,7 +74,13 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   const backend = options.runtime ?? createNodeBackendRuntime({
     allowedProjectRoots: [allowedProjectRoot], fileSystem: await createHostBackendFileSystem(dataDir),
   })
-  const saveGrants = new HostSaveGrants(backend)
+  if (options.allowSave?.length && projectSource) throw new Error("--allow-save needs the full Host; view mode never writes projects")
+  const preauthorizedProjects = await Promise.all((options.allowSave ?? []).map(async (input) => {
+    const target = await realpath(resolve(input)).catch(() => { throw new Error(`--allow-save project not found: ${input}`) })
+    // A .fairy path names its project directory, which is what Backend sessions report.
+    return (await stat(target)).isFile() ? dirname(target) : target
+  }))
+  const saveGrants = new HostSaveGrants(backend, preauthorizedProjects)
   const ownerSessions = new Set<string>()
   const savePolicy = (operation: "saveSession" | "materializeSession"): OpenFairyGuiMcpToolPolicy => ({
     failureSchema: saveGrantFailureSchema,
@@ -340,6 +346,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     token,
     approvalToken,
     project,
+    preauthorizedProjects,
     async close() {
       if (closing) return
       closing = true

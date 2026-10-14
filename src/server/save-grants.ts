@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
+import path from "node:path"
 import { BACKEND_CAPABILITY_SCHEMA_VERSION, BACKEND_CONTRACT_VERSION } from "@openfairygui/backend"
 import type { OpenFairyGuiBackendRuntime } from "@openfairygui/mcp"
 import { z } from "zod"
@@ -54,6 +55,11 @@ export function hostBackendFailure(code: string, message: string, approval?: Sav
 
 const active = (request: SaveApproval) => request.status === "pending" || request.status === "approved"
 
+function samePath(left: string, right: string) {
+  const [a, b] = [path.resolve(left), path.resolve(right)]
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b
+}
+
 function isOrdinarySave(request: Pick<SaveApproval, "operation" | "targetPath" | "force" | "mode">) {
   return request.operation === "saveSession" && request.targetPath === null && !request.force && request.mode === null
 }
@@ -63,7 +69,12 @@ export class HostSaveGrants {
   private readonly requests = new Map<string, SaveApproval>()
   private readonly closing = new Map<string, number>()
 
-  constructor(private readonly runtime: Pick<OpenFairyGuiBackendRuntime, "getSession">) {}
+  // Owner-chosen at Host start (--allow-save); covers ordinary saves to exactly these canonical project directories.
+  constructor(private readonly runtime: Pick<OpenFairyGuiBackendRuntime, "getSession">, private readonly preauthorizedProjects: readonly string[] = []) {}
+
+  preauthorized() {
+    return [...this.preauthorizedProjects]
+  }
 
   list() {
     this.prune()
@@ -134,6 +145,7 @@ export class HostSaveGrants {
       reason: "reason" in parsed.data ? parsed.data.reason ?? null : null,
     }
     const operationDigest = createHash("sha256").update(JSON.stringify(details)).digest("hex")
+    if (isOrdinarySave(details) && this.preauthorizedProjects.some((project) => samePath(project, details.canonicalProjectPath))) return undefined
     if (isOrdinarySave(details) && [...this.requests.values()].some((candidate) => candidate.scope === "session" && candidate.status === "approved"
       && candidate.sessionId === sessionId && candidate.canonicalProjectPath === details.canonicalProjectPath)) return undefined
     let request = [...this.requests.values()].find((candidate) => candidate.scope === "once" && active(candidate) && candidate.operationDigest === operationDigest)

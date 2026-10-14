@@ -67,6 +67,10 @@ export function SaveApprovalsCard() {
       <CardContent className="space-y-4">
         {approvals.data?.enabled ? <>
           <p className="text-sm text-muted-foreground">会话授权允许后续修改写回原工程，包括移除已删除的资源。强制覆盖、指定保存路径和完整物化仍需单次确认；Viewer / Player 保持只读。</p>
+          {approvals.data.preauthorizedProjects.length ? <div className="space-y-1 text-sm">
+            <p>启动 Host 时已用 <code>--allow-save</code> 预授权以下工程的普通保存，无需在这里确认：</p>
+            <ul className="space-y-1">{approvals.data.preauthorizedProjects.map((project) => <li key={project}><code className="break-all text-xs">{project}</code></li>)}</ul>
+          </div> : null}
           {verified ? <div className="flex flex-wrap items-center gap-3">
             <Badge variant="secondary">所有者已验证</Badge>
             <Button size="sm" variant="outline" disabled={owner.isPending || decision.isPending} onClick={() => owner.mutate("lock")}>锁定授权管理</Button>

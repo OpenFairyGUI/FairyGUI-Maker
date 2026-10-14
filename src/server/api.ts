@@ -178,7 +178,10 @@ export function registerApi(
     })
     .get("/api/save-approvals", (c) => {
       const { saveGrants, saveApprovalsEnabled } = readState()
-      return c.json({ enabled: saveApprovalsEnabled, ownerVerified: saveApprovalsEnabled && ownerVerified(c), approvals: saveApprovalsEnabled ? saveGrants.list() : [] })
+      return c.json({
+        enabled: saveApprovalsEnabled, ownerVerified: saveApprovalsEnabled && ownerVerified(c), approvals: saveApprovalsEnabled ? saveGrants.list() : [],
+        preauthorizedProjects: saveApprovalsEnabled ? saveGrants.preauthorized() : [],
+      })
     })
     .post("/api/save-approvals/owner-session", (c) => {
       const { approvalToken, ownerSessions, saveApprovalsEnabled } = readState()

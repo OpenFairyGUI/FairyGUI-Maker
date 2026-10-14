@@ -106,7 +106,15 @@ Agent 的 `save_session` / `materialize_session` 必须携带 `expectedRevision`
 
 “允许本次会话连续保存”仅覆盖当前 Backend 会话向原工程执行的普通保存，包括后续编辑产生的资源移除；revision 改变不需要重新授权，但每次仍校验最新 revision、路径与磁盘冲突。撤销、关闭/重开工程或重启 Host 后失效，不是永久信任目录，也不改变 Viewer/Player 的只读权限。
 
-`force: true`、任何显式 `targetPath`、`materializeCleanSession` 和 `materialize_session` 始终单次确认。待确认请求及单次授权从请求创建起 5 分钟内有效，单次授权在执行前消耗，失败或响应不确定时先读回状态，不自动重试。完整规则见 [Host Save Grant](./docs/workbench.md#210-host-save-grant批次-15)。
+无人值守时，所有者可以在启动 Host 时预授权指定工程的普通保存，Agent 保存这些工程不再等待 Workbench 确认：
+
+```powershell
+npx @openfairygui/fairygui-maker@0.1.2 --allow-save E:\Projects\MyFairyGUIProject
+```
+
+`--allow-save` 可重复，接受工程目录或其中的 `.fairy` 文件，启动时解析为真实路径，不存在则拒绝启动。它只匹配这些工程目录本身（不含子目录或其他工程），只在本次 Host 进程有效，只能由启动 Host 的所有者设置，MCP 客户端无法授予；Dashboard 的“工程保存权限”卡片会列出它们。revision、路径和磁盘冲突检查照常进行。
+
+`force: true`、任何显式 `targetPath`、`materializeCleanSession` 和 `materialize_session` 始终单次确认，预授权也不例外。待确认请求及单次授权从请求创建起 5 分钟内有效，单次授权在执行前消耗，失败或响应不确定时先读回状态，不自动重试。完整规则见 [Host Save Grant](./docs/workbench.md#210-host-save-grant批次-15)。
 
 ## Agent 与 MCP
 
