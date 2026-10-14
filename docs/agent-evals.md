@@ -79,3 +79,5 @@ Codex 的 6 次失败都发生在第一次写入或渲染调用的 MCP 输入校
 | `requestId` 传入 `render-card-1`，要求 UUID | `inspect-render` | 产品：Maker 工具只声明 UUID 格式而未说明用途与生成方式，错误只有 `Invalid UUID at requestId` |
 
 据此的改进方向：Maker 为 `requestId` 等参数补充用途说明并给出可操作的校验错误；事务 schema 与校验错误的可读性属于 OpenFairyGUI MCP，需要与上游协同。改进后用同一组任务复测对比。
+
+复测（同日）：Maker 的 `requestId` 改为说明「每个新请求使用新的随机 UUID，仅重试相同请求时复用」，校验错误附示例与改法后，Codex 的 `inspect-render` 首次调用即传入合法 UUID 并通过（5 次工具调用）。其余 5 项仍取决于上游事务 schema 与错误信息，已在 [OpenFairyGUI/OpenFairyGUI#156](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/156) 跟进，上游发布后用同一组任务复测。

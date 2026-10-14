@@ -7,7 +7,7 @@ import { z } from "zod"
 
 import { PLAYER_RUNTIME_PROFILE } from "../artifact-protocol"
 import { comparePixelData, type VisualMetrics } from "../visual-diff"
-import type { ViewerRenderBroker } from "./viewer"
+import { agentRequestIdSchema, type ViewerRenderBroker } from "./viewer"
 
 const NAME_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const MAX_KEY_SEGMENTS = 4
@@ -23,7 +23,7 @@ const keySchema = z.string().max(260).refine((value) => {
 }, `key: up to ${MAX_KEY_SEGMENTS} "/"-separated segments of letters, digits, dot, dash or underscore`)
 const captureInput = {
   renderSessionId: z.string().min(1),
-  requestId: z.string().uuid(),
+  requestId: agentRequestIdSchema,
   afterStateVersion: z.number().int().nonnegative(),
   afterViewStateVersion: z.number().int().nonnegative().default(0),
   suite: suiteSchema,

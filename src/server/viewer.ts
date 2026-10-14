@@ -74,9 +74,14 @@ export const uiScenarioConditionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("controller"), targetId: scenarioTarget, controllerName: scenarioTarget, pageId: scenarioTarget }).strict(),
   z.object({ kind: z.literal("interaction"), targetId: scenarioTarget, event: z.enum(["click", "input", "change", "scroll"]) }).strict(),
 ])
+// Agents saw only "Invalid UUID" and gave up; say what the key is for and how to fix it.
+export const agentRequestIdSchema = z.string()
+  .uuid("requestId must be a UUID such as 0f8fad5b-d9cb-469f-a165-70867728950e: use a new random UUID for each new request, and reuse one only to retry the identical request.")
+  .describe("Idempotency key: a new random UUID (for example 0f8fad5b-d9cb-469f-a165-70867728950e) for each new request; reuse the same value only to retry the identical request safely.")
+
 export const uiScenarioInputSchema = z.object({
   renderSessionId: scenarioTarget,
-  requestId: z.string().uuid(),
+  requestId: agentRequestIdSchema,
   sourceRevision: scenarioTarget,
   expectedStateVersion: versionSchema,
   expectedViewStateVersion: versionSchema,
@@ -745,7 +750,7 @@ export function registerViewerMcpTools(
     description: "Render a component in an open Maker Workbench Viewer using stable package and component resource IDs.",
     inputSchema: z.object({
       projectId: z.string().min(1),
-      requestId: z.string().uuid(),
+      requestId: agentRequestIdSchema,
       packageId: z.string().min(1),
       componentId: z.string().min(1),
       capture: z.boolean().default(true),
@@ -774,7 +779,7 @@ export function registerViewerMcpTools(
     description: "Apply whitelisted temporary UI properties, controller changes, transitions, or semantic interactions to a connected Viewer or Player session.",
     inputSchema: z.object({
       renderSessionId: z.string().min(1),
-      requestId: z.string().uuid(),
+      requestId: agentRequestIdSchema,
       expectedStateVersion: z.number().int().nonnegative(),
       operations: z.array(viewerOperationSchema).min(1).max(100),
     }),
@@ -790,7 +795,7 @@ export function registerViewerMcpTools(
   server.registerTool("set_render_view", {
     title: "Set FairyGUI render view",
     description: "Change zoom, background or viewport through the shared Broker. Uses viewStateVersion, independently of semanticStateVersion (the legacy stateVersion).",
-    inputSchema: z.object({ renderSessionId: z.string().min(1), requestId: z.string().uuid(), expectedViewStateVersion: versionSchema, view: renderViewSchema }),
+    inputSchema: z.object({ renderSessionId: z.string().min(1), requestId: agentRequestIdSchema, expectedViewStateVersion: versionSchema, view: renderViewSchema }),
   }, async ({ renderSessionId, requestId, expectedViewStateVersion, view }) => {
     try {
       const result = broker.executeViewForSession(renderSessionId, expectedViewStateVersion, view, requestId)
@@ -934,7 +939,7 @@ export function registerViewerMcpTools(
     description: "Render a component through native UIPackage in an open Maker Workbench Player.",
     inputSchema: z.object({
       artifactId: z.string().min(1),
-      requestId: z.string().uuid(),
+      requestId: agentRequestIdSchema,
       packageId: z.string().min(1),
       componentId: z.string().min(1),
       capture: z.boolean().default(true),
@@ -965,7 +970,7 @@ export function registerViewerMcpTools(
     description: "Read the current Viewer or Player object tree, controllers, control values, and recent interaction state.",
     inputSchema: z.object({
       renderSessionId: z.string().min(1),
-      requestId: z.string().uuid(),
+      requestId: agentRequestIdSchema,
       afterStateVersion: z.number().int().nonnegative(),
       afterViewStateVersion: versionSchema.default(0),
     }),
@@ -984,7 +989,7 @@ export function registerViewerMcpTools(
     description: "Capture the current Viewer or Player LayaAir canvas as a PNG image.",
     inputSchema: z.object({
       renderSessionId: z.string().min(1),
-      requestId: z.string().uuid(),
+      requestId: agentRequestIdSchema,
       afterStateVersion: z.number().int().nonnegative(),
       afterViewStateVersion: versionSchema.default(0),
     }),
