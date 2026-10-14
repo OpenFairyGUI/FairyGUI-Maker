@@ -667,8 +667,13 @@ REST handler 与 MCP tools 调用同一组应用函数，不分别实现发布�
 | `capture_render_screenshot` | 返回实际捕获时双版本、组件/视图元数据与 MCP `image/png` content |
 | `run_ui_scenario` | 在已渲染的 Viewer/Player 中串联白名单操作、断言、条件等待和一次 PNG；返回逐步结果与失败定位 |
 | `publish_artifact` | 把已保存、无未保存修改的 Backend 会话按 LayaAir profile 发布并导入为 Artifact，返回 artifactId、playerUrl 和 `browserRequired` |
+| `save_visual_baseline` | 截取 render session 当前画面并存为 `suite`/`key` 基线；已有基线需 `replace: true` 加原因 |
+| `compare_visual_baseline` | 截取当前画面与基线逐像素比对，返回指标、`identical`、`withinTolerance`、环境差异字段和差异 PNG |
+| `list_visual_baselines` | 列出基线的 revision、原因、环境、来源和最近一次比对结果 |
 
 `publish_artifact` 只在完整模式注册：发布读取会话对应的工程目录，在 Maker 私有数据目录的临时目录输出，跳过工程插件与代码生成，再经 Artifact Store 的同一校验与提交流程固化；同一时间只运行一次发布。会话有未保存修改、revision 不符或发布期间变化时拒绝，不导入任何内容。REST 导入只能声明 `published-folder` / `browser-publish` 来源，`host-publish` 只由 Host 写入。`run_ui_scenario` 只编排临时运行态，不提供 Backend 会话未保存预览或工程写入能力。
+
+视觉基线由 Agent 管理（2026-10-14 决策）：Host 经 Broker 截图后在服务端用 `sharp` 解码 PNG，沿用 Workbench 视觉证据的 `comparePixelData`（已移到共享的 `src/visual-diff.ts`）和同一组指标，不设全局通过线；`withinTolerance` 默认要求像素完全一致，单次调用可放宽 `maxDifferentPixels` / `maxMeanAbsoluteError`，尺寸不同始终不通过。每个基线记录渲染环境：runtime profile、Viewer/Player、渲染页注册时的 User-Agent、zoom/background/视口和图片尺寸；比对时列出与基线不同的字段，供 Agent 区分环境变化和界面回归。数据存于 `<data-dir>/visual-baselines/<suite>/<key>`：图片先于 `baseline.json` 原子写入，替换必须带原因，旧版本保留最近 5 个，最近一次比对报告与差异图随之保存；`suite`/`key` 只接受字母数字及 `._-`，key 最多 4 段。基线不写工程，完整模式和 `view` 模式都注册这三个工具；Workbench 查看页留待评测需要时再做。
 
 ### 5.3 MCP resources
 

@@ -1,6 +1,6 @@
 ---
 name: use-fairygui-maker
-description: Create or refine FairyGUI UI with FairyGUI Maker using reusable resources and components, Controller states, Relations and Transitions. Also use for design import/reimport, project inspection/editing, asset analysis, Viewer previews, publishing saved projects and validating .fui or _fui.bytes output in Player, and Maker CLI/MCP revision or permission failures. Do not trigger for developing FairyGUI Maker's own source code or unrelated UI frameworks.
+description: Create or refine FairyGUI UI with FairyGUI Maker using reusable resources and components, Controller states, Relations and Transitions. Also use for design import/reimport, project inspection/editing, asset analysis, Viewer previews, publishing saved projects and validating .fui or _fui.bytes output in Player, visual-baseline regression checks, and Maker CLI/MCP revision or permission failures. Do not trigger for developing FairyGUI Maker's own source code or unrelated UI frameworks.
 ---
 
 # Use FairyGUI Maker
@@ -117,6 +117,16 @@ Use `{projectId, packageId, resourceId, direction: "both", limit: 100}` for one 
 
 Player operations change only render-session memory. Never treat them as Artifact mutation.
 
+## Check for visual regressions
+
+Use visual baselines when a change must not alter, or must alter only, what a component looks like.
+
+1. Render the component in Viewer or Player and put it in the state to check. Record the render session and its semantic/view versions.
+2. If no baseline exists, call `save_visual_baseline` with a stable `suite` (for example the feature) and `key` (for example `component/state`).
+3. After edits, publish, re-render the same component and state, and call `compare_visual_baseline` with the fresh versions. `identical` and `withinTolerance` (exact unless you pass `tolerance`) give the verdict; inspect the attached diff PNG before reporting.
+4. If `environmentMatch` is false, the browser, zoom, background, viewport or image size changed; re-render under the baseline's environment instead of calling it a UI regression.
+5. Replace a baseline only when the user asked for that visual change: `replace: true` plus a `reason`. Never replace a baseline just to make a comparison pass. Report the suite, key, revision and metrics.
+
 ## Run a continuous UI scenario
 
 After rendering a Viewer or Player component, use `run_ui_scenario` to sequence temporary operations, assertions, condition waits and one optional Canvas capture. Start from fresh observation IDs, `sourceRevision`, semantic/view versions and a new UUID requestId. Follow the portable [scenario input, example and recovery reference](references/ui-scenarios.md).
@@ -140,6 +150,8 @@ Inspect `value.passed`, zero-based step results and `failedStep`; later steps st
 | `publish_busy` | Another publish is running; retry after it finishes |
 | `publish_failed` | Report the message; run `openfairygui_backend_validate_session` before retrying |
 | state-version conflict | Observe the latest state, then decide whether the update is still valid |
+| `visual_baseline_exists` | Compare against it; replace only for a requested visual change, with `replace: true` and a reason |
+| `visual_baseline_not_found` | Save a baseline first, or check `list_visual_baselines` for the right suite/key |
 | `state_version_not_reached` | Wait for the requested version; never lower freshness just to get an old image |
 | project/component/artifact not found | Refresh authoritative IDs; never fall back to display-name guessing |
 | unsupported Viewer semantic | Return the structured diagnostic; do not fall back to `.fui` or arbitrary JavaScript |

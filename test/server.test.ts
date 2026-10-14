@@ -682,6 +682,7 @@ test("CLI view registers one bounded read-only project snapshot", async () => {
     assert.ok(toolNames.includes("capture_render_screenshot"))
     assert.equal(toolNames.some((name: string) => name.startsWith("openfairygui_backend_")), false)
     assert.equal(toolNames.includes("publish_artifact"), false)
+    assert.ok(toolNames.includes("compare_visual_baseline"), "visual baselines never write projects, so view mode keeps them")
   } finally {
     await host.close()
     await rm(dataDir, { recursive: true, force: true })

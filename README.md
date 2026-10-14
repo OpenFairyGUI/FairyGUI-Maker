@@ -138,6 +138,9 @@ MCP 最多保留 32 个会话，空闲 30 分钟后回收，正在执行的调�
 | Player 发现与渲染 | `list_artifact_components`、`open_artifact_player`、`render_artifact_component` |
 | Render session | `update_render_session`、`set_render_view`、`get_render_observation`、`capture_render_screenshot` |
 | 资源分析 | `inspect_project_assets` |
+| 视觉回归 | `save_visual_baseline`、`compare_visual_baseline`、`list_visual_baselines` |
+
+视觉回归由 Agent 自行管理：在 Viewer 或 Player 的 render session 上把当前画面存为 `suite` / `key` 命名的基线，之后逐像素比对，返回差异指标、差异图，以及与基线不同的渲染环境字段（浏览器、缩放、背景、视口、图片尺寸）。默认要求像素完全一致，可按次传入 `maxDifferentPixels` / `maxMeanAbsoluteError` 容差。已有基线只能以 `replace: true` 加原因替换，每个 key 保留最近 5 个旧版本。基线存放在 `--data-dir` 下的 `visual-baselines/`，不写工程，`view` 模式同样可用；不同机器、浏览器或字体会造成像素差异，应在同一环境里建立和比对基线。
 
 完整模式中的工程读写继续使用同一 MCP 服务内的 OpenFairyGUI backend tools。`view <project-path>` 模式只注册 Maker 的 Viewer、Player、资源分析与 render-session 工具，不提供任何 backend 工程写工具。Agent 应始终使用工具返回的项目、包、组件、对象、session、revision 和 state-version ID，不应从显示名称猜测。
 
