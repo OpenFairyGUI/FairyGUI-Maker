@@ -79,6 +79,19 @@ npx @openfairygui/fairygui-maker@0.1.2 --data-dir E:\FairyGUI\maker-data
 
 相对 `--data-dir` 以启动命令的当前目录为基准；未传入时默认使用当前目录下的 `.fairygui-maker`。环境变量 `FAIRYGUI_MAKER_DATA_DIR` 提供相同能力，CLI 参数优先。
 
+### 无头渲染
+
+从 CLI 启动的 Host 在没有打开的 Workbench 页面时，会用自己的无头浏览器加载 Viewer / Player 页面，Agent 不需要有人开着浏览器就能渲染、观察和截图。浏览器在第一次需要时启动，默认依次使用本机安装的 Chrome、Edge，不会下载浏览器：
+
+```powershell
+# 指定浏览器：chrome、msedge，或先运行 npx playwright install chromium 后用 chromium
+npx @openfairygui/fairygui-maker@0.1.2 --headless-browser msedge
+# 关闭无头渲染，渲染工具只使用已打开的 Workbench 页面
+npx @openfairygui/fairygui-maker@0.1.2 --no-headless
+```
+
+无头渲染覆盖 Player Artifact、Backend 会话预览和 `view` 模式工程。通过 Dashboard 在浏览器中授权的工程只能由该浏览器读取，仍返回 `browser_required`。找不到可用浏览器时，工具在 `browser_required` 旁附带 `headlessError` 说明原因。
+
 在完整模式下，OpenFairyGUI backend 只能访问启动命令当前目录及其子目录。请先进入用户明确授权的工程父目录再启动 Host；不要从磁盘根目录或包含无关工程的宽泛目录启动。
 
 Backend 还会排除 Maker 私有数据目录、其后代，以及包含该目录的祖先工程，避免工程保存替换 Host 状态；Junction/符号链接别名也不能绕过。如果工程本身就是启动目录，请用 `--data-dir` 指定工程外的独立目录。

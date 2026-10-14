@@ -2,6 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import type { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import type { OpenFairyGuiBackendRuntime } from "@openfairygui/mcp"
 
+import type { HeadlessBrowserChannel } from "./headless-browser"
+
 export type BackendSession = {
   id: string
   projectName: string
@@ -53,4 +55,6 @@ export type StartMakerHostOptions = {
   runtime?: OpenFairyGuiBackendRuntime
   dataDir?: string
   projectPath?: string
+  /** Render with a Host-owned headless browser when no Workbench page is connected. Off unless requested. */
+  headless?: boolean | { channel?: HeadlessBrowserChannel }
 }

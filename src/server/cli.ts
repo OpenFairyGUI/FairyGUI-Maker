@@ -4,6 +4,7 @@ import { resolve } from "node:path"
 import { ImportDraftStore } from "../design-import/draft-store"
 import { applyProjectReimport, planProjectReimport } from "../design-import/node"
 import { createHostBackendFileSystem } from "./backend-files"
+import { HEADLESS_BROWSER_CHANNELS, type HeadlessBrowserChannel } from "./headless-browser"
 import { startMakerHost } from "./host"
 import { PACKAGE_VERSION, logger } from "./host-config"
 
@@ -13,6 +14,8 @@ export function readCliArguments(argv: string[]) {
   let outputPath: string | undefined
   let dryRun = false
   let applyDigest: string | undefined
+  let headlessDisabled = false
+  let headlessChannel: HeadlessBrowserChannel | undefined
   const positional: string[] = []
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -43,9 +46,25 @@ export function readCliArguments(argv: string[]) {
       if (!applyDigest || !/^[a-f0-9]{64}$/.test(applyDigest)) throw new Error("--apply requires the planDigest from a fresh --dry-run")
       continue
     }
+    if (argument === "--no-headless") {
+      headlessDisabled = true
+      continue
+    }
+    if (argument === "--headless-browser") {
+      const channel = argv[++index]
+      if (!HEADLESS_BROWSER_CHANNELS.includes(channel as HeadlessBrowserChannel)) throw new Error(`--headless-browser requires one of: ${HEADLESS_BROWSER_CHANNELS.join(", ")}`)
+      headlessChannel = channel as HeadlessBrowserChannel
+      continue
+    }
     if (argument.startsWith("-")) throw new Error(`Unknown option: ${argument}`)
     positional.push(argument)
   }
+  if (headlessDisabled && headlessChannel) throw new Error("--no-headless and --headless-browser cannot be combined")
+  if ((positional[0] === "import" || positional[0] === "reimport") && (headlessDisabled || headlessChannel)) {
+    throw new Error("--no-headless and --headless-browser apply only when starting the Host")
+  }
+  // The Host renders headlessly by default from the CLI; the startMakerHost API stays opt-in.
+  const headless = headlessDisabled ? false : headlessChannel ? { channel: headlessChannel } : true
   if (positional[0] === "import") {
     if (applyDigest !== undefined) throw new Error("--apply requires a reimport command")
     if (port !== undefined) {
@@ -83,9 +102,9 @@ export function readCliArguments(argv: string[]) {
   }
   if (applyDigest !== undefined) throw new Error("--apply requires a reimport command")
   if (outputPath !== undefined || dryRun) throw new Error("--out and --dry-run require an import or reimport command")
-  if (positional.length === 0) return { help: false as const, port, dataDir, projectPath: undefined }
+  if (positional.length === 0) return { help: false as const, port, dataDir, projectPath: undefined, headless }
   if (positional[0] !== "view" || positional.length !== 2) throw new Error("Usage: fairygui-maker view <project-path> [--port <port>] [--data-dir <path>]")
-  return { help: false as const, port, dataDir, projectPath: positional[1] }
+  return { help: false as const, port, dataDir, projectPath: positional[1], headless }
 }
 
 export async function runCli(argv = process.argv.slice(2)) {
@@ -96,7 +115,7 @@ export async function runCli(argv = process.argv.slice(2)) {
   }
   if (options.help) {
     process.stdout.write(`Usage:
-  fairygui-maker [view <project-path>] [--port <port>] [--data-dir <path>]
+  fairygui-maker [view <project-path>] [--port <port>] [--data-dir <path>] [--no-headless | --headless-browser <chrome|msedge|chromium>]
   fairygui-maker import <source.fig|source.psd|bundle-directory> --out <new-directory> [--data-dir <path>]
   fairygui-maker import <source.fig|source.psd|bundle-directory> --dry-run [--data-dir <path>]
   fairygui-maker import inspect <source.fig|source.psd|bundle-directory> [--data-dir <path>]
@@ -110,6 +129,10 @@ Options:
   --apply <digest>   Explicitly approve the exact reimport planDigest from --dry-run; conflicts and stale inputs are refused
   --port <port>      Localhost port (default: 3847)
   --data-dir <path>  Private artifact, draft, and runtime data directory (default: .fairygui-maker)
+  --no-headless      Never open a Host-owned headless browser; render tools then need an open Workbench page
+  --headless-browser <name>
+                     Browser for headless rendering: chrome, msedge, or chromium (Playwright's, installed separately).
+                     Default: installed Chrome, then Edge
   --version          Print the installed Maker version
 
 Environment: FAIRYGUI_MAKER_TOKEN, FAIRYGUI_MAKER_APPROVAL_TOKEN, FAIRYGUI_MAKER_PORT, FAIRYGUI_MAKER_DATA_DIR, FAIRYGUI_MAKER_LOG_LEVEL

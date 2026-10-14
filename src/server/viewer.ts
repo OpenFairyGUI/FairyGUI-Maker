@@ -160,6 +160,7 @@ type ViewerProject = {
   assetManagerUrl?: string
 }
 type PlayerArtifact = Pick<ArtifactManifest, "artifactId" | "playerUrl" | "digest" | "packages"> & Partial<Pick<ArtifactManifest, "source" | "verification">>
+export type RendererTarget = { projectId: string } | { artifactId: string }
 type CommandResult = RenderCommandResult
 type PendingCommand = {
   resolve(value: CommandResult): void
@@ -667,7 +668,17 @@ export function registerViewerMcpTools(
   listArtifacts: () => PlayerArtifact[] = () => [],
   listProjects: () => ViewerProject[] = () => [],
   getAssetAnalysis: (projectId: string) => ProjectAssetAnalysis | undefined = () => undefined,
+  ensureRenderer?: (target: RendererTarget) => Promise<boolean>,
 ) {
+  // Without a connected page, let the Host open one headlessly; failures stay visible next to browser_required.
+  const connectRenderer = async (target: RendererTarget): Promise<{ connected: boolean; headlessError?: string }> => {
+    if (!ensureRenderer) return { connected: false }
+    try {
+      return { connected: await ensureRenderer(target) }
+    } catch (error) {
+      return { connected: false, headlessError: formatError(error) }
+    }
+  }
   const sessionBrowserRequired = (renderSessionId: string) => {
     const target = broker.getBrowserTarget(renderSessionId)
     return target
@@ -683,8 +694,11 @@ export function registerViewerMcpTools(
   }, async ({ projectId }) => {
     const projects = projectId ? [getProject(projectId)].filter((value): value is ViewerProject => value !== undefined) : listProjects()
     if (projectId && projects.length === 0) return toolResult({ ok: false, code: "project_not_found", projectId }, true)
+    // Only a request for one project opens a page; listing everything never launches renderers.
+    const headlessError = projectId && !broker.getViewerRenderer(projectId)?.catalog ? (await connectRenderer({ projectId })).headlessError : undefined
     return toolResult({
       ok: true,
+      ...(headlessError ? { headlessError } : {}),
       projects: projects.map((project) => {
         const renderer = broker.getViewerRenderer(project.projectId)
         return {
@@ -725,8 +739,14 @@ export function registerViewerMcpTools(
     const project = getProject(projectId)
     if (!project) return toolResult({ ok: false, code: "project_not_found", projectId }, true)
     try {
-      const result = broker.executeForProject(projectId, "render", { packageId, componentId, capture }, requestId)
-      if (!result) return toolResult({ ok: false, code: "browser_required", projectId, sourceRevision: project.sourceRevision, viewerUrl: project.viewerUrl })
+      let result = broker.executeForProject(projectId, "render", { packageId, componentId, capture }, requestId)
+      let headlessError: string | undefined
+      if (!result) {
+        const connection = await connectRenderer({ projectId })
+        headlessError = connection.headlessError
+        if (connection.connected) result = broker.executeForProject(projectId, "render", { packageId, componentId, capture }, requestId)
+      }
+      if (!result) return toolResult({ ok: false, code: "browser_required", projectId, sourceRevision: project.sourceRevision, viewerUrl: project.viewerUrl, ...(headlessError ? { headlessError } : {}) })
       return commandToolResult(await result)
     } catch (error) {
       return toolResult({ ok: false, code: "render_failed", message: formatError(error) }, true)
@@ -883,8 +903,14 @@ export function registerViewerMcpTools(
   }, async ({ artifactId }) => {
     const artifact = getArtifact(artifactId)
     if (!artifact) return toolResult({ ok: false, code: "artifact_not_found", artifactId }, true)
-    const renderSession = broker.getSessionForArtifact(artifactId)
-    return toolResult({ ok: true, artifactId, digest: artifact.digest, source: artifact.source, verification: artifact.verification, playerUrl: artifact.playerUrl, browserRequired: !renderSession, renderSession })
+    let renderSession = broker.getSessionForArtifact(artifactId)
+    let headlessError: string | undefined
+    if (!renderSession) {
+      const connection = await connectRenderer({ artifactId })
+      headlessError = connection.headlessError
+      if (connection.connected) renderSession = broker.getSessionForArtifact(artifactId)
+    }
+    return toolResult({ ok: true, artifactId, digest: artifact.digest, source: artifact.source, verification: artifact.verification, playerUrl: artifact.playerUrl, browserRequired: !renderSession, renderSession, ...(headlessError ? { headlessError } : {}) })
   })
 
   server.registerTool("render_artifact_component", {
@@ -904,8 +930,14 @@ export function registerViewerMcpTools(
     const component = artifact.packages.find((pkg) => pkg.packageId === packageId)?.components.find((item) => item.id === componentId)
     if (!component) return toolResult({ ok: false, code: "artifact_component_not_found", artifactId, packageId, componentId }, true)
     try {
-      const result = broker.executeForArtifact(artifactId, "render", { packageId, componentId, capture }, requestId)
-      if (!result) return toolResult({ ok: false, code: "browser_required", artifactId, digest: artifact.digest, playerUrl: artifact.playerUrl })
+      let result = broker.executeForArtifact(artifactId, "render", { packageId, componentId, capture }, requestId)
+      let headlessError: string | undefined
+      if (!result) {
+        const connection = await connectRenderer({ artifactId })
+        headlessError = connection.headlessError
+        if (connection.connected) result = broker.executeForArtifact(artifactId, "render", { packageId, componentId, capture }, requestId)
+      }
+      if (!result) return toolResult({ ok: false, code: "browser_required", artifactId, digest: artifact.digest, playerUrl: artifact.playerUrl, ...(headlessError ? { headlessError } : {}) })
       return commandToolResult(await result)
     } catch (error) {
       return toolResult({ ok: false, code: "render_failed", message: formatError(error) }, true)
