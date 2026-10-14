@@ -1,6 +1,6 @@
 ---
 name: use-fairygui-maker
-description: Create or refine FairyGUI UI with FairyGUI Maker using reusable resources and components, Controller states, Relations and Transitions. Also use for design import/reimport, project inspection/editing, asset analysis, Viewer previews, published .fui or _fui.bytes validation in Player, and Maker CLI/MCP revision or permission failures. Do not trigger for developing FairyGUI Maker's own source code or unrelated UI frameworks.
+description: Create or refine FairyGUI UI with FairyGUI Maker using reusable resources and components, Controller states, Relations and Transitions. Also use for design import/reimport, project inspection/editing, asset analysis, Viewer previews, publishing saved projects and validating .fui or _fui.bytes output in Player, and Maker CLI/MCP revision or permission failures. Do not trigger for developing FairyGUI Maker's own source code or unrelated UI frameworks.
 ---
 
 # Use FairyGUI Maker
@@ -18,7 +18,7 @@ Choose the local CLI or connected Maker Host for the requested workflow. Keep pr
 | Inspect resource health/references | Asset Manager + `inspect_project_assets` | Advisory analysis for one source revision |
 | Preview the current unpublished project | Viewer | Render-session memory only |
 | Validate imported `.fui` / `_fui.bytes` output | Player | Artifact remains immutable |
-| Publish a project automatically | Unsupported | `publish_artifact` is not implemented |
+| Publish a saved project and validate the result | `publish_artifact`, then Player | New immutable Artifact in Maker's data directory; the project is not written |
 
 Do not use Viewer as evidence of published runtime behavior. Use Player for the final published result.
 
@@ -62,6 +62,15 @@ Inspect existing resources and the requested behavior before choosing a represen
 
 If a revision is stale, fetch the session again and re-plan. On `save_session_unavailable`, inspect the session and open the explicitly authorized project again before requesting a new grant. Never replay an old mutation blindly. Use `openfairygui_backend_materialize_session` only when the user explicitly requests full-project materialization.
 
+## Publish a saved session for Player acceptance
+
+This is Maker's main path: edit, save, publish, then accept the result in Player.
+
+1. Save first. `publish_artifact` reads the saved project and refuses a session with unsaved edits (`publish_requires_saved_session`); it never saves for you and never needs a Save Grant.
+2. Read the current revision with `openfairygui_backend_get_session`, then call `publish_artifact` with that `sessionId`, `expectedRevision` and an optional `name`.
+3. Record the returned `artifactId`, `playerUrl` and `verification`. `verification.source: host-published` means this Host published the session's saved project with the Player's LayaAir profile. Project plugins and code generation are skipped, so the Artifact is acceptance evidence, not the project's own release output.
+4. Continue with the Player workflow below using that `artifactId`. Report the session revision the Artifact came from.
+
 ## Preview an unpublished project in Viewer
 
 Choose one authorization path:
@@ -99,7 +108,7 @@ Use `{projectId, packageId, resourceId, direction: "both", limit: 100}` for one 
 
 ## Validate a published Artifact in Player
 
-1. Start from a real published directory imported through Workbench or its authorized Artifact REST flow. Do not claim Maker published it; automatic publishing is not implemented.
+1. Start from an Artifact returned by `publish_artifact`, or from a real published directory imported through Workbench or its authorized Artifact REST flow. Only `verification.source: host-published` Artifacts were published by Maker; never claim that for a `client-declared` import.
 2. Call `list_artifact_components` to page artifact summaries, then pass `artifactId` to page its package/component catalog. Repeat the same selectors with `nextCursor` until it is `null`; `limit` is 1–500 (default 100). Use the returned immutable `artifactId`, digest, package IDs, and component IDs. On `cursor_invalid_or_stale`, restart that query without the cursor.
 3. Call `open_artifact_player`. If no render session exists, open the returned `playerUrl` in a real browser.
 4. Call `render_artifact_component` with stable IDs and `capture: true` when visual evidence is required.
@@ -126,6 +135,10 @@ Inspect `value.passed`, zero-based step results and `failedStep`; later steps st
 | reimport conflict, blocker or stale plan digest | Stop applying; read a fresh dry-run and resolve the reported source/project issue |
 | `save_approval_required` | Ask the owner to confirm in Workbench; keep the session open and do not self-approve |
 | `save_revision_stale` / `save_input_invalid` | Re-fetch the backend revision and supply supported, bounded save arguments; old grants cannot be reused |
+| `publish_requires_saved_session` | Save the session first (owner approval rules apply), then publish the saved revision |
+| `publish_revision_stale` / `publish_session_changed` | Re-read `openfairygui_backend_get_session` and publish the current saved revision; nothing was imported |
+| `publish_busy` | Another publish is running; retry after it finishes |
+| `publish_failed` | Report the message; run `openfairygui_backend_validate_session` before retrying |
 | state-version conflict | Observe the latest state, then decide whether the update is still valid |
 | `state_version_not_reached` | Wait for the requested version; never lower freshness just to get an old image |
 | project/component/artifact not found | Refresh authoritative IDs; never fall back to display-name guessing |

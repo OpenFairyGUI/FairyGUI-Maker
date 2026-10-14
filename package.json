@@ -50,6 +50,7 @@
 		"@modelcontextprotocol/sdk": "1.32.1",
 		"@openfairygui/backend": "0.6.3",
 		"@openfairygui/core": "0.6.3",
+		"@openfairygui/functions": "0.6.3",
 		"@openfairygui/mcp": "0.6.3",
 		"@resvg/resvg-js": "2.6.2",
 		"ag-psd": "31.0.2",

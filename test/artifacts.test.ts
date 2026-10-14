@@ -100,7 +100,7 @@ test("Artifact HTTP keeps distinct import records, bounded summaries/catalog pag
     assert.equal(first.digest, second.digest)
     assert.notEqual(first.importId, second.importId)
     assert.equal(second.name, "Second source")
-    assert.equal(second.source.projectId, "project-b")
+    assert.equal("projectId" in second.source && second.source.projectId, "project-b")
     assert.equal(await readFile(blobPath, "utf8"), originalBlob, "deduplication must not overwrite content or the first record")
     const envelope = JSON.parse(originalBlob)
     assert.equal(envelope.schemaVersion, 2)

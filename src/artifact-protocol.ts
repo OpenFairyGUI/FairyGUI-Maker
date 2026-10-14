@@ -5,6 +5,13 @@ export const MAX_ARTIFACT_TOTAL_BYTES = 512 * 1024 * 1024
 
 // Host checks bytes/package metadata, not who published them or which project produced them.
 export const ARTIFACT_VERIFICATION = Object.freeze({ content: "host-validated", source: "client-declared" } as const)
+// This Host ran the publish itself from a saved, clean Backend session; edits made outside Maker after that save are not detected.
+export const HOST_PUBLISHED_VERIFICATION = Object.freeze({ content: "host-validated", source: "host-published" } as const)
+export type ArtifactVerification = typeof ARTIFACT_VERIFICATION | typeof HOST_PUBLISHED_VERIFICATION
+
+export function artifactVerification(source: ArtifactImportRecord["source"]): ArtifactVerification {
+  return source.kind === "host-publish" ? HOST_PUBLISHED_VERIFICATION : ARTIFACT_VERIFICATION
+}
 
 export type ArtifactFile = {
   path: string
@@ -41,17 +48,23 @@ export type ArtifactImportRecord = {
   sequence: number
   name: string
   createdAt: string
-  source: {
-    kind: "published-folder" | "browser-publish"
-    projectId?: string
-    sourceRevision?: string
-  }
+  source:
+    | {
+      kind: "published-folder" | "browser-publish"
+      projectId?: string
+      sourceRevision?: string
+    }
+    | {
+      kind: "host-publish"
+      sessionId: string
+      revision: number
+    }
 }
 
 // API projection: immutable content plus one explicit import's provenance.
 export type ArtifactManifest = ArtifactBlob & Pick<ArtifactImportRecord, "importId" | "name" | "createdAt" | "source"> & {
   schemaVersion: 1
-  verification: typeof ARTIFACT_VERIFICATION
+  verification: ArtifactVerification
   playerUrl: string
 }
 

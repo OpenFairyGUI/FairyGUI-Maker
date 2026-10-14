@@ -10,7 +10,8 @@ export function formatTime(value?: string) {
 }
 
 export function ArtifactTrust({ artifact }: { artifact: Pick<ArtifactManifest, "verification"> }) {
-  return <span>{artifact.verification?.content === "host-validated" ? "内容已校验" : "内容校验未知"} · {artifact.verification?.source === "client-declared" ? "来源为客户端声明" : "来源未经验证"}</span>
+  const source = artifact.verification?.source
+  return <span>{artifact.verification?.content === "host-validated" ? "内容已校验" : "内容校验未知"} · {source === "host-published" ? "由 Host 从已保存会话发布" : source === "client-declared" ? "来源为客户端声明" : "来源未经验证"}</span>
 }
 
 export function MetricCard({ label, value, detail }: { label: string; value: string; detail: string }) {
