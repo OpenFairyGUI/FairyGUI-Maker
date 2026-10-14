@@ -22,6 +22,7 @@ import { HOST_INSTRUCTIONS, PACKAGE_VERSION, VIEW_ONLY_INSTRUCTIONS, WEB_DIST, l
 import type { BackendActivity, BackendSession, McpSession, RegisteredProject, StartMakerHostOptions } from "./host-types"
 import { createMcpEndpoint } from "./mcp-endpoint"
 import { createHostProjectSnapshot, type HostProjectSnapshot } from "./project-snapshot"
+import { createSessionPublisher, sessionPublishInput } from "./publish"
 import { HostSaveGrants, saveGrantFailureSchema } from "./save-grants"
 import { advanceSessionPreview, sessionPreviewInput, sessionPreviewResult } from "./session-preview"
 import { uploadLimits } from "./upload-limits"
@@ -91,6 +92,8 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     }
   })
   const viewOnly = projectSource !== null
+  const publisher = createSessionPublisher({ runtime, artifactStore, workRoot: resolve(dataDir, "publishes") })
+  await publisher.init()
   const app = new Hono()
   let origin = ""
   let allowedHosts = new Set<string>()
@@ -140,6 +143,23 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     }, async ({ sessionId, expectedRevision }) => {
       const result = ensureSessionPreview(sessionId, expectedRevision)
       const value = result.ok ? { ok: true, project: result.project, browserRequired: !renderBroker.getViewerRenderer(result.project.projectId) } : result
+      return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value, isError: !result.ok }
+    })
+    if (!viewOnly) server.registerTool("publish_artifact", {
+      title: "Publish a saved Backend session as a Player artifact",
+      description: "Publish the saved project of an explicit, clean Backend session revision with the Player's LayaAir profile and import the output as an immutable artifact (verification.source host-published). Save first; unsaved edits are refused. Writes only Maker's private data directory, never the project, and skips project plugins and code generation. Then open playerUrl in a browser and use the Player tools.",
+      inputSchema: sessionPublishInput,
+    }, async (input) => {
+      const result = await publisher.publish(input)
+      const value = result.ok ? {
+        ok: true,
+        artifact: {
+          artifactId: result.artifact.artifactId, importId: result.artifact.importId, name: result.artifact.name, digest: result.artifact.digest,
+          source: result.artifact.source, verification: result.artifact.verification, playerUrl: result.artifact.playerUrl,
+          packages: result.artifact.packages.map(({ packageId, packageName, components }) => ({ packageId, packageName, components: components.length })),
+        },
+        browserRequired: !renderBroker.getSessionForArtifact(result.artifact.artifactId),
+      } : result
       return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value, isError: !result.ok }
     })
     return server

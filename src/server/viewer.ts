@@ -877,7 +877,7 @@ export function registerViewerMcpTools(
 
   server.registerTool("open_artifact_player", {
     title: "Open published FairyGUI artifact Player",
-    description: "Return the Player URL and current render session for an immutable artifact. Source is client-declared, not Host-verified publishing provenance.",
+    description: "Return the Player URL and current render session for an immutable artifact. verification.source is host-published only for publish_artifact outputs; client-declared sources are not Host-verified publishing provenance.",
     inputSchema: z.object({ artifactId: z.string().min(1) }),
     annotations: { readOnlyHint: true },
   }, async ({ artifactId }) => {

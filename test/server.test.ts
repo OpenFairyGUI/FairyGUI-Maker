@@ -667,6 +667,7 @@ test("CLI view registers one bounded read-only project snapshot", async () => {
     assert.ok(toolNames.includes("list_viewer_components"))
     assert.ok(toolNames.includes("capture_render_screenshot"))
     assert.equal(toolNames.some((name: string) => name.startsWith("openfairygui_backend_")), false)
+    assert.equal(toolNames.includes("publish_artifact"), false)
   } finally {
     await host.close()
     await rm(dataDir, { recursive: true, force: true })

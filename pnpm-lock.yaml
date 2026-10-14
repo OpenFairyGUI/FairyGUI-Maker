@@ -23,6 +23,9 @@ importers:
       '@openfairygui/core':
         specifier: 0.6.3
         version: 0.6.3
+      '@openfairygui/functions':
+        specifier: 0.6.3
+        version: 0.6.3(@types/node@26.1.2)
       '@openfairygui/mcp':
         specifier: 0.6.3
         version: 0.6.3(@types/node@26.1.2)

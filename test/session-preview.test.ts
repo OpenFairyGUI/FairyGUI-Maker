@@ -51,7 +51,7 @@ test("full Host discovers Maker preview tools alongside Backend tools", async (t
     } while (cursor)
     const required = [
       "openfairygui_backend_open_session", "openfairygui_backend_query_entity", "openfairygui_backend_apply_transaction", "openfairygui_backend_save_session",
-      "open_session_preview", "list_viewer_components", "render_component_preview", "update_render_session", "set_render_view", "inspect_project_assets",
+      "open_session_preview", "publish_artifact", "list_viewer_components", "render_component_preview", "update_render_session", "set_render_view", "inspect_project_assets",
       "list_artifact_components", "open_artifact_player", "render_artifact_component", "get_render_observation", "capture_render_screenshot", "run_ui_scenario",
     ]
     assert.deepEqual(required.filter((name) => !names.has(name)), [], "all Host capabilities must be discoverable through tools/list")

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { BinaryReader } from "@openfairygui/core"
 import { z } from "zod"
@@ -7,7 +7,7 @@ import { MemoryFileSystem } from "../design-import/memory-fs"
 import { readArtifactFile } from "./artifact-files"
 
 import {
-  ARTIFACT_VERIFICATION,
+  artifactVerification,
   PLAYER_RUNTIME_PROFILE,
   MAX_ARTIFACT_FILES as MAX_FILES,
   MAX_ARTIFACT_FILE_BYTES as MAX_FILE_BYTES,
@@ -27,11 +27,20 @@ const MAX_RECORD_BYTES = 16 * 1024
 const MAX_PACKAGE_COMPONENTS = 50_000
 const FGUI_MAGIC = 0x46475549
 
+// Client-declared provenance; the only kinds the REST import API accepts.
 export const artifactSourceSchema = z.object({
   kind: z.enum(["published-folder", "browser-publish"]),
   projectId: z.string().min(1).max(128).optional(),
   sourceRevision: z.string().min(1).max(128).optional(),
 }).strict()
+// Written only by importDirectory for publishes this Host ran itself.
+const hostPublishSourceSchema = z.object({
+  kind: z.literal("host-publish"),
+  sessionId: z.string().min(1).max(256),
+  revision: z.number().int().nonnegative(),
+}).strict()
+const storedSourceSchema = z.union([artifactSourceSchema, hostPublishSourceSchema])
+export type HostPublishSource = z.infer<typeof hostPublishSourceSchema>
 
 const legacyManifestFields = z.object({
   schemaVersion: z.literal(1),
@@ -63,7 +72,8 @@ const artifactBlobSchema = legacyManifestFields.pick({ artifactId: true, digest:
   (manifest) => manifest.packages.reduce((count, pkg) => count + pkg.components.length, 0) <= MAX_PACKAGE_COMPONENTS,
   "Artifact contains too many package components",
 )
-const importRecordSchema = legacyManifestFields.pick({ artifactId: true, digest: true, name: true, createdAt: true, source: true }).extend({
+const importRecordSchema = legacyManifestFields.pick({ artifactId: true, digest: true, name: true, createdAt: true }).extend({
+  source: storedSourceSchema,
   importId: z.string().regex(/^(?:import_[0-9a-f-]{36}|legacy_artifact_[0-9a-f]{24})$/),
   sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 }).strict()
@@ -72,7 +82,7 @@ const storedArtifactSchema = z.object({ schemaVersion: z.literal(2), blob: artif
 type PendingImport = {
   importId: string
   name: string
-  source: ArtifactManifest["source"]
+  source: ArtifactImportRecord["source"]
   files: Map<string, ArtifactImportFile>
   uploaded: Set<string>
   root: string
@@ -149,7 +159,7 @@ export class ArtifactStore {
     const record = importId ? this.records.get(importId) : this.latestImports.get(artifactId)
     if (!blob || !record || record.artifactId !== artifactId || record.digest !== blob.digest) return null
     const { name, source, createdAt } = record
-    return { schemaVersion: 1, ...blob, importId: record.importId, name, source: { ...source }, createdAt, verification: ARTIFACT_VERIFICATION, playerUrl: `${this.origin}/artifacts/${artifactId}/player` }
+    return { schemaVersion: 1, ...blob, importId: record.importId, name, source: { ...source }, createdAt, verification: artifactVerification(source), playerUrl: `${this.origin}/artifacts/${artifactId}/player` }
   }
 
   setOrigin(origin: string) {
@@ -161,7 +171,7 @@ export class ArtifactStore {
     // ponytail: scan the local record map; index by artifact if import history becomes large.
     const records = [...this.records.values()].filter((record) => record.artifactId === artifactId).sort((a, b) => b.sequence - a.sequence)
     const page = records.filter((record) => cursor === undefined || record.sequence < cursor).slice(0, limit)
-    return { records: page.map((record) => ({ ...record, source: { ...record.source }, verification: ARTIFACT_VERIFICATION })), total: records.length, nextCursor: page.length && records.some((record) => record.sequence < page.at(-1)!.sequence) ? page.at(-1)!.sequence : null }
+    return { records: page.map((record) => ({ ...record, source: { ...record.source }, verification: artifactVerification(record.source) })), total: records.length, nextCursor: page.length && records.some((record) => record.sequence < page.at(-1)!.sequence) ? page.at(-1)!.sequence : null }
   }
 
   components(artifactId: string, cursor = 0, limit = 100) {
@@ -184,9 +194,29 @@ export class ArtifactStore {
     if (record.sequence > (this.latestImports.get(record.artifactId)?.sequence ?? 0)) this.latestImports.set(record.artifactId, record)
   }
 
-  async createImport(input: { name: string; source: ArtifactManifest["source"]; files: ArtifactImportFile[] }) {
-    const source = artifactSourceSchema.parse(input.source)
-    const files = validateDeclaredFiles(input.files)
+  async createImport(input: { name: string; source: ArtifactImportRecord["source"]; files: ArtifactImportFile[] }) {
+    return this.openImport(input.name, artifactSourceSchema.parse(input.source), input.files)
+  }
+
+  // Imports a directory this Host produced itself (a publish output) through the same validation and commit path.
+  async importDirectory(root: string, name: string, source: HostPublishSource) {
+    const files: ArtifactImportFile[] = []
+    for (const relativePath of await listDirectoryFiles(root)) {
+      const bytes = await readFile(resolveWithin(root, relativePath))
+      files.push({ path: relativePath, size: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") })
+    }
+    const { importId } = await this.openImport(name, hostPublishSourceSchema.parse(source), files)
+    try {
+      for (const file of files) await this.writeImportFile(importId, file.path, await readFile(resolveWithin(root, file.path)))
+      return await this.completeImport(importId, this.origin)
+    } catch (error) {
+      await this.cancelImport(importId).catch(() => undefined)
+      throw error
+    }
+  }
+
+  private async openImport(name: string, source: ArtifactImportRecord["source"], declared: ArtifactImportFile[]) {
+    const files = validateDeclaredFiles(declared)
     await this.pruneExpiredImports()
     if (this.imports.size >= MAX_PENDING_UPLOADS) throw new UploadError("artifact_import_limit_reached", 503)
     const pendingBytes = [...this.imports.values()].reduce((total, pending) => total + [...pending.files.values()].reduce((size, file) => size + file.size, 0), 0)
@@ -198,7 +228,7 @@ export class ArtifactStore {
     const expiresAt = Date.now() + PENDING_UPLOAD_TTL_MS
     this.imports.set(importId, {
       importId,
-      name: input.name,
+      name,
       source,
       files,
       uploaded: new Set(),
@@ -392,6 +422,18 @@ function validateDeclaredFiles(input: ArtifactImportFile[]) {
     files.set(filePath, { path: filePath, size: item.size, sha256: item.sha256 })
   }
   return files
+}
+
+// Regular files only, as artifact-relative POSIX paths; links or special entries mean the directory is not a plain publish output.
+async function listDirectoryFiles(root: string, prefix = ""): Promise<string[]> {
+  const files: string[] = []
+  for (const entry of await readdir(prefix ? resolveWithin(root, prefix) : root, { withFileTypes: true })) {
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name
+    if (entry.isDirectory()) files.push(...await listDirectoryFiles(root, relativePath))
+    else if (entry.isFile()) files.push(relativePath)
+    else throw new Error(`artifact_directory_entry_unsupported:${relativePath}`)
+  }
+  return files.sort()
 }
 
 function normalizeRelativePath(value: string) {
