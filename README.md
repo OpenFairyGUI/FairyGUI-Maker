@@ -11,9 +11,10 @@ FairyGUI Maker 不是另一个完整编辑器，也不是 FairyGUI 官方产品�
 
 ## FairyGUI Maker 是什么
 
-Maker 的目标是让人和 Agent 使用同一组稳定 ID、revision 与 render session 协作，当前正在探索并验证以下工作流：
+Maker 的目标是让人和 Agent 使用同一组稳定 ID、revision 与 render session 协作。当前主线是「Agent 修改 → 保存 → 自动发布 → Player 验收」，在这条路径成熟前，其他方向只维持现状。正在探索并验证以下工作流：
 
 - 让 Agent 检查、修改并按明确授权保存 `.fairy` 工程。
+- 把已保存的工程会话直接发布成 Player Artifact，在原生运行时中验收修改结果。
 - 在发布前通过 Viewer 预览当前工程组件，而不生成 `.fui`。
 - 查询工程资源引用、断链、无法解析 URL、不可达私有组件、未使用、完全重复与名称冲突（浏览器分析，仅供参考）。
 - 通过 Player 加载真实 `.fui` / `_fui.bytes` 发布目录，验证原生运行时表现。
@@ -24,6 +25,7 @@ Maker 的目标是让人和 Agent 使用同一组稳定 ID、revision 与 render
 | 目标 | 使用入口 | 持久化边界 |
 |---|---|---|
 | 检查、编辑或保存工程 | OpenFairyGUI backend session | save 需要显式 revision；普通保存可用会话授权，特殊操作单次确认 |
+| 发布已保存工程并验收 | `publish_artifact` → Player | 只写 Maker 私有数据目录，不写工程 |
 | 预览尚未发布的组件 | Viewer | 只修改 render session 内存，不写工程 |
 | 检查资源健康度 | Asset Manager | 固定 source revision 的只读分析 |
 | 验证发布目录 | Player | Artifact 不可变，操作只影响 render session |
@@ -110,6 +112,7 @@ MCP 最多保留 32 个会话，空闲 30 分钟后回收，正在执行的调�
 | 工作流 | 工具 |
 |---|---|
 | Backend 未保存预览 | `open_session_preview`（显式 `sessionId`、`expectedRevision`） |
+| 发布已保存会话 | `publish_artifact`（显式 `sessionId`、`expectedRevision`） |
 | Viewer 发现与渲染 | `list_viewer_components`、`render_component_preview` |
 | Player 发现与渲染 | `list_artifact_components`、`open_artifact_player`、`render_artifact_component` |
 | Render session | `update_render_session`、`set_render_view`、`get_render_observation`、`capture_render_screenshot` |
@@ -168,6 +171,8 @@ Claude 工程使用 `.claude/skills/use-fairygui-maker` 作为目标目录，仍
 在目标工程重新开启 Agent 任务，显式调用 `$use-fairygui-maker`，例如“检查 `E:\Design\hud.fig` 的转换诊断，暂不物化工程”，或“在指定工程中复用现有奖励卡片模板，配置未达成、可领取、已领取三种状态并预览，暂不保存”。先检查 Agent 是否发现 Skill，再分别检查所需 CLI 或 MCP：安装 Skill 本身不会启动 Host，也不会建立 MCP 连接；本地 import/reimport 不以 MCP 在线为前提。
 
 ## 设计源导入
+
+> 设计源导入已冻结：保留现有功能和测试，只修复阻断性问题，不再增加新功能。
 
 CLI 可以把 `.fig`、`.psd` 或 [Maker Import Bundle v1](./docs/maker-import-bundle-v1.md) 目录转换成新的 FairyGUI 工程目录：
 
@@ -240,7 +245,8 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 - 每个 render session 最多保留最近 256 个 request ID 用于安全重试；更早的已完成请求可能被淘汰。
 - `run_ui_scenario` 已支持连续语义操作、状态/Controller/交互断言、条件等待和一次 PNG 截图；绑定现有 renderer 与 source revision，失败即停止且不回滚。每个 renderer 保留最近 8 次场景回执。输入、限制与恢复见[连续 UI 场景验收](./.agents/skills/use-fairygui-maker/references/ui-scenarios.md)。
 - 普通 Viewer/Player 截图直接作为 MCP `image/png` 返回，不持久化 ScreenshotRef；Import Draft 的 Visual Evidence 是独立、带 revision 的审查记录。
-- 当前不包含远程部署、守护进程、WebSocket 或自动 `publishBrowser`。
+- `publish_artifact` 把已保存且没有未保存修改的 Backend 会话按 Player 使用的 LayaAir profile 发布，并导入为不可变 Artifact（`verification.source: host-published`）。它只写 Maker 私有数据目录，跳过工程插件和代码生成；未保存的修改会被拒绝。保存之后在 Maker 之外对工程文件的改动不会被检测。
+- 当前不包含远程部署、守护进程或 WebSocket。
 - Player 验证发布包内的原生 FairyGUI 行为，不加载游戏项目的业务脚本、网络层或宿主逻辑。
 
 ## 兼容范围

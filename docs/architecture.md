@@ -95,11 +95,11 @@ Viewer 工程绑定固定为只读。浏览器按需读取当前工程，用 Ope
 - 使用 `sessionId + expectedRevision` 执行 UAM 事务。
 - 保存或物化工程。
 
-Maker 只补充面向用户任务的高层工具。Viewer 与 Artifact-first Player 第一版已经落地；自动发布仍属于后续阶段：
+Maker 只补充面向用户任务的高层工具。Viewer、Artifact-first Player 和自动发布都已落地，组成当前主线「Agent 修改 → 保存 → 自动发布 → Player 验收」：
 
 | 工具 | 用途 |
 |---|---|
-| `publish_artifact` | 后续：调用 OpenFairyGUI 发布指定工程或会话 |
+| `publish_artifact` | 当前：Host 用 `@openfairygui/functions` 的 `publishNode` 发布一个已保存、无未保存修改的 Backend 会话，固定 LayaAir profile，跳过工程插件与代码生成，输出导入 Artifact Store（`verification.source: host-published`） |
 | Artifact REST import | 当前：导入用户选择的真实发布目录，验证二进制包、依赖和必要文件并固化快照 |
 | `list_viewer_components` | 列出 Viewer 工程、稳定入口和 package/component ID |
 | `inspect_project_assets` | 查询固定工程 revision 的资源健康摘要，或指定资源的 incoming/outgoing 引用 |
@@ -190,7 +190,8 @@ Viewer 的“只读”只约束工程目录：Button、TextInput、List/Tree、C
 - 持久 artifact 目录、文件 digest、manifest、包依赖与组件目录。
 - 原生 `.fui` / `_fui.bytes` 回放、Agent 语义操作、观察、人工交互上报与截图。
 - 已通过 `run_ui_scenario` 提供有界的连续 UI 验收；场景回执与当前 render session 同生命周期，不编辑或保存工程。
-- 后续再接入 OpenFairyGUI 自动发布、持久 ScreenshotRef 和 `fairygui-publish-preview` Skill。
+- `publish_artifact` 把已保存的 Backend 会话发布成 Artifact，Agent 可在同一 MCP 服务内完成「修改 → 保存 → 发布 → Player 验收」。发布在 Maker 私有数据目录的临时目录中进行，发布前后都核对会话仍是同一个已保存 revision；保存后在 Maker 之外对工程文件的改动不会被检测。
+- 持久 ScreenshotRef 暂不实现。
 
 ### 阶段 4：远程或云端
 
