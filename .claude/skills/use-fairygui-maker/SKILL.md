@@ -1,6 +1,6 @@
 ---
 name: use-fairygui-maker
-description: Create or refine FairyGUI UI with FairyGUI Maker using reusable resources and components, Controller states, Relations and Transitions. Also use for design import/reimport, project inspection/editing, asset analysis, Viewer previews, publishing saved projects and validating .fui or _fui.bytes output in Player, and Maker CLI/MCP revision or permission failures. Do not trigger for developing FairyGUI Maker's own source code or unrelated UI frameworks.
+description: Create or refine FairyGUI UI with FairyGUI Maker using reusable resources and components, Controller states, Relations and Transitions. Also use for design import/reimport, project inspection/editing, asset analysis, Viewer previews, publishing saved projects and validating .fui or _fui.bytes output in Player, visual-baseline regression checks, and Maker CLI/MCP revision or permission failures. Do not trigger for developing FairyGUI Maker's own source code or unrelated UI frameworks.
 ---
 
 # Use FairyGUI Maker

@@ -194,6 +194,8 @@ type RenderSession = {
   rendered: ViewerRendered | null
   view: ViewerViewState
   catalog: ViewerProjectCatalog | null
+  /** The renderer page's browser, as sent with its registration request. */
+  userAgent: string | null
 }
 
 export class ViewerRenderBroker {
@@ -207,7 +209,7 @@ export class ViewerRenderBroker {
     private readonly getArtifact: (artifactId: string) => PlayerArtifact | null = () => null,
   ) {}
 
-  registerRenderer(input: z.infer<typeof rendererRegistrationSchema>) {
+  registerRenderer(input: z.infer<typeof rendererRegistrationSchema>, meta: { userAgent?: string } = {}) {
     const mode = input.mode === "player" ? "player" : "viewer"
     const sourceId = input.mode === "player" ? input.artifactId : input.projectId
     const expectedRevision = this.sourceRevision(mode, sourceId)
@@ -246,6 +248,7 @@ export class ViewerRenderBroker {
       rendered: null,
       view: { zoom: 1, background: "#202226", width: 1, height: 1 },
       catalog: mode === "viewer" && "catalog" in input ? input.catalog ?? null : null,
+      userAgent: meta.userAgent?.slice(0, 512) ?? null,
     }
     this.sessions.set(session.renderSessionId, session)
     this.sessionBySource.set(sourceKey, session.renderSessionId)
@@ -569,6 +572,19 @@ export class ViewerRenderBroker {
     for (const requestId of session.requests.keys()) {
       if (session.requests.size < MAX_RENDER_REQUESTS_PER_SESSION) return
       if (!session.pending.has(requestId)) session.requests.delete(requestId)
+    }
+  }
+
+  /** What produced a capture: renderer kind, source, browser and view. Used to tell visual-baseline environments apart. */
+  rendererEnvironment(renderSessionId: string) {
+    const session = this.currentSession(renderSessionId)
+    if (!session) return null
+    return {
+      mode: session.mode,
+      ...(session.mode === "viewer" ? { projectId: session.sourceId } : { artifactId: session.sourceId }),
+      sourceRevision: session.sourceRevision,
+      userAgent: session.userAgent,
+      view: { ...session.view },
     }
   }
 

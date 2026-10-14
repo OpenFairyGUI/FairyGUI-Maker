@@ -345,7 +345,7 @@ export function registerApi(
       },
     )
     .post("/api/renderers", zValidator("json", rendererRegistrationSchema), (c) => {
-      const session = readState().renderBroker.registerRenderer(c.req.valid("json"))
+      const session = readState().renderBroker.registerRenderer(c.req.valid("json"), { userAgent: c.req.header("user-agent") })
       return session ? c.json({ session }, 201) : c.json({ error: "Render source not found" }, 404)
     })
     .get("/api/render-sessions/:renderSessionId", (c) => {

@@ -28,6 +28,7 @@ import { HostSaveGrants, saveGrantFailureSchema } from "./save-grants"
 import { advanceSessionPreview, sessionPreviewInput, sessionPreviewResult } from "./session-preview"
 import { uploadLimits } from "./upload-limits"
 import { ViewerRenderBroker, registerViewerMcpTools, type RendererTarget } from "./viewer"
+import { VisualBaselineStore, registerVisualBaselineTools } from "./visual-baselines"
 
 // A cold browser start plus LayaAir runtime boot; well under the MCP client timeout.
 const HEADLESS_RENDERER_TIMEOUT_MS = 30_000
@@ -104,6 +105,8 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
   const viewOnly = projectSource !== null
   const publisher = createSessionPublisher({ runtime, artifactStore, workRoot: resolve(dataDir, "publishes") })
   await publisher.init()
+  const visualBaselines = new VisualBaselineStore(dataDir)
+  await visualBaselines.init()
   const app = new Hono()
   let origin = ""
   let allowedHosts = new Set<string>()
@@ -169,6 +172,8 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
       (projectId) => assetAnalyses.get(projectId),
       ensureRenderer,
     )
+    // Baselines live in Maker's data directory, never in projects, so view mode offers them too.
+    registerVisualBaselineTools(server, renderBroker, visualBaselines)
     if (!viewOnly) server.registerTool("open_session_preview", {
       title: "Open an unsaved Backend session in Viewer",
       description: "Create a read-only Viewer source for an explicit Backend session revision. Uses public session-model and resource-byte reads; does not save files or request a Save Grant. Open viewerUrl in a browser, then use the existing Viewer tools. Edits and saves invalidate the previous renderer.",
