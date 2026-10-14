@@ -363,6 +363,7 @@ GitHub CI 会在 Windows/Linux 与 Node.js 22/24 上执行 runtime 校验、构�
 - [参与开发与验证约定](./CONTRIBUTING.md)
 - [产品定位与技术架构](./docs/architecture.md)
 - [Maker Workbench、Viewer、Player 与 render session 协议](./docs/workbench.md)
+- [Agent 任务评测](./docs/agent-evals.md)：`pnpm eval:agent` 的任务、隔离、判定与各版本结果
 - [第三方运行时与补充声明](./THIRD_PARTY_NOTICES.md)；生产构建还会生成并发行 `dist/web/THIRD_PARTY_LICENSES.md`
 - [发布检查清单](./docs/release-checklist.md)
 - [MIT License](./LICENSE)
