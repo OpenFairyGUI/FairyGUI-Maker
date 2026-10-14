@@ -11,7 +11,7 @@ import {
   type ImportDraftStore,
 } from '../design-import/draft-store';
 import { semanticNodeDirectiveSchema, semanticOverlaySchema } from '../design-import/semantic-overlay';
-import type { RegisteredProject } from './index';
+import type { RegisteredProject } from './host-types';
 import { UploadError } from '../upload';
 
 const revisionSchema = z.object({ expectedRevision: z.number().int().positive() }).strict();
