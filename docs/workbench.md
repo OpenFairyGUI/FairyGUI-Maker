@@ -540,7 +540,7 @@ type UpdateRenderSessionInput = {
 - 缺失资源、加载超时和 runtime error。
 - PNG 截图结果、事件日志和结构化诊断。
 
-如果对应页面尚未注册 renderer，Agent 工具返回 `browser_required` 和稳定的 Viewer / Player URL，不能伪造渲染完成状态。Viewer 页面发现 read permission 失效时显示 `project_permission_required` 并引导用户返回 Dashboard；授权动作不能由 Agent 代替用户完成。
+如果对应页面尚未注册 renderer，开启无头渲染的 Host（CLI 默认开启，`startMakerHost` 需显式传入 `headless`）会用自己的无头浏览器加载该 Viewer / Player 页面并等待注册，最长 30 秒；该浏览器以 HttpOnly Cookie 认证，令牌不进入 URL。浏览器授权的工程、关闭无头渲染或找不到浏览器时，Agent 工具返回 `browser_required` 和稳定的 Viewer / Player URL（后者附 `headlessError`），不能伪造渲染完成状态。Viewer 页面发现 read permission 失效时显示 `project_permission_required` 并引导用户返回 Dashboard；授权动作不能由 Agent 代替用户完成。
 
 ### 4.4 数据通道
 

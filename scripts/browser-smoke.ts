@@ -16,6 +16,8 @@ import { brokerStateSmoke } from "./broker-state-smoke"
 import { projectRevisionSmoke } from "./project-revision-smoke"
 import { gearDefaultSmoke } from "./gear-default-smoke"
 import { saveGrantSmoke } from "./save-grant-smoke"
+import type { HeadlessBrowserChannel } from "../src/server/headless-browser"
+import { headlessSmoke } from "./headless-smoke"
 import { publishSmoke } from "./publish-smoke"
 import { sessionPreviewSmoke } from "./session-preview-smoke"
 import { assertRuntimeIsolated, runtimeNavigationSmoke } from "./runtime-isolation-smoke"
@@ -363,6 +365,8 @@ try {
     (name, args) => callTool(host!.origin, sessionId, 90, name, args)))
   await evidence.step("session-preview", () => sessionPreviewSmoke(context, host!, publishDir, evidence.directory))
   const publishPlayer = await evidence.step("publish-player", () => publishSmoke(context, host!, publishDir, evidence.directory))
+  // A separate Host whose own browser renders; no page from this test context is involved.
+  const headlessRenderer = await evidence.step("headless-renderer", () => headlessSmoke(publishDir, evidence.directory, browserChannel as HeadlessBrowserChannel))
   const runtimeNavigation = await evidence.step("runtime-navigation", () => runtimeNavigationSmoke(context, host!.origin, artifact))
   await evidence.step("import-recovery", () => importRecoverySmoke(context, host!.origin, evidence))
   await evidence.step("import-iteration", () => importIterationSmoke(context, host!.origin, evidence, (name, args) => callTool(host!.origin, sessionId, 904, name, args)))
@@ -379,7 +383,7 @@ try {
   // Golden changes are explicit and happen only after all functional/diagnostic checks pass.
   if (updateGoldens) for (const golden of goldens) await writeFile(golden.golden, golden.actual)
   await evidence.finish("passed", { environment, goldenUpdate: updateGoldens, workbenchRoutes }, [])
-  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, deterministicPlan: true, artifactUpload: true, artifactPersistence: true, mapping: true, visualEvidence: true, viewer: true, player: true, semanticFidelity, viewerState, playerState, viewerDelivery, playerDelivery, viewerLifecycle, playerLifecycle, runtimeBudgets, projectRevision, gearDefaults, publishPlayer, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 4 + semanticFidelity.goldens, artifactId: artifact.artifactId }) + "\n")
+  process.stdout.write(JSON.stringify({ browser: browserChannel, importSource: "fig", workbench: true, deterministicPlan: true, artifactUpload: true, artifactPersistence: true, mapping: true, visualEvidence: true, viewer: true, player: true, semanticFidelity, viewerState, playerState, viewerDelivery, playerDelivery, viewerLifecycle, playerLifecycle, runtimeBudgets, projectRevision, gearDefaults, publishPlayer, headlessRenderer, saveGrants, viewerIsolation, playerIsolation, runtimeNavigation, screenshots: 4 + semanticFidelity.goldens, artifactId: artifact.artifactId }) + "\n")
 } catch (error) {
   await evidence.finish("failed", { environment }, browser?.contexts().flatMap((context) => context.pages()) ?? [], error)
   throw error

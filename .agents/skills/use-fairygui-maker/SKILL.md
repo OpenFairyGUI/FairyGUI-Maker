@@ -82,7 +82,7 @@ Choose one authorization path:
 Then:
 
 1. Call `list_viewer_components`, optionally with `projectId`. Use its stable project, package, and component IDs; never guess them from display names.
-2. If it returns `browserRequired: true`, open the returned stable `viewerUrl` in a real browser, wait for renderer registration, and call `list_viewer_components` again.
+2. A Host started from the CLI renders headlessly when no page is open, so `list_viewer_components` with a `projectId` and the render tools usually connect on their own. If it still returns `browserRequired: true` (a browser-authorized project, `--no-headless`, or a `headlessError`), ask the user to open the returned stable `viewerUrl`, wait for renderer registration, and call `list_viewer_components` again.
 3. Call `render_component_preview` with the returned stable IDs and `capture: true` when visual evidence is required.
 4. If rendering still returns `browser_required`, reopen the returned `viewerUrl`, wait for renderer registration, and retry the identical request safely.
 5. Record the returned `renderSessionId` and `stateVersion`.
@@ -110,7 +110,7 @@ Use `{projectId, packageId, resourceId, direction: "both", limit: 100}` for one 
 
 1. Start from an Artifact returned by `publish_artifact`, or from a real published directory imported through Workbench or its authorized Artifact REST flow. Only `verification.source: host-published` Artifacts were published by Maker; never claim that for a `client-declared` import.
 2. Call `list_artifact_components` to page artifact summaries, then pass `artifactId` to page its package/component catalog. Repeat the same selectors with `nextCursor` until it is `null`; `limit` is 1–500 (default 100). Use the returned immutable `artifactId`, digest, package IDs, and component IDs. On `cursor_invalid_or_stale`, restart that query without the cursor.
-3. Call `open_artifact_player`. If no render session exists, open the returned `playerUrl` in a real browser.
+3. Call `open_artifact_player`. With headless rendering on, the Host opens the Player itself and returns a render session. If `browserRequired` is still true, report any `headlessError` and ask the user to open the returned `playerUrl` in a real browser.
 4. Call `render_artifact_component` with stable IDs and `capture: true` when visual evidence is required.
 5. Use `get_render_observation`, `update_render_session`, and `capture_render_screenshot` with the returned render-session and state versions.
 6. Treat Player behavior as authoritative for native `UIPackage`, Controller, Gear, Transition, and published-resource behavior.
@@ -127,7 +127,7 @@ Inspect `value.passed`, zero-based step results and `failedStep`; later steps st
 
 | Failure | Response |
 |---|---|
-| `browser_required` | Open the returned Viewer or Player URL; do not fabricate a render result |
+| `browser_required` | Headless rendering was off, unavailable (`headlessError` says why) or the project is browser-authorized: report `headlessError` if present and ask the user to open the returned Viewer or Player URL; do not fabricate a render result |
 | `project_permission_required` | Ask the user to reauthorize from Dashboard |
 | stale backend revision | Re-fetch the session, re-plan, and use the new revision |
 | `cursor_invalid_or_stale` / `issue_invalid_or_stale` | Restart the same asset/catalog query without the old cursor/issue ID |

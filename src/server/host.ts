@@ -23,10 +23,14 @@ import type { BackendActivity, BackendSession, McpSession, RegisteredProject, St
 import { createMcpEndpoint } from "./mcp-endpoint"
 import { createHostProjectSnapshot, type HostProjectSnapshot } from "./project-snapshot"
 import { createSessionPublisher, sessionPublishInput } from "./publish"
+import { createHeadlessBrowser } from "./headless-browser"
 import { HostSaveGrants, saveGrantFailureSchema } from "./save-grants"
 import { advanceSessionPreview, sessionPreviewInput, sessionPreviewResult } from "./session-preview"
 import { uploadLimits } from "./upload-limits"
-import { ViewerRenderBroker, registerViewerMcpTools } from "./viewer"
+import { ViewerRenderBroker, registerViewerMcpTools, type RendererTarget } from "./viewer"
+
+// A cold browser start plus LayaAir runtime boot; well under the MCP client timeout.
+const HEADLESS_RENDERER_TIMEOUT_MS = 30_000
 
 const hostOptionsSchema = z.object({
   port: z.number().int().min(0).max(65_535),
@@ -119,6 +123,29 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
     return { ok: true as const, project }
   }
 
+  const headless = options.headless
+    ? createHeadlessBrowser({ token, channel: options.headless === true ? undefined : options.headless.channel })
+    : null
+  const ensureRenderer = headless ? async (target: RendererTarget) => {
+    const connected = () => "projectId" in target
+      ? Boolean(renderBroker.getViewerRenderer(target.projectId)?.catalog)
+      : Boolean(renderBroker.getSessionForArtifact(target.artifactId))
+    if (connected()) return true
+    let url: string | undefined
+    if ("projectId" in target) {
+      const project = projects.get(target.projectId)
+      // Browser-authorized projects are read through the person's own directory handle, which a Host browser cannot use.
+      if (!project || project.sourceOwner === "browser") return false
+      url = project.viewerUrl
+    } else url = artifactStore.get(target.artifactId)?.playerUrl
+    if (!url) return false
+    await headless.open(url)
+    for (const deadline = Date.now() + HEADLESS_RENDERER_TIMEOUT_MS; Date.now() < deadline; await new Promise((done) => setTimeout(done, 100))) {
+      if (connected()) return true
+    }
+    return false
+  } : undefined
+
   const createMcpServer = () => {
     const server = viewOnly
       ? new McpServer({ name: "fairygui-maker", version: PACKAGE_VERSION }, { instructions: VIEW_ONLY_INSTRUCTIONS })
@@ -134,6 +161,7 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
       () => artifactStore.list(artifactStore.count()).map(({ artifactId }) => artifactStore.get(artifactId)!),
       () => [...projects.values()],
       (projectId) => assetAnalyses.get(projectId),
+      ensureRenderer,
     )
     if (!viewOnly) server.registerTool("open_session_preview", {
       title: "Open an unsaved Backend session in Viewer",
@@ -316,6 +344,8 @@ export async function startMakerHost(options: StartMakerHostOptions = {}) {
       if (closing) return
       closing = true
       clearInterval(uploadCleanup)
+      // Its pages hold long-poll requests; close them before the HTTP server waits for connections.
+      await headless?.close()
       saveGrants.close()
       ownerSessions.clear()
       await Promise.all([artifactStore.close(), importDraftStore.close()])
