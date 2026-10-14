@@ -22,8 +22,8 @@ export function createHeadlessBrowser({ token, channel }: { token: string; chann
     const failures: string[] = []
     for (const candidate of channel ? [channel] : ["chrome", "msedge"] as const) {
       try {
-        // Playwright's own Chromium has no channel name; it must be installed with `npx playwright install chromium`.
-        const browser = await chromium.launch({ headless: true, args: LAUNCH_ARGS, ...(candidate === "chromium" ? {} : { channel: candidate }) })
+        // "chromium" is Playwright's full Chromium in new headless mode (`npx playwright install chromium`), not the separate headless shell.
+        const browser = await chromium.launch({ headless: true, args: LAUNCH_ARGS, channel: candidate })
         const context = await browser.newContext({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 })
         return { browser, context }
       } catch (error) {
