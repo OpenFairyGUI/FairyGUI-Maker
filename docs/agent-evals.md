@@ -81,3 +81,18 @@ Codex 的 6 次失败都发生在第一次写入或渲染调用的 MCP 输入校
 据此的改进方向：Maker 为 `requestId` 等参数补充用途说明并给出可操作的校验错误；事务 schema 与校验错误的可读性属于 OpenFairyGUI MCP，需要与上游协同。改进后用同一组任务复测对比。
 
 复测（同日）：Maker 的 `requestId` 改为说明「每个新请求使用新的随机 UUID，仅重试相同请求时复用」，校验错误附示例与改法后，Codex 的 `inspect-render` 首次调用即传入合法 UUID 并通过（5 次工具调用）。其余 5 项仍取决于上游事务 schema 与错误信息，已在 [OpenFairyGUI/OpenFairyGUI#156](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/156) 跟进，上游发布后用同一组任务复测。
+
+### 2026-10-15 · OpenFairyGUI 0.7.0 + `requestId` 说明 · Windows 11 · 无头 Chrome
+
+相对上一轮只有两处产品变化：OpenFairyGUI 升级到 0.7.0（其中包括 [#156](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/156) 的修复：事务工具描述写明 `kind` 判别字段、给出最小示例并指向 `openfairygui://contracts/operations/{kind}`，校验错误按 `kind` 聚焦）；Maker 的 `requestId` 写明用途和生成方式，校验错误给出改法。CLI 版本与默认模型未变（两轮 MCP 请求元数据均为 `gpt-6.1-sol`、reasoning `low`）。
+
+| 运行器 | CLI / 模型 | 通过 | 平均耗时 | 平均工具调用 |
+|---|---|---|---|---|
+| reference | — | 6/6 | 2 s | 6.2 |
+| codex | codex-cli 0.162.1 · CLI 默认模型 | 6/6（上一轮 0/6） | 54 s | 8.7 |
+
+- 5 个写入任务中，Codex 都先读 `openfairygui://contracts/operations` 和所用操作的单项 schema，再 `preflight_transaction`、`apply_transaction`；第一次事务即正确，整轮没有任何 `-32602` 输入校验错误。上一轮它没有读过任何 MCP 资源。
+- 因为没有出现校验失败，上游改进后的错误信息本轮未被触发；起作用的是工具描述对 schema 资源的指引。
+- `visual-accept-change` 中，Codex 用 `read_session_state` 取得完整 `graphProperties` 后再改填充色。
+- 两次失败调用都是预期的拒绝（`publish_requires_saved_session`、`save_approval_required`），Codex 随后如实报告 blocked，没有退回普通保存。隔离检查全部通过。
+- Claude Code 本轮未重跑。
