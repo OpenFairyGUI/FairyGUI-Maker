@@ -45,7 +45,8 @@ export function trackBackendResult(sessions: Map<string, BackendSession>, activi
   const errorCode = result?.ok === false ? String(result.error?.code ?? "backend_error").slice(0, 128) : null
   activity.push({ method, sessionId: sessionId ?? null, at: now, errorCode })
   if (activity.length > 100) activity.shift()
-  if (method === "closeSession" && result?.ok && sessionId) {
+  // Backend also closes clean idle sessions on its own, without calling closeSession; forget them once a call reports them gone.
+  if (sessionId && ((method === "closeSession" && result?.ok) || errorCode === "session_not_found")) {
     sessions.delete(sessionId)
     return
   }

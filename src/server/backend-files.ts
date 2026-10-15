@@ -15,7 +15,7 @@ export async function createHostBackendFileSystem(dataDir: string): Promise<Back
   const assertProjectRoot = async (projectRoot: string) => {
     const canonical = await base.resolvePath(projectRoot)
     const roots = [...privateRoots, await base.resolvePath(dataDir)]
-    // Node commits by replacing the whole project directory: ancestors are unsafe too.
+    // Node commits replace project-owned entries (assets*, settings) under the root; refuse overlap in either direction.
     if ([resolve(projectRoot), canonical].some((project) => roots.some((root) => contains(root, project) || contains(project, root)))) {
       throw Object.assign(new Error(PRIVATE_PROJECT_MESSAGE), { code: PRIVATE_PROJECT_ERROR })
     }
@@ -29,7 +29,7 @@ export async function createHostBackendFileSystem(dataDir: string): Promise<Back
     async runProjectWriteTransaction(projectRoot, write) {
       // Recheck at every save, not just open; existing ancestors can be retargeted through a link.
       await assertProjectRoot(projectRoot)
-      await base.runProjectWriteTransaction!(projectRoot, write)
+      return await base.runProjectWriteTransaction!(projectRoot, write)
     },
   }
 }

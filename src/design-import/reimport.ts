@@ -1,13 +1,14 @@
-import { createHash } from 'node:crypto';
-import { lstat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { lstat, mkdir, rename, rm } from 'node:fs/promises';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import type { ProjectWriteTransactionResult } from '@openfairygui/backend';
 import { createNodeBackendFileSystem, createNodeBackendRuntime, type BackendFileSystem } from '@openfairygui/backend/node';
 import { ProjectReader } from '@openfairygui/core/project-io';
 import { assertValidUamProject, liftDocumentToUamProject, validateTransactionSupport, type UamProject, type UamTransactionOperation } from '@openfairygui/core/uam';
 
-import type { ReimportPlanV1 } from './import-state';
-import { digestReimportPath, prepareProjectReimport, writeMakerImportStateV2 } from './node';
+import { MAKER_IMPORT_SNAPSHOT_DIRECTORY, type ReimportPlanV1 } from './import-state';
+import { digestReimportPath, MAKER_IMPORT_STATE, prepareProjectReimport, writeMakerImportStateV2 } from './node';
 
 export interface ReimportApplyPlanV1 extends ReimportPlanV1 {
   /** Content revision of the whole on-disk project, including Import State and unmodelled files. */
@@ -51,28 +52,39 @@ async function runReimport(projectPath: string, approvedDigest: string | undefin
     async runProjectWriteTransaction(root, write) {
       if (!approvedDigest || !base.runProjectWriteTransaction) throw new Error('Reimport requires explicit approval and atomic Backend writes');
       await assertUnchanged();
-      await base.runProjectWriteTransaction(root, async (staged) => {
-        await assertUnchanged();
-        await write(staged);
-        const reader = new ProjectReader({
-          ...staged,
-          exists: (path) => staged.stat(path).then(() => true, () => false),
+      const metadata = await stageImportMetadata(base, root);
+      let result: ProjectWriteTransactionResult;
+      try {
+        result = await base.runProjectWriteTransaction(root, async (staged) => {
+          await assertUnchanged();
+          await write(staged);
+          const reader = new ProjectReader({
+            ...staged,
+            exists: (path) => staged.stat(path).then(() => true, () => false),
+          });
+          const read = await reader.readDetailed(join(root, prepared.state.project.fairyFile), { hydrateResourceBytes: true });
+          if (!read.complete || !read.document || read.diagnostics.some(({ severity }) => severity === 'error')) {
+            throw new Error('Reimport staged project could not be reopened completely without errors');
+          }
+          assertValidUamProject(liftDocumentToUamProject(read.document));
+          // The next baseline is the SOURCE-generated project, never the merged user-edited project.
+          await writeMakerImportStateV2({
+            projectRoot: root, fairyFile: prepared.state.project.fairyFile,
+            source: prepared.parsed.source, sourcePath: prepared.state.source.path,
+            document: prepared.parsed.document, project: prepared.proposed.project,
+            makerVersion: prepared.state.compiler.makerVersion, profile: prepared.profile,
+            semanticOverlay: prepared.overlay, conversionIds: prepared.proposed.ids, fileSystem: metadata.fileSystem,
+          });
+          await assertUnchanged();
+          // Last step before the Backend commit, so any commit failure below can still restore it.
+          await metadata.install();
         });
-        const read = await reader.readDetailed(join(root, prepared.state.project.fairyFile), { hydrateResourceBytes: true });
-        if (!read.complete || !read.document || read.diagnostics.some(({ severity }) => severity === 'error')) {
-          throw new Error('Reimport staged project could not be reopened completely without errors');
-        }
-        assertValidUamProject(liftDocumentToUamProject(read.document));
-        // The next baseline is the SOURCE-generated project, never the merged user-edited project.
-        await writeMakerImportStateV2({
-          projectRoot: root, fairyFile: prepared.state.project.fairyFile,
-          source: prepared.parsed.source, sourcePath: prepared.state.source.path,
-          document: prepared.parsed.document, project: prepared.proposed.project,
-          makerVersion: prepared.state.compiler.makerVersion, profile: prepared.profile,
-          semanticOverlay: prepared.overlay, conversionIds: prepared.proposed.ids, fileSystem: staged,
-        });
-        await assertUnchanged();
-      });
+      } catch (error) {
+        await metadata.rollback(error);
+        throw error;
+      }
+      const retained = await metadata.dispose();
+      return retained ? { ...result, retainedBackupPaths: [...result.retainedBackupPaths ?? [], retained] } : result;
     },
   };
   // The native session lock also excludes a running Host with unsaved user edits.
@@ -113,6 +125,63 @@ async function runReimport(projectPath: string, approvedDigest: string | undefin
   } finally {
     await runtime.closeSession({ sessionId: session.sessionId });
   }
+}
+
+// Backend 0.7 stages and commits only FairyGUI-owned entries (*.fairy, settings, assets*).
+// Import State is staged beside the project and swapped in just before that commit; a failed commit restores the previous one.
+async function stageImportMetadata(base: BackendFileSystem, projectRoot: string) {
+  // Resolved here: node.ts re-exports this module, so its constants are not ready at module load.
+  const metadataEntries = [MAKER_IMPORT_SNAPSHOT_DIRECTORY, MAKER_IMPORT_STATE];
+  const root = resolve(projectRoot);
+  const work = join(dirname(root), `.${basename(root)}.maker-import-${randomUUID()}`);
+  const staged = join(work, 'staged');
+  const backup = join(work, 'backup');
+  await mkdir(staged, { recursive: true });
+  await mkdir(backup);
+  const translate = (path: string) => {
+    const entry = relative(root, resolve(path));
+    if (!metadataEntries.includes(entry.split(sep)[0]!)) throw new Error(`Import State path escapes its staging: ${path}`);
+    return join(staged, entry);
+  };
+  const exists = (path: string) => lstat(path).then(() => true, (error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  });
+  const changes: { name: string; backedUp: boolean; installed: boolean }[] = [];
+  return {
+    fileSystem: {
+      ...base,
+      mkdir: (path, options) => base.mkdir(translate(path), options),
+      writeFileRaw: (path, bytes) => base.writeFileRaw(translate(path), bytes),
+    } satisfies BackendFileSystem,
+    async install() {
+      for (const name of metadataEntries) {
+        const change = { name, backedUp: false, installed: false };
+        changes.push(change);
+        if (await exists(join(root, name))) {
+          await rename(join(root, name), join(backup, name));
+          change.backedUp = true;
+        }
+        if (await exists(join(staged, name))) {
+          await rename(join(staged, name), join(root, name));
+          change.installed = true;
+        }
+      }
+    },
+    async rollback(cause: unknown) {
+      try {
+        for (const change of changes.reverse()) {
+          if (change.installed) await rename(join(root, change.name), join(staged, change.name));
+          if (change.backedUp) await rename(join(backup, change.name), join(root, change.name));
+        }
+      } catch (error) {
+        throw new AggregateError([cause, error], `Reimport failed and its Import State could not be restored; the previous Import State is kept in ${backup}`);
+      }
+      await rm(work, { recursive: true, force: true }).catch(() => undefined);
+    },
+    /** Returns the work directory when the committed reimport could not remove the previous Import State. */
+    dispose: () => rm(work, { recursive: true, force: true }).then(() => undefined, () => work),
+  };
 }
 
 // Package snapshots are already a public Backend transaction operation, including reference validation.

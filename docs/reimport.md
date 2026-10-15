@@ -8,7 +8,7 @@ fairygui-maker reimport E:\Projects\hud-imported --dry-run
 fairygui-maker reimport E:\Projects\hud-imported --apply <预览返回的64位planDigest>
 ```
 
-两步都支持 `--data-dir`，并继续排除 Maker 私有目录、其子目录及会被整目录替换的祖先目录。`--apply` 不能省略摘要、不能和 `--dry-run` 混用，也不是其他命令的选项。成功返回 `applied: true`；失败为非零退出码，不自动重试或强制覆盖。
+两步都支持 `--data-dir`，并继续排除 Maker 私有目录、其子目录及祖先目录。`--apply` 不能省略摘要、不能和 `--dry-run` 混用，也不是其他命令的选项。成功返回 `applied: true`；失败为非零退出码，不自动重试或强制覆盖。
 
 ## 计划绑定与授权
 
@@ -33,14 +33,14 @@ fairygui-maker reimport E:\Projects\hud-imported --apply <预览返回的64位pl
 
 使用现有 Backend `removePackage` / `addPackage` 快照事务，不维护另一套属性写入协议。Backend 0.3.1 不允许同批删除并重建仍被引用的包，因此在 CLI 私有会话内分两次 revision 完成移除、重建；中间状态只在内存，不保存、不暴露给 Host。最终完整引用校验通过后，只调用一次 `saveSession`。
 
-通过原生 `runProjectWriteTransaction` 的 staged filesystem 写工程，重新读取验证暂存工程，再写生成快照和 State，最后提交整个目录。新的 baseline 必须是纯源生成结果，不能把用户编辑吸收到 baseline 中，否则下一轮冲突会漏报。没有变更也不使用 force-save。
+通过原生 `runProjectWriteTransaction` 的 staged filesystem 写工程，重新读取验证暂存工程。Backend 0.7 只暂存并提交工程自有条目（`*.fairy`、`settings`、`assets*`），因此生成快照和 State 先写到工程旁的 `.工程名.maker-import-*`，在 Backend 提交前一刻换入工程，随后 Backend 逐项提交工程条目。新的 baseline 必须是纯源生成结果，不能把用户编辑吸收到 baseline 中，否则下一轮冲突会漏报。没有变更也不使用 force-save。
 
-受控异常（包括快照/State 写入失败及最终目录替换失败）复用 Backend 清理暂存/恢复旧目录，工程与 State 一起恢复。若失败时源或外部文件已经改变，保留这些外部改变，重新预览；不替用户撤销外部写入。
+受控异常（包括快照/State 写入失败及 Backend 提交中途失败）由 Backend 回滚已换入的工程条目，Maker 换回旧 State，工程与 State 一起恢复；旧 State 无法换回时报错并指出保存它的目录。若失败时源或外部文件已经改变，保留这些外部改变，重新预览；不替用户撤销外部写入。
 
-此保证不扩展为断电/进程被强杀的跨平台事务：原生目录替换有两次 rename 之间的窗口。异常终止后若工程目录缺失而同级保留 `.工程名.save-backup-*` / `.工程名.save-*`，先停止相关进程并备份残留目录，再把完整 backup 恢复为原工程目录后重跑 `--dry-run`；不要把旧 State 单独拷入新工程。不要在有未恢复残留时重复写回。原生 advisory lock 能排除协作的 Backend 写入，但不锁住任意第三方编辑器；最后校验后的极短外部写入竞态也不宣称已消除。
+此保证不扩展为断电/进程被强杀的跨平台事务：State 换入与原生逐项提交都由多次 rename 组成，各步之间有窗口。异常终止后若同级保留 `.工程名.save-backup-*`、`.工程名.save-*` 或 `.工程名.maker-import-*`，先停止相关进程并备份这些残留目录，再用 backup 中的工程条目和 `.工程名.maker-import-*/backup` 中的旧 State 一起恢复原工程后重跑 `--dry-run`；不要把旧 State 与新工程条目混用。不要在有未恢复残留时重复写回。原生 advisory lock 能排除协作的 Backend 写入，但不锁住任意第三方编辑器；最后校验后的极短外部写入竞态也不宣称已消除。
 
 ## 回归检查
 
-`test/design-import/reimport.test.ts` 覆盖增改删、图片/Binding、用户字段、自建资源、跨包组件引用、连续重导入、旧源/工程/State/路径计划、Backend 锁、私有路径/链接、缺失资源、PSD 身份、暂存元数据失败、最终目录替换失败和晚到的源/工程改变。`scripts/release-smoke.mjs` 另从真实安装包调用预览与应用；本地测试不代替跨 OS CI 或断电试验。
+`test/design-import/reimport.test.ts` 覆盖增改删、图片/Binding、用户字段、自建资源、跨包组件引用、连续重导入、旧源/工程/State/路径计划、Backend 锁、私有路径/链接、缺失资源、PSD 身份、暂存元数据失败、Backend 提交中途失败和晚到的源/工程改变。`scripts/release-smoke.mjs` 另从真实安装包调用预览与应用；本地测试不代替跨 OS CI 或断电试验。
 
 本地验收（Windows / Node 22.22.2）：TypeScript/构建、131 项 Node 测试、5 组内存压力测试、完整 18 项 Chromium 检查及 tarball 全新安装烟测通过。Viewer/Player 均为 0 different pixels，未更新基线。浏览器证据在 `test-results/browser/run-TG1CDY/report.json`，内存证据在 `test-results/memory/node-1788610761947.json`（均不进入 npm 包）。未改依赖，未重跑 npm audit / 跨 OS CI，未执行合并、推送或 npm 发布。
