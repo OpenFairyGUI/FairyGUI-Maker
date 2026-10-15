@@ -15,6 +15,9 @@ const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm"
 const npmEnv = { ...process.env, npm_config_cache: path.join(tempRoot, "npm-cache") }
 const packageMetadata = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"))
 const expectedVersion = packageMetadata.version
+// strict (default) fails on any advisory in what users install; warn only reports, for PR CI while an upstream fix is pending.
+const consumerAudit = process.env.FAIRYGUI_MAKER_CONSUMER_AUDIT || "strict"
+if (!["strict", "warn"].includes(consumerAudit)) throw new Error(`FAIRYGUI_MAKER_CONSUMER_AUDIT must be strict or warn, not ${consumerAudit}`)
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -33,6 +36,36 @@ function run(command, args, options = {}) {
       ? resolve({ stdout, stderr })
       : reject(new Error(`${command} ${args.join(" ")} exited ${code}\n${stdout}\n${stderr}`)))
   })
+}
+
+// `pnpm audit --prod` sees this repository's lockfile and overrides; users get npm's resolution of the published ranges.
+async function auditInstalledDependencies() {
+  const { code, stdout } = await new Promise((resolve, reject) => {
+    const child = spawn(npmCommand, ["audit", "--omit=dev", "--json"], { cwd: consumer, env: npmEnv, shell: process.platform === "win32" })
+    let stdout = ""
+    child.stdout.on("data", (chunk) => { stdout += chunk })
+    child.stderr.resume()
+    child.once("error", reject)
+    // npm audit exits non-zero when it finds advisories, so its JSON report is read either way.
+    child.once("exit", (code) => resolve({ code, stdout }))
+  })
+  let problem
+  try {
+    const report = JSON.parse(stdout)
+    if (report.error) problem = `npm audit could not run: ${report.error.summary || report.error.code}`
+    else if (report.metadata?.vulnerabilities?.total) {
+      const findings = Object.values(report.vulnerabilities).flatMap(({ name, severity, nodes, via }) => via
+        .filter((advisory) => typeof advisory === "object")
+        .map((advisory) => `${name} (${severity}) at ${nodes.join(", ")}: ${advisory.title} ${advisory.url}`))
+      problem = `Installed production dependencies have ${report.metadata.vulnerabilities.total} known vulnerabilities:\n${[...new Set(findings)].join("\n")}`
+    } else if (code !== 0) problem = `npm audit exited ${code} without reporting vulnerabilities`
+  } catch {
+    problem = `npm audit returned no JSON report (exit ${code})`
+  }
+  if (!problem) return
+  if (consumerAudit === "strict") throw new Error(problem)
+  console.warn(`Release smoke: WARNING ${problem}`)
+  if (process.env.GITHUB_ACTIONS) console.log(`::warning title=Installed package audit::${problem.replaceAll("%", "%25").replaceAll("\n", "%0A")}`)
 }
 
 async function initializeMcp(origin, token, projectPath) {
@@ -137,6 +170,8 @@ try {
   const tarballSha256 = createHash("sha256").update(await readFile(tarball)).digest("hex")
   console.log("Release smoke: installing tarball in a fresh consumer")
   await run(npmCommand, ["install", "--prefix", consumer, "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", tarball], { env: npmEnv })
+  console.log(`Release smoke: auditing the installed production dependencies (${consumerAudit})`)
+  await auditInstalledDependencies()
 
   const installedRoot = path.join(consumer, "node_modules", packageMetadata.name)
   // Follow the documented external-project recipe for both clients: copy the canonical folder, not the repository wrapper.

@@ -49,10 +49,10 @@
 		"@hono/node-server": "2.1.0",
 		"@hono/zod-validator": "0.9.0",
 		"@modelcontextprotocol/sdk": "1.32.1",
-		"@openfairygui/backend": "0.6.3",
-		"@openfairygui/core": "0.6.3",
-		"@openfairygui/functions": "0.6.3",
-		"@openfairygui/mcp": "0.6.3",
+		"@openfairygui/backend": "0.7.0",
+		"@openfairygui/core": "0.7.0",
+		"@openfairygui/functions": "0.7.0",
+		"@openfairygui/mcp": "0.7.0",
 		"@resvg/resvg-js": "2.6.2",
 		"ag-psd": "31.0.2",
 		"hono": "4.13.13",
@@ -96,5 +96,10 @@
 		"access": "public",
 		"registry": "https://registry.npmjs.org/"
 	},
-	"packageManager": "pnpm@10.14.0"
+	"packageManager": "pnpm@10.14.0",
+	"pnpm": {
+		"overrides": {
+			"@openfairygui/functions>sharp": "0.35.5"
+		}
+	}
 }

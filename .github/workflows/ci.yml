@@ -52,6 +52,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps --no-shell chromium
       - run: pnpm verify:release
+        env:
+          # PRs annotate advisories in the installed package; the release workflow keeps the strict default and refuses to publish.
+          FAIRYGUI_MAKER_CONSUMER_AUDIT: warn
       # Deterministic harness and judge self-check; real model runs stay manual (docs/agent-evals.md).
       - name: Agent evaluation self-check (reference runner, no model)
         timeout-minutes: 10
