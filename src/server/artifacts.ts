@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
-import { BinaryReader } from "@openfairygui/core"
+import { BinaryReader } from "@openfairygui/core/project-io"
 import { z } from "zod"
 import { MemoryFileSystem } from "../design-import/memory-fs"
 import { readArtifactFile } from "./artifact-files"

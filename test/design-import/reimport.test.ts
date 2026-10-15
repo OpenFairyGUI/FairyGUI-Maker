@@ -154,31 +154,32 @@ test('reimport rolls back project and Import State together on staged writes or 
   const plan = await planProjectReimport(env.output);
   const before = await digestReimportPath(env.output);
   const base = createNodeBackendFileSystem();
+  const leftovers = async () => (await readdir(env.parent)).filter((name) => name.includes('.save-') || name.includes('.maker-import-') || name.endsWith('.lock'));
+  // Import State is staged by Maker through the caller's file system; project files by the Backend transaction.
   for (const target of ['generated-snapshot.json', MAKER_IMPORT_STATE]) {
-    const failing: BackendFileSystem = { ...base, runProjectWriteTransaction: (root, write) => base.runProjectWriteTransaction!(root, (staged) => write({
-      ...staged, async writeFileRaw(path, bytes) {
-        if (basename(path) === target) throw new Error(`injected ${target} failure`);
-        await staged.writeFileRaw(path, bytes);
-      },
-    })) };
+    const failing: BackendFileSystem = { ...base, async writeFileRaw(path, bytes) {
+      if (basename(path) === target) throw new Error(`injected ${target} failure`);
+      await base.writeFileRaw(path, bytes);
+    } };
     await assert.rejects(applyProjectReimport(env.output, plan.planDigest, failing), /injected/);
     assert.equal(await digestReimportPath(env.output), before);
     assert.equal((await planProjectReimport(env.output)).planDigest, plan.planDigest, 'failure leaves a reusable unchanged baseline');
-    assert.ok(!(await readdir(env.parent)).some((name) => name.includes('.save-') || name.endsWith('.lock')));
+    assert.deepEqual(await leftovers(), []);
   }
   const rename = fs.rename;
-  let swapFailed = false;
+  let installs = 0;
   fs.rename = async (from, to) => {
-    if (to === env.output && String(from).startsWith(join(env.parent, '.project.save-')) && !String(from).includes('.save-backup-')) {
-      swapFailed = true;
+    // Fail the Backend commit after one project entry is installed and Import State is already swapped in.
+    if (dirname(String(to)) === env.output && String(from).startsWith(join(env.parent, '.project.save-')) && !String(from).includes('.save-backup-') && ++installs === 2) {
       throw new Error('injected final swap failure');
     }
     await rename(from, to);
   };
   try { await assert.rejects(applyProjectReimport(env.output, plan.planDigest), /injected final swap failure/); }
   finally { fs.rename = rename; }
-  assert.equal(swapFailed, true);
-  assert.equal(await digestReimportPath(env.output), before, 'native directory-swap rollback restores project and metadata together');
+  assert.equal(installs, 2);
+  assert.equal(await digestReimportPath(env.output), before, 'commit rollback restores project entries and Import State together');
+  assert.deepEqual(await leftovers(), []);
   const sourceRace: BackendFileSystem = { ...base, runProjectWriteTransaction: (root, write) => base.runProjectWriteTransaction!(root, async (staged) => {
     await env.writeSource([text('keep'), text('change', 'changed during stage'), text('remove')]);
     await write(staged);
