@@ -1,6 +1,6 @@
-# Backend 会话预览与 0.6.3 接入验收
+# Backend 会话预览与接入验收
 
-Maker 固定安装公开发布的 `@openfairygui/core/backend/mcp@0.6.3`。字段读回、未保存会话预览、Host 授权保存及重开读回使用同一 Backend 会话链路。[OpenFairyGUI #138](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/138) 所需的工具发现、Host 失败分支及公共指引参数已接入。
+Maker 固定安装公开发布的 `@openfairygui/core/backend/functions/mcp@0.7.0`。字段读回、未保存会话预览、Host 授权保存及重开读回使用同一 Backend 会话链路。[OpenFairyGUI #138](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/138) 所需的工具发现、Host 失败分支及公共指引参数已接入。
 
 ## 使用
 

@@ -112,3 +112,19 @@ test("Backend sync/async failures are recorded without leaking details or creati
     assert.equal((await tool(host, id, "close_session", { sessionId: "real-session" })).ok, true)
   } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+test("Backend sessions reclaimed while idle leave the Host session list on their next use", async () => {
+  const root = await mkdtemp(join(tmpdir(), "maker-host-reclaim-"))
+  const host = await startMakerHost({ port: 0, dataDir: root, runtime: createNodeBackendRuntime({ idleSessionTimeoutMs: 20 }) })
+  try {
+    const id = await initialize(host)
+    const document = new Document()
+    document.getRoot().setProjectId("reclaim-test")
+    assert.equal((await tool(host, id, "open_project_session", { project: liftDocumentToUamProject(document), sessionId: "idle-session" })).ok, true)
+    assert.equal((await sessions(host)).projects.length, 1)
+    await new Promise((done) => setTimeout(done, 200))
+    const reclaimed = await tool(host, id, "get_session", { sessionId: "idle-session" })
+    assert.equal(reclaimed.error.code, "session_not_found")
+    assert.equal((await sessions(host)).projects.length, 0)
+  } finally { await host.close(); await rm(root, { recursive: true, force: true }) }
+})
