@@ -708,8 +708,6 @@ Artifact 查询未指定 artifactId 时返回分页摘要（含 packageCount/com
 
 Feature Route 使用现有 TanStack Router 的错误边界，单页渲染异常不替换其他功能和侧栏；提供返回概览与显式重新加载，后者提示未保存状态会丢失。Design Import 两个页面通过现有模块按需加载，不另建通用错误/插件框架。Windows 生产构建基线的 Workbench 主包为 567.12 KB（gzip 173.83 KB）；改动后约 546 KB（gzip 168 KB），Design Import 独立块约 25.54 KB（gzip 8.22 KB），Dashboard 实测不提前请求此块。共享渲染/表格依赖仍使主块超过 500 KB；不通过调高告警阈值或机械拆文件掩盖它。
 
-旧 `project.md` 原文迁入 [历史提案](./archive/design-to-fairygui-proposal.md)，避免与当前架构并列充当事实来源；没有丢弃历史内容。源码 barrel 补齐导入交互和保真报告类型，保留 `MemoryFileSystem` 兼容导出；没有新增 npm SDK 或改动发布入口。贡献约定和 PR 检查项记录在仓库根目录与 `.github`。已在批次 20 移除的两份手工 Player 脚本不重复处理，`.claude` 和 `components.json` 保持不变。
-
 验证入口：`test/viewer-scene.test.ts`、`test/server.test.ts` 覆盖诊断图、非法 URL/ID、旧快照兼容与 MCP 信任声明；`scripts/project-revision-smoke.ts` 使用真实目录读取、扫描、筛选、reload/rescan 和 REST 回传验证诊断；`scripts/workbench-routes-smoke.ts` 检查按需请求、注入渲染异常、跨页导航与重新加载恢复。页面截图保存在同一次浏览器 evidence 目录；完整 Viewer/Player 与语义 Golden 不更新。
 
 ## 7. 技术栈选案
@@ -786,21 +784,3 @@ scripts/            CLI、浏览器证据与安装包烟测入口
 ```
 
 只有第二种 runtime profile 真正开始实现时，才把 `runtime/` 进一步拆成 adapter package。
-
-## 9. 第一版实现状态
-
-已落地 Dashboard 只读工程绑定与发布目录导入、`/projects/:projectId/viewer`、`/artifacts/:artifactId/player`、原始工程 UAM Viewer、内容寻址 Artifact Store、原生 UIPackage Player、组件虚拟列表、缩放/背景/Transition 播放/PNG 截图，以及 Host 内存 Render Session Broker。Viewer 不发布工程、不生成或读取 `.fui`；Player 不读取或修改工程目录，只消费固定 Artifact。Artifact 在 Host 启动时重新校验实际文件并忽略被篡改内容，中断导入目录自动清理。浏览器通过 HTTP 长轮询领取严格递增命令，并用 MessageChannel 顺序驱动各自 iframe；MCP session 和 request ID 缓存均有固定上限。
-
-Maker MCP 已增加 `list_viewer_components`、`render_component_preview`、`list_artifact_components`、`open_artifact_player`、`render_artifact_component`、`update_render_session`、`set_render_view`、`get_render_observation`、`capture_render_screenshot`、`run_ui_scenario` 和 `publish_artifact`。组件使用 package/component resource ID 定位；临时更新只接受白名单 `set-property`、`set-controller-page`、`play-transition` 和 `dispatch-event`，不接受任意 JavaScript、坐标操作或显示名称猜测。`get_render_observation` 返回对象树、控件状态和 Controller page；未打开对应 Viewer / Player 时返回 `browser_required` 和稳定入口 URL。
-
-普通会话截图直接作为 MCP image content 返回，Render Session 只保存在 Host 内存；Draft Visual Evidence 与浏览器测试证据已单独持久化。持久 MCP ScreenshotRef digest/resource 尚未实现。Viewer 的 ComboBox 弹层由 Maker 提供通用工程态交互，未被 UAM 表达的业务脚本和宿主绑定不执行；发布后原生行为由 Player 验证。
-
-## 10. 下一轮决策
-
-核心前后端栈、LayaAir 3.3.10/FairyGUI Web runtime、Dashboard 授权边界、Artifact-first Player 和 render session 数据通道已经完成第一版。Viewer 是 Maker 自有的 UAM Scene compiler 与直接 renderer；Player 是独立的原生 UIPackage runtime。FairyGUI Editor Online 只提供主 Canvas 的行为和视觉参考，不复用其 EditorShell、Resource Preview UI 或模块导出。Draft 视觉报告与 CI 双模式证据已持久化。
-
-2026-10-14 起，主线定为「Agent 修改 → 保存 → 自动发布 → Player 验收」，在这条路径成熟前暂停其他方向的加固：
-
-- 自动发布由 Maker Host 直接调用 `@openfairygui/functions` 实现（`publish_artifact`），不等待上游另做发布宿主工具。
-- 设计源导入冻结在当前状态：保留功能与测试，只修复阻断性问题。
-- 视觉验证归口、Agent 任务评测、首批目标用户、无头渲染与按工程预授权保存尚待决定。

@@ -167,36 +167,6 @@ Viewer 的“只读”只约束工程目录：Button、TextInput、List/Tree、C
 
 创建或改版 UI 时，入口按需加载 [UI 制作参考](../.agents/skills/use-fairygui-maker/references/ui-authoring.md)，将复用、状态、布局和动效需求映射到设计选择及验收结果。参考中的通用 FairyGUI 原则与 Maker 执行流程分开描述；精确操作契约仍由安装版本的 OpenFairyGUI 提供，列表虚拟化等运行时集成能力不因加入 Skill 而成为新的 Maker API。三个案例用于检查结构复用、状态切换和布局/动效结果，不代替实际保存回读或渲染验证。
 
-## 8. 实施顺序
-
-### 阶段 1：localhost Host 与入口（已完成）
-
-- 单进程 localhost Host。
-- Streamable HTTP MCP 与共享 BackendRuntime。
-- Host、MCP 连接和工程会话状态 API。
-- Maker Workbench Dashboard 和 Viewer Web 入口。
-- Host、Origin 和访问令牌校验。
-
-### 阶段 2：工程态 Viewer 闭环（第一版已完成）
-
-- Dashboard 只读目录授权与工程绑定。
-- 原始工程读取、UAM `ViewerScene` 依赖闭包和隔离 Canvas runtime。
-- 图片、位图字体、MovieClip、Controller/Gear、Transition 的工程态呈现。
-- Viewer 结构树、Button/Controller/Gear/Transition 与常用控件交互、Agent 语义更新和 PNG 截图。
-
-### 阶段 3：发布态 Player（Artifact-first 第一版已完成）
-
-- Dashboard / Player 手动授权并导入真实发布目录。
-- 持久 artifact 目录、文件 digest、manifest、包依赖与组件目录。
-- 原生 `.fui` / `_fui.bytes` 回放、Agent 语义操作、观察、人工交互上报与截图。
-- 已通过 `run_ui_scenario` 提供有界的连续 UI 验收；场景回执与当前 render session 同生命周期，不编辑或保存工程。
-- `publish_artifact` 把已保存的 Backend 会话发布成 Artifact，Agent 可在同一 MCP 服务内完成「修改 → 保存 → 发布 → Player 验收」。发布在 Maker 私有数据目录的临时目录中进行，发布前后都核对会话仍是同一个已保存 revision；保存后在 Maker 之外对工程文件的改动不会被检测。
-- 持久 ScreenshotRef 暂不实现。
-
-### 阶段 4：远程或云端
-
-只有出现明确需求时再增加远程身份认证、持久任务、对象存储和多租户隔离。
-
 ## 9. 第一版非目标
 
 - 不复制或分叉 OpenFairyGUI 的 UAM、事务和发布实现。

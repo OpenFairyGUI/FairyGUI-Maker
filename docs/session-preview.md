@@ -27,29 +27,3 @@ Host 的 `sourceRevision` 是绑定 ID、预览代次和 Backend 元数据的身
 Host 通过公共 `instructions` 提供 Agent 指引，通过 `toolPolicies` 为 save/materialize 分别声明 Host 失败 schema。`beforeCall` 检查当前 revision，允许已授权会话向原工程普通保存，或同步消费完整操作、revision 和选项绑定的单次授权；返回 `undefined` 后由 MCP 调用 Backend 一次。force、显式 targetPath 和完整物化不借用会话权限。会话不可用时返回 `save_session_unavailable`，不放行写入。
 
 原运行时结果跟踪仍负责 dirty/save 元数据、关闭保护及预览失效。Host 失败在进入 Backend 前停止；授权后的 Backend 结果继续通过上游权威 schema，保留 revision 队列、路径、磁盘与事务边界。读取及预览不需要 Save Grant。
-
-## 可复现验收
-
-```powershell
-pnpm build
-node --import tsx --test test/session-preview.test.ts test/viewer-scene.test.ts test/save-grants.test.ts test/backend-files.test.ts
-node --import tsx scripts/session-preview-smoke.ts
-pnpm test
-pnpm test:browser
-```
-
-真实浏览器使用临时合成工程：读回 `Before` → 预览红色跨包图片 → Backend 事务改为 `Unsaved after` 和蓝色图片 → query 读回 revision 1 → 旧 renderer 失效 → 刷新并捕获新画面 → 浏览器 reload → 关闭会话。两个 PNG 各检测到 1024 个目标色像素；未使用资源不下载，磁盘 XML/PNG 保持原样。证据输出至 `test-results/session-preview/`，也纳入常规 `test:browser`。
-
-完整浏览器序列还会预览未保存文本 → 所有者确认 → MCP 保存一次 → 旧 renderer 失效 → 刷新后读取相同 Backend edit revision 的已保存状态 → 捕获文本 PNG → 关闭并重开磁盘工程 → query 读回保存字段。证据位于本次 `test-results/browser/run-*/` 的 `report.json`、`save-preview-dirty.png` 与 `save-preview-clean.png`。
-
-| 验收项 | 覆盖 |
-|---|---|
-| 公开 MCP 组合 | 初始化指引、连接后新增工具及注册句柄生命周期、安装包文档资源与 prompts |
-| 完整 Host 发现 | Backend 入口与全部 12 个 Maker 工具 |
-| 保存授权 | 独立所有者验证及 Cookie 锁定、跨 revision 连续普通保存、特殊操作单次确认、单次并发仅一次/失败消耗、撤销/拒绝/过期、同 ID 重开失效 |
-| Backend 写入边界 | revision 队列、目标路径、磁盘及 Host 私有目录隔离 |
-| 会话预览 | 模型与资源 revision 一致、跨包资源、字体依赖、编辑/保存/关闭失效、PNG 及保存后重开读回 |
-
-浏览器诊断仍拒绝服务端错误和非预期异常。保存引起的旧 renderer commands 404，以及授权决定触发 React Query 替换后台列表查询的 `GET /api/save-approvals` / `net::ERR_ABORTED`，只在对应阶段和端点识别为预期结果；连接失败或其他端点错误不豁免。
-
-2026-09-07 当前工作区验收：类型检查与生产构建通过，Node 151/151、内存 5/5、完整 Chromium 25/25 通过。浏览器报告为 `test-results/browser/run-PzzptY/report.json`，无非预期诊断；内存报告为 `test-results/memory/node-1788793377866.json`。Player 100 次切换后 JS heap 约 11.33 MiB；该数值不代表物理 GPU 内存。构建保留现有主包体积及动态/静态导入提示。
