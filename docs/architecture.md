@@ -40,7 +40,7 @@ Host 校验 Host、Origin 和不少于 24 字符的 bearer token。完整模式�
 
 会话上限：
 
-- **MCP 会话**：最多 32 个，空闲 30 分钟后由每分钟清理或下一次请求回收；正在处理的调用不会被关闭，只保持 SSE GET 不算活跃。过期 ID 返回 HTTP 404 / `mcp_session_not_found`，客户端应重新 initialize，不能自动重放可能已执行的写操作；容量满返回 503 / `mcp_session_limit`。回收 MCP 连接不关闭 Backend 工程会话，也不丢弃未保存的编辑。
+- **MCP 会话**：最多 32 个，空闲 30 分钟后由每分钟清理或下一次请求回收；正在处理的调用不会被关闭，只保持 SSE GET 不算活跃。过期 ID 返回 HTTP 404 / `mcp_session_not_found`，客户端应重新 initialize，不能自动重放可能已执行的写操作；容量满返回 503 / `mcp_session_limit`。回收 MCP 连接不关闭 Backend 工程会话，也不丢弃未保存的编辑。客户端应发送 MCP `DELETE` 关闭不再使用的会话。
 - **Backend 工程会话**：最多 32 个；Backend 会在内部关闭空闲 30 分钟且没有未保存修改的会话，之后调用得到 `session_not_found`，需要重新打开。Host 在会话下一次被调用时把它从 Dashboard 移除。
 - `GET /api/sessions` 返回 MCP `activeRequests`、工程 `lastError` 和最近 100 次 Backend `activity`（方法、时间、session ID、稳定错误码，不含参数、异常详情或凭据）。未知异常为 `backend_unhandled_error`；不存在的 session ID 不会创建占位会话。
 
@@ -497,7 +497,7 @@ Draft 的 Visual Evidence 保存 `renderState` 双版本，旧 v1 报告可读�
 
 视觉基线由 Agent 管理：Host 经 Broker 截图，在服务端用 `sharp` 解码 PNG，沿用 `comparePixelData` 和同一组指标，不设全局通过线。结果包含差异指标、`identical`、`withinTolerance`、环境差异字段和差异 PNG。`withinTolerance` 默认要求像素完全一致，单次调用可放宽 `maxDifferentPixels` / `maxMeanAbsoluteError`，尺寸不同始终不通过。每个基线记录渲染环境（runtime profile、Viewer/Player、渲染页的 User-Agent、zoom/background/视口和图片尺寸），比对时列出与基线不同的字段，供 Agent 区分环境变化和界面回归。
 
-数据存于 `<data-dir>/visual-baselines/<suite>/<key>`：图片先于 `baseline.json` 原子写入；替换必须带原因，保留最近 5 个旧版本；最近一次比对报告与差异图一并保存。`suite`/`key` 只接受字母数字及 `._-`，key 最多 4 段。基线不写工程，完整模式和 `view` 模式都可用；不同机器、浏览器或字体会造成像素差异，应在同一环境建立和比对。
+数据存于 `<data-dir>/visual-baselines/<suite>/<key>`：图片先于 `baseline.json` 原子写入；已有基线只能以 `replace: true` 加原因替换，保留最近 5 个旧版本；最近一次比对报告与差异图一并保存。`suite`/`key` 只接受字母数字及 `._-`，key 最多 4 段。基线不写工程，完整模式和 `view` 模式都可用；不同机器、浏览器或字体会造成像素差异，应在同一环境建立和比对。
 
 ## 技术栈
 

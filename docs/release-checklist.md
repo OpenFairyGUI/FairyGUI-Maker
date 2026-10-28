@@ -33,12 +33,12 @@ CI 单元测试 job 限时 20 分钟，完整发布门禁限时 30 分钟；时�
 
 ## npm 首发与后续发布
 
-`0.1.1` 与 `0.1.2` 已由 `release.yml` 用 bootstrap `NPM_TOKEN` 发布；该 secret 仍在，Trusted Publisher 尚未完成下面第 3–4 步的闭环验证。`v0.1.0` 标签与同名 Release 草稿指向旧提交 `48435c4573ed4d47e061a2cb41362118e8c0d37e`，不要发布该草稿或覆盖该标签。
+版本通过 GitHub Release 触发 `release.yml` 发布，发布者需要在 npm `openfairygui` 组织中有发布权限。`0.1.1` 与 `0.1.2` 已由 `release.yml` 用 bootstrap `NPM_TOKEN` 发布；该 secret 仍在，Trusted Publisher 尚未完成下面第 3–4 步的闭环验证。`v0.1.0` 标签与同名 Release 草稿指向旧提交 `48435c4573ed4d47e061a2cb41362118e8c0d37e`，不要发布该草稿或覆盖该标签。
 
 首次发布和后续 Trusted Publisher 认证必须分别验收。步骤为：
 
 1. 发布者确认包名可用、账号有发布权，并明确批准首发。
-2. 临时配置仅用于首发的 granular `NPM_TOKEN` repository secret；从已验收提交创建版本 tag/GitHub Release，由 `release.yml` 执行门禁和带 provenance 的发布。
+2. 临时配置仅用于首发、可发布该 scope 并启用 Bypass 2FA 的 granular `NPM_TOKEN` repository secret；从已验收提交创建版本 tag/GitHub Release，由 `release.yml` 执行门禁和带 provenance 的发布。
 3. 首发成功后，在 npm package settings 配置 GitHub Trusted Publisher：organization/user 为 `OpenFairyGUI`，repository 为 `FairyGUI-Maker`，workflow filename 为 `release.yml`，允许直接 `npm publish`。当前工作流未配置 GitHub Environment，不应填写不匹配的 environment。
 4. 删除 GitHub 的 bootstrap secret 并撤销 npm token。下一次经授权的版本发布必须在没有该 token 的情况下成功，才能证明 OIDC 路径闭环；仅存在 `id-token: write` 不算验证成功。
 5. 实际发布后，核对 `npm view @openfairygui/fairygui-maker@<version> version dist.integrity`、registry tarball 和 provenance；包名、版本、tag、Release、CI 和产物必须一致。

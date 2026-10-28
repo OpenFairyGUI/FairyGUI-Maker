@@ -9,144 +9,50 @@ FairyGUI Maker 建立在 [OpenFairyGUI](https://github.com/OpenFairyGUI/OpenFair
 
 FairyGUI Maker 不是另一个完整编辑器，也不是 FairyGUI 官方产品。“FairyGUI”名称、Logo 及相关品牌标识的权利归其权利人所有；官方产品与信息请访问 [FairyGUI 官网](https://fairygui.com/)。
 
-## FairyGUI Maker 是什么
+## 它能做什么
 
-Maker 的目标是让人和 Agent 使用同一组稳定 ID、revision 与 render session 协作。当前主线是「Agent 修改 → 保存 → 自动发布 → Player 验收」，在这条路径成熟前，其他方向只维持现状。正在探索并验证以下工作流：
-
-- 让 Agent 检查、修改并按明确授权保存 `.fairy` 工程。
-- 把已保存的工程会话直接发布成 Player Artifact，在原生运行时中验收修改结果。
-- 在发布前通过 Viewer 预览当前工程组件，而不生成 `.fui`。
-- 查询工程资源引用、断链、无法解析 URL、不可达私有组件、未使用、完全重复与名称冲突（浏览器分析，仅供参考）。
-- 通过 Player 加载真实 `.fui` / `_fui.bytes` 发布目录，验证原生运行时表现。
-- 获取结构化对象树、控件状态、Controller、Transition、交互记录和 Canvas PNG 证据。
-
-## 选择正确的工作流
+当前主线是「Agent 修改 → 保存 → 自动发布 → Player 验收」，在这条路径成熟前，其他方向只维持现状。人和 Agent 使用同一组稳定 ID、revision 与 render session 协作：
 
 | 目标 | 使用入口 | 持久化边界 |
 |---|---|---|
-| 检查、编辑或保存工程 | OpenFairyGUI backend session | save 需要显式 revision；普通保存可用会话授权，特殊操作单次确认 |
+| 检查、编辑或保存工程 | OpenFairyGUI backend 会话 | 保存需要显式 revision 和所有者授权 |
 | 发布已保存工程并验收 | `publish_artifact` → Player | 只写 Maker 私有数据目录，不写工程 |
-| 预览尚未发布的组件 | Viewer | 只修改 render session 内存，不写工程 |
-| 检查资源健康度 | Asset Manager | 固定 source revision 的只读分析 |
-| 验证发布目录 | Player | Artifact 不可变，操作只影响 render session |
+| 预览尚未发布的组件 | Viewer | 只修改 render session 内存，不生成 `.fui` |
+| 检查资源健康度 | Asset Manager | 固定 revision 的只读分析，仅供参考 |
+| 验证已有发布目录 | Player | Artifact 不可变，操作只影响 render session |
 
-Viewer 不能作为发布结果的证明；最终 `.fui` 行为应在 Player 中验证。
-
-## 主要能力
-
-| 能力 | 说明 |
-|---|---|
-| Maker Host | 单个 Node.js 进程提供 Workbench、REST API 和 Streamable HTTP MCP |
-| 工程会话 | 复用 OpenFairyGUI capability、revision、UAM transaction 与 save 契约 |
-| Viewer | 从原始工程构建最小 `ViewerScene` 依赖闭包并在隔离 iframe 中预览 |
-| Asset Manager | 按固定 revision 查询引用关系、断链、未使用、重复和名称冲突 |
-| Artifact Store | 校验并按 digest 固化真实发布目录，不引入数据库 |
-| Player | 使用 LayaAir 3.3.10/FairyGUI 原生 `UIPackage` 加载 `.fui` / `_fui.bytes` |
-| Agent 数据通道 | 语义操作、结构化 observation、人工交互上报和 MCP `image/png` 截图 |
-| Agent Skills | 同仓库维护通用 Skill，并通过轻量包装兼容 Claude |
+Viewer 不能作为发布结果的证明；最终 `.fui` 行为应在 Player 中验证。Agent 还能获取结构化对象树、控件状态、Controller、Transition、交互记录和 Canvas PNG，并管理自己的视觉基线。
 
 ## 快速开始
 
-以下步骤仅供本地实验评估，请使用独立的测试目录和工程副本。
-
-npm 包名为 `@openfairygui/fairygui-maker`，CLI 命令仍为 `fairygui-maker`。以下命令使用 `0.1.2`；如果 npm registry 尚未提供该版本，请按[本地开发](#本地开发)从源码启动。发布状态以 registry 为准，验收要求见[发布检查清单](./docs/release-checklist.md)。
-
-使用 npm 包只需要 Node.js `>=22.18`：
+以下步骤仅供本地实验评估，请使用独立的测试目录和工程副本。npm 包名为 `@openfairygui/fairygui-maker`，CLI 命令为 `fairygui-maker`，需要 Node.js `>=22.18`。从源码启动见 [CONTRIBUTING](./CONTRIBUTING.md#本地开发)。
 
 ```powershell
 $env:FAIRYGUI_MAKER_TOKEN = "replace-with-at-least-24-characters"
 npx @openfairygui/fairygui-maker@0.1.2
 ```
 
-服务默认监听 `127.0.0.1:3847`。终端会输出：
+服务默认监听 `127.0.0.1:3847`，终端输出 Workbench URL 和 MCP endpoint `http://127.0.0.1:3847/mcp`。令牌由 Host 自动生成时，只在交互终端输出一次带令牌的 Workbench URL；固定令牌时打开 `http://127.0.0.1:3847/?token=<令牌>` 完成一次浏览器授权，Host 写入仅限本机的 HttpOnly Cookie 并从地址栏移除令牌。
 
-- Maker Workbench URL。
-- MCP endpoint：`http://127.0.0.1:3847/mcp`。
-
-令牌由 Host 自动生成时，仅在交互终端中输出一次带令牌的 Workbench URL。通过环境变量固定令牌时，打开 `http://127.0.0.1:3847/?token=<令牌>` 完成一次浏览器授权；Host 会写入仅限本机的 HttpOnly Cookie，并从地址栏移除令牌参数。
-
-修改端口：
+常用参数：
 
 ```powershell
 npx @openfairygui/fairygui-maker@0.1.2 --port 3900
-```
-
-把 Artifact 与运行状态放到明确的私有目录：
-
-```powershell
-npx @openfairygui/fairygui-maker@0.1.2 --data-dir E:\FairyGUI\maker-data
-```
-
-相对 `--data-dir` 以启动命令的当前目录为基准；未传入时默认使用当前目录下的 `.fairygui-maker`。环境变量 `FAIRYGUI_MAKER_DATA_DIR` 提供相同能力，CLI 参数优先。
-
-### 无头渲染
-
-从 CLI 启动的 Host 在没有打开的 Workbench 页面时，会用自己的无头浏览器加载 Viewer / Player 页面，Agent 不需要有人开着浏览器就能渲染、观察和截图。浏览器在第一次需要时启动，默认依次使用本机安装的 Chrome、Edge，不会下载浏览器：
-
-```powershell
-# 指定浏览器：chrome、msedge，或先运行 npx playwright install chromium 后用 chromium
-npx @openfairygui/fairygui-maker@0.1.2 --headless-browser msedge
-# 关闭无头渲染，渲染工具只使用已打开的 Workbench 页面
+npx @openfairygui/fairygui-maker@0.1.2 --data-dir E:\FairyGUI\maker-data   # 也可用 FAIRYGUI_MAKER_DATA_DIR
+npx @openfairygui/fairygui-maker@0.1.2 --headless-browser msedge         # chrome、msedge，或先 npx playwright install chromium 再用 chromium
 npx @openfairygui/fairygui-maker@0.1.2 --no-headless
+npx @openfairygui/fairygui-maker@0.1.2 view E:\Projects\MyFairyGUIProject  # 只读预览模式
 ```
 
-无头渲染覆盖 Player Artifact、Backend 会话预览和 `view` 模式工程。通过 Dashboard 在浏览器中授权的工程只能由该浏览器读取，仍返回 `browser_required`。找不到可用浏览器时，工具在 `browser_required` 旁附带 `headlessError` 说明原因。
+- **工作目录**：完整模式下 backend 只能访问启动目录及其子目录。请先进入用户明确授权的工程父目录再启动，不要从磁盘根目录或包含无关工程的目录启动。数据目录默认是启动目录下的 `.fairygui-maker`，backend 会排除它及包含它的工程；如果工程本身就是启动目录，请用 `--data-dir` 指定工程外的目录。
+- **无头渲染**：没有打开的 Workbench 页面时，Host 用本机已安装的 Chrome 或 Edge（不会下载浏览器）加载 Viewer / Player，Agent 无需有人开着浏览器就能渲染和截图。在 Dashboard 中通过浏览器授权的工程只能由该浏览器读取，仍返回 `browser_required`。
+- **`view` 模式**：启动时为指定目录创建不可变的只读快照，不注册任何工程写工具；修改源文件后需要重启 Host。
 
-在完整模式下，OpenFairyGUI backend 只能访问启动命令当前目录及其子目录。请先进入用户明确授权的工程父目录再启动 Host；不要从磁盘根目录或包含无关工程的宽泛目录启动。
+## 连接 Agent
 
-Backend 还会排除 Maker 私有数据目录、其后代，以及包含该目录的祖先工程，避免工程保存替换 Host 状态；Junction/符号链接别名也不能绕过。如果工程本身就是启动目录，请用 `--data-dir` 指定工程外的独立目录。
+Maker 只提供一个 Streamable HTTP MCP 服务，客户端连接 `/mcp` 时发送 `Authorization: Bearer <启动令牌>`。把令牌放在私密环境变量中，不要写进仓库配置。
 
-### 保存确认（Host Save Grant）
-
-Agent 的 `save_session` / `materialize_session` 必须携带 `expectedRevision`。没有对应权限时返回 `save_approval_required`，不写盘；所有者在 Dashboard 的 **工程保存权限** 卡片验证一次身份，再选择“批准一次保存”或“允许本次会话连续保存”。授权本身不写盘，Agent 确认后重试原参数。
-
-完整 Host 在本地交互终端单独显示随机确认密钥；它不是 `FAIRYGUI_MAKER_TOKEN`，不要交给 Agent。非交互启动时，所有者须另行设置 `FAIRYGUI_MAKER_APPROVAL_TOKEN`（24–256 字符，必须与 MCP token 不同），该值不会输出到日志；没有配置则保存保持阻断。不要把确认密钥放入 MCP 客户端环境、仓库配置或启动 URL。
-
-验证后，浏览器以独立的 HttpOnly、SameSite=Strict 会话 Cookie 管理授权，刷新无需重输密钥。该 Cookie 不包含确认密钥，Host 重启后失效；“锁定授权管理”撤销当前浏览器的所有者验证，但不撤销已授予的工程权限。
-
-“允许本次会话连续保存”仅覆盖当前 Backend 会话向原工程执行的普通保存，包括后续编辑产生的资源移除；revision 改变不需要重新授权，但每次仍校验最新 revision、路径与磁盘冲突。撤销、关闭/重开工程或重启 Host 后失效，不是永久信任目录，也不改变 Viewer/Player 的只读权限。
-
-无人值守时，所有者可以在启动 Host 时预授权指定工程的普通保存，Agent 保存这些工程不再等待 Workbench 确认：
-
-```powershell
-npx @openfairygui/fairygui-maker@0.1.2 --allow-save E:\Projects\MyFairyGUIProject
-```
-
-`--allow-save` 可重复，接受工程目录或其中的 `.fairy` 文件，启动时解析为真实路径，不存在则拒绝启动。它只匹配这些工程目录本身（不含子目录或其他工程），只在本次 Host 进程有效，只能由启动 Host 的所有者设置，MCP 客户端无法授予；Dashboard 的“工程保存权限”卡片会列出它们。revision、路径和磁盘冲突检查照常进行。
-
-`force: true`、任何显式 `targetPath`、`materializeCleanSession` 和 `materialize_session` 始终单次确认，预授权也不例外。待确认请求及单次授权从请求创建起 5 分钟内有效，单次授权在执行前消耗，失败或响应不确定时先读回状态，不自动重试。完整规则见 [Host Save Grant](./docs/architecture.md#保存授权)。
-
-## Agent 与 MCP
-
-Viewer/Player 使用不透明源 iframe：不能访问 Workbench DOM、Cookie、目录句柄或 Host API；资源由父页面校验后通过一次性 nonce 绑定的 MessageChannel 传入。主动上传的 HTML/SVG/JS 只作为文件下载。完整边界与限制见 [Iframe 隔离](./docs/architecture.md#iframe-隔离)。
-
-MCP 客户端连接 `/mcp` 时需要发送：
-
-```text
-Authorization: Bearer <启动令牌>
-```
-
-Maker 对外只提供一个 Streamable HTTP MCP 服务。客户端应将令牌放在私密环境变量中，不要把令牌写进仓库配置。常用高层工具为：
-
-MCP 最多保留 32 个会话，空闲 30 分钟后回收，正在执行的调用不会被 TTL 误关。过期 ID 返回 `404 / mcp_session_not_found`，需重新 initialize；不要自动重放不确定是否已执行的写操作。Dashboard 显示最近 Backend 失败记录，连接回收不会关闭共享工程会话或丢弃未保存编辑。
-
-| 工作流 | 工具 |
-|---|---|
-| Backend 未保存预览 | `open_session_preview`（显式 `sessionId`、`expectedRevision`） |
-| 发布已保存会话 | `publish_artifact`（显式 `sessionId`、`expectedRevision`） |
-| Viewer 发现与渲染 | `list_viewer_components`、`render_component_preview` |
-| Player 发现与渲染 | `list_artifact_components`、`open_artifact_player`、`render_artifact_component` |
-| Render session | `update_render_session`、`set_render_view`、`get_render_observation`、`capture_render_screenshot` |
-| 资源分析 | `inspect_project_assets` |
-| 视觉回归 | `save_visual_baseline`、`compare_visual_baseline`、`list_visual_baselines` |
-
-视觉回归由 Agent 自行管理：在 Viewer 或 Player 的 render session 上把当前画面存为 `suite` / `key` 命名的基线，之后逐像素比对，返回差异指标、差异图，以及与基线不同的渲染环境字段（浏览器、缩放、背景、视口、图片尺寸）。默认要求像素完全一致，可按次传入 `maxDifferentPixels` / `maxMeanAbsoluteError` 容差。已有基线只能以 `replace: true` 加原因替换，每个 key 保留最近 5 个旧版本。基线存放在 `--data-dir` 下的 `visual-baselines/`，不写工程，`view` 模式同样可用；不同机器、浏览器或字体会造成像素差异，应在同一环境里建立和比对基线。
-
-完整模式中的工程读写继续使用同一 MCP 服务内的 OpenFairyGUI backend tools。`view <project-path>` 模式只注册 Maker 的 Viewer、Player、资源分析与 render-session 工具，不提供任何 backend 工程写工具。Agent 应始终使用工具返回的项目、包、组件、对象、session、revision 和 state-version ID，不应从显示名称猜测。
-
-### Codex
-
-在用户级 `~/.codex/config.toml`，或已信任项目的 `.codex/config.toml` 中加入：
+**Codex**：在 `~/.codex/config.toml` 或已信任项目的 `.codex/config.toml` 中加入下面的配置，启动 Maker 后用 `/mcp` 确认连接（字段以 [Codex MCP 文档](https://developers.openai.com/codex/mcp/) 为准）：
 
 ```toml
 [mcp_servers.fairygui_maker]
@@ -156,31 +62,45 @@ required = true
 tool_timeout_sec = 60
 ```
 
-Codex Desktop、CLI 与 IDE 扩展共享这份配置；启动 Maker 后用 `/mcp` 确认连接。配置字段以 [Codex MCP 官方文档](https://developers.openai.com/codex/mcp/) 为准。
-
-### Claude Code
-
-使用本地 scope，避免把展开后的令牌写入仓库级 `.mcp.json`：
+**Claude Code**：使用本地 scope，避免把展开后的令牌写入仓库级 `.mcp.json`；令牌改变后先 `claude mcp remove fairygui-maker` 再重新添加（见 [Claude Code MCP 文档](https://docs.anthropic.com/en/docs/claude-code/mcp)）：
 
 ```powershell
 claude mcp add --transport http --scope local fairygui-maker http://127.0.0.1:3847/mcp --header "Authorization: Bearer $env:FAIRYGUI_MAKER_TOKEN"
-claude mcp get fairygui-maker
 ```
 
-令牌改变后先执行 `claude mcp remove fairygui-maker`，再重新添加。HTTP transport、header 和 scope 语义见 [Claude Code MCP 官方文档](https://docs.anthropic.com/en/docs/claude-code/mcp)。
+完整模式中，工程读写使用同一 MCP 服务内的 OpenFairyGUI backend 工具，Maker 补充以下高层工具：
 
-仓库内置使用指南：
+| 工作流 | 工具 |
+|---|---|
+| Backend 未保存预览 | `open_session_preview` |
+| 发布已保存会话 | `publish_artifact` |
+| Viewer 发现与渲染 | `list_viewer_components`、`render_component_preview` |
+| Player 发现与渲染 | `list_artifact_components`、`open_artifact_player`、`render_artifact_component` |
+| Render session | `update_render_session`、`set_render_view`、`get_render_observation`、`capture_render_screenshot`、`run_ui_scenario` |
+| 资源分析 | `inspect_project_assets` |
+| 视觉回归 | `save_visual_baseline`、`compare_visual_baseline`、`list_visual_baselines` |
 
-- 通用/Codex：[`.agents/skills/use-fairygui-maker/SKILL.md`](./.agents/skills/use-fairygui-maker/SKILL.md)
-- Claude：[`.claude/skills/use-fairygui-maker/SKILL.md`](./.claude/skills/use-fairygui-maker/SKILL.md)
+Agent 应始终使用工具返回的项目、包、组件、对象、session、revision 和版本 ID，不从显示名称猜测。MCP 会话空闲 30 分钟后回收，过期 ID 返回 `404 / mcp_session_not_found`，需要重新 initialize，不要自动重放可能已执行的写操作。工具契约、会话上限和协议细节见[架构](./docs/architecture.md)。
 
-Claude 文件只负责转到同一份通用 Skill，避免两套指南漂移。
+## 保存授权
 
-制作或改版 UI 时，Skill 会按需读取[UI 制作决策与验收示例](./.agents/skills/use-fairygui-maker/references/ui-authoring.md)，指导资源/组件复用、Controller/Gear 状态、Relations 布局、Transition 动效以及列表和多版本方案选择。参考包含模板卡片、三状态奖励面板、布局与入场动效三个案例；具体编辑仍查询当前安装版本的能力和契约，并分别验证保存回读、Viewer 预览与真实发布产物。检查或重命名等窄任务无需加载这份参考。
+`save_session` / `materialize_session` 必须携带 `expectedRevision`。没有权限时返回 `save_approval_required`，不写盘；所有者在 Dashboard 的 **工程保存权限** 卡片验证一次身份，再选择“批准一次保存”或“允许本次会话连续保存”，Agent 随后用原参数重试。会话授权只覆盖当前 Backend 会话向原工程的普通保存，关闭会话或重启 Host 后失效。`force: true`、显式 `targetPath`、`materializeCleanSession` 和 `materialize_session` 始终单次确认。
 
-### 在其他工程中安装 Skill
+确认密钥只在 Host 的交互终端单独显示，它不是 `FAIRYGUI_MAKER_TOKEN`，不要交给 Agent，也不要放进 MCP 客户端环境、仓库配置或 URL。非交互启动时，所有者须另行设置 `FAIRYGUI_MAKER_APPROVAL_TOKEN`（24–256 字符，必须与 MCP token 不同），否则保存保持阻断。
 
-先在目标工程安装已验证的 tarball（例如 `npm install --no-save E:\Artifacts\openfairygui-fairygui-maker-0.1.2.tgz`；正式发布后可改用确切 npm 版本）。然后复制包内的完整通用 Skill：
+无人值守时，所有者可以在启动时预授权指定工程的普通保存（可重复，只在本次进程有效，MCP 客户端无法授予）：
+
+```powershell
+npx @openfairygui/fairygui-maker@0.1.2 --allow-save E:\Projects\MyFairyGUIProject
+```
+
+完整规则见[保存授权](./docs/architecture.md#保存授权)。
+
+## 在其他工程中使用 Skill
+
+仓库内置的使用指南是 [`.agents/skills/use-fairygui-maker`](./.agents/skills/use-fairygui-maker/SKILL.md)；[Claude 版本](./.claude/skills/use-fairygui-maker/SKILL.md)只转到这份通用指南。制作或改版 UI 时，Skill 会按需读取 [UI 制作参考](./.agents/skills/use-fairygui-maker/references/ui-authoring.md)。
+
+在目标工程安装已验证的 tarball 或确切 npm 版本后，复制包内的完整通用 Skill（Claude 工程把目标改为 `.claude/skills/use-fairygui-maker`，仍复制同一份通用 Skill，不要复制仓库内的 Claude wrapper）：
 
 ```powershell
 $skillSource = Join-Path (npm root) "@openfairygui/fairygui-maker/.agents/skills/use-fairygui-maker"
@@ -190,9 +110,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $skillTarget) | Ou
 Copy-Item -LiteralPath $skillSource -Destination $skillTarget -Recurse
 ```
 
-Claude 工程使用 `.claude/skills/use-fairygui-maker` 作为目标目录，仍复制上面同一份通用 Skill；不要单独复制仓库内依赖相对转发路径的 Claude wrapper。源码用户也可将 `$skillSource` 改为 Maker checkout 中 `.agents/skills/use-fairygui-maker` 的绝对路径。保留 `references/` 和 `agents/`；本地工作流引用均位于 Skill 自身目录内，完整产品文档同时随包放在 `node_modules/@openfairygui/fairygui-maker/docs/`。
-
-在目标工程重新开启 Agent 任务，显式调用 `$use-fairygui-maker`，例如“检查 `E:\Design\hud.fig` 的转换诊断，暂不物化工程”，或“在指定工程中复用现有奖励卡片模板，配置未达成、可领取、已领取三种状态并预览，暂不保存”。先检查 Agent 是否发现 Skill，再分别检查所需 CLI 或 MCP：安装 Skill 本身不会启动 Host，也不会建立 MCP 连接；本地 import/reimport 不以 MCP 在线为前提。
+源码用户可把 `$skillSource` 改为 checkout 中该目录的绝对路径。保留 `references/` 和 `agents/`。安装 Skill 不会启动 Host 或建立 MCP 连接（本地 import/reimport 不需要 MCP）；在目标工程重新开启 Agent 任务并显式调用 `$use-fairygui-maker`，先确认 Agent 发现了 Skill，再检查所需的 CLI 或 MCP。
 
 ## 设计源导入
 
@@ -208,63 +126,15 @@ fairygui-maker reimport E:\Projects\hud-imported --apply <上一步的planDigest
 
 Draft 流程、Bundle 与 fixture 格式、确定性规则、保真诊断和重导入的失败恢复见[设计源导入](./docs/design-import.md)。
 
-## Artifact 与上传
-
-浏览器上传尚未完成的 Draft 和 Artifact Import 单独采用 30 分钟空闲有效期；每次成功上传文件续期。Host 按实际流量限制请求体，二进制先写 `.part`、校验后原子改名；Artifact manifest 必须为每个文件声明 SHA-256，同尺寸不同内容重试返回 `409`。JSON、视觉证据、并发、容量与取消接口见 [有界上传管线](./docs/architecture.md#有界上传)。
-
-Artifact 的 `verification.content: host-validated` 仅表示字节、摘要和包元数据已校验；`verification.source: client-declared` 表示来源由客户端声明。`browser-publish` 和 `projectId/sourceRevision` 都不是 Host 验证过的发布证明，REST、MCP 和 Workbench 显示相同的可信度边界。
-
-Artifact 同内容只存一份字节，每次导入独立保留名称、来源和时间；完成请求跨重启幂等，列表显示最近一次来源和导入次数。文件读取时重新校验实际字节，篡改或链接替换返回 `409`。旧 manifest 只读兼容；备份应包含整个 data dir，且一个 data dir 只能由一个 Host 写入。格式与历史/分页 API 见 [Artifact 持久化语义](./docs/architecture.md#artifact-存储)。
-
-## CLI 只读预览
-
-Agent、批处理和视觉回归可以显式授权一个工程根目录：
-
-```powershell
-npx @openfairygui/fairygui-maker@0.1.2 view E:\Projects\MyFairyGUIProject
-
-# 全局安装后也可以使用：
-fairygui-maker view E:\Projects\MyFairyGUIProject
-```
-
-`view` 只扫描指定目录，在 Host 启动时创建不可变的只读内存快照。它不会寻找其他工程、跟随符号链接、打开写接口或自动读取浏览器目录授权。修改源文件后需要重启 Host 才能生成新快照。
-
-交互模式则由用户在 Dashboard 中通过系统目录选择器授权只读访问；目录句柄保存在同源浏览器的 IndexedDB 中，不传给 Agent 或 runtime iframe。
-
-浏览器与 CLI 统一按实际工程依赖读取快照，不读取目录中的无关文件；隐藏路径（含 `.env`、`.git`、Maker state）、私钥与常见构建目录默认排除。`sourceRevision` 使用排序后的文件内容 SHA-256，而非大小/修改时间。浏览器 Viewer 刷新与 Asset Manager 重扫先校验 Host 旧 revision，成功后失效旧 Renderer 与分析；CLI 快照仍需重启 Host 更新。Dashboard 可移除项目和清理过期未注册授权，均不删除源文件。扫描预算与完整接口见 [Revision 与快照隐私](./docs/architecture.md#快照与-sourcerevision)。
-
-## Workbench 入口
-
-| 路径 | 用途 |
-|---|---|
-| `/` | Dashboard 与项目/Artifact 入口 |
-| `/viewer` | Viewer 项目选择 |
-| `/projects/:projectId/viewer` | 指定工程的 Viewer |
-| `/asset-manager` | Asset Manager 项目选择 |
-| `/projects/:projectId/assets` | 指定工程的资源分析 |
-| `/player` | Player 与发布目录导入 |
-| `/artifacts/:artifactId/player` | 指定 Artifact 的 Player |
-| `/mcp` | Streamable HTTP MCP |
-
 ## 当前状态与边界
 
-- 项目整体仍处于开发初期，暂不能用于实际项目开发。下列内容描述已接入的能力与当前限制，不构成完整性、稳定性或生产可用性承诺。
-- 已接入 Backend `0.7.0`：`query_entity` 读取当前属性；`read_session_state` 与 `read_resource_bytes` 提供绑定 revision 的模型和主资源字节。事务后必须读回所改字段，不能只用成功返回或 revision 变化证明结果。
-- Backend 最多同时打开 32 个工程会话，并会关闭空闲 30 分钟且没有未保存修改的会话；之后使用该 `sessionId` 得到 `session_not_found`，需要重新打开工程。Dashboard 在该会话下一次被调用时将其移除。
-- Dashboard 的“预览会话”和 `open_session_preview` 可预览未保存修改。模型和所选组件资源来自公开 Backend 接口；编辑、保存或关闭会话会使旧 renderer 失效，刷新后读取新版本。详情见 [会话预览](./docs/architecture.md#backend-会话预览)。
-- Maker 与 Backend 工具通过同一 MCP 服务发现；Host 使用公开 `instructions` 和 `toolPolicies` 接口保留自己的指引及保存授权结果。批准后由 Backend 执行一次保存，保留 revision、路径和磁盘检查；完整读回、预览、授权保存与重开验收见[会话预览接入验收](./docs/architecture.md#backend-会话预览)。
-- Host 只绑定 `127.0.0.1`，并校验 Host、Origin 和访问令牌。
-- 同一 Host 最多保留 32 个 MCP session；客户端应正常发送 MCP `DELETE` 关闭不再使用的 session。
-- Host 支持工程会话普通保存授权及特殊操作单次确认；仅持有 MCP token 或普通 Workbench Cookie 不能授予权限。授权状态仅存内存，最多保留 128 条记录；所有者验证最多保留 32 个浏览器会话。
-- Viewer 使用原始工程 UAM；Player 只消费固定 Artifact，两条渲染链路不会互相降级。
-- Viewer 和 Player 都只接受白名单语义操作，不执行任意 JavaScript、表达式或业务 JSON。
-- Workbench 与 Agent 共用 Broker；语义状态和 zoom/background/viewport 分别计版本，截图记录实际捕获的双版本。`stateVersion` 保留为语义版本别名，详见[统一 Broker 状态](./docs/architecture.md#版本顺序与幂等)。
-- 每个 render session 最多保留最近 256 个 request ID 用于安全重试；更早的已完成请求可能被淘汰。
-- `run_ui_scenario` 已支持连续语义操作、状态/Controller/交互断言、条件等待和一次 PNG 截图；绑定现有 renderer 与 source revision，失败即停止且不回滚。每个 renderer 保留最近 8 次场景回执。输入、限制与恢复见[连续 UI 场景验收](./.agents/skills/use-fairygui-maker/references/ui-scenarios.md)。
-- 普通 Viewer/Player 截图直接作为 MCP `image/png` 返回，不持久化 ScreenshotRef；Import Draft 的 Visual Evidence 是独立、带 revision 的审查记录。
-- `publish_artifact` 把已保存且没有未保存修改的 Backend 会话按 Player 使用的 LayaAir profile 发布，并导入为不可变 Artifact（`verification.source: host-published`）。它只写 Maker 私有数据目录，跳过工程插件和代码生成；未保存的修改会被拒绝。保存之后在 Maker 之外对工程文件的改动不会被检测。
-- 当前不包含远程部署、守护进程或 WebSocket。
-- Player 验证发布包内的原生 FairyGUI 行为，不加载游戏项目的业务脚本、网络层或宿主逻辑。
+- 项目整体仍处于开发初期，下列内容描述已接入的能力与限制，不构成完整性、稳定性或生产可用性承诺。
+- 已接入 OpenFairyGUI `0.7.0`。事务后必须用 `query_entity` 等接口读回所改字段，不能只凭成功返回或 revision 变化证明结果；`read_session_state` 与 `read_resource_bytes` 提供绑定 revision 的模型和主资源字节。Backend 会关闭空闲 30 分钟且没有未保存修改的会话，之后需要重新打开工程。
+- Host 只绑定 `127.0.0.1`，校验 Host、Origin 和访问令牌；Viewer / Player 运行在不透明源 iframe 中，拿不到 Workbench DOM、Cookie、目录句柄或 Host API。
+- Viewer 和 Player 只接受白名单语义操作，不执行任意 JavaScript、表达式或业务 JSON；Player 不加载游戏项目的业务脚本、网络层或宿主逻辑。
+- `publish_artifact` 只发布已保存且没有未保存修改的会话；保存之后在 Maker 之外对工程文件的改动不会被检测。
+- render session、截图和保存授权只在 Host 内存，不跨重启；一个数据目录只能由一个 Host 写入。
+- 没有远程部署、守护进程或 WebSocket。
 
 ## 兼容范围
 
@@ -276,52 +146,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 | Viewer / Player runtime | 冻结的 LayaAir 3.3.10 + FairyGUI Web runtime |
 | 浏览器 | 当前稳定版 Chrome 与 Edge；自动门禁使用 Chromium |
 
-交互式工程授权依赖 File System Access API，Firefox 与 Safari 未列入首个 RC 支持范围。Viewer 只解释 UAM 已表达的 Web UI 语义；Unity、Cocos Creator、游戏业务脚本、自定义宿主扩展和完整像素一致性不在 `0.1.x` 承诺内。
-
-## 本地开发
-
-从源码开发需要 pnpm `10.14.0`：
-
-```powershell
-pnpm install --frozen-lockfile
-pnpm build
-pnpm test
-pnpm test:memory
-```
-
-`pnpm build` 执行 TypeScript 检查，并分别构建 React Workbench 与可直接由 Node.js 运行的 Host。完整导入、runtime 隔离与预览使用构建后的 Host 页面（默认端口 3847）；修改构建后重启 Host，以更新静态文件白名单：
-
-```powershell
-pnpm dev:host
-```
-
-`pnpm dev:web` 仅用于可信源码的前端 UI 调试，不代替 Host 的安全响应头和隔离预览验收。
-
-`pnpm test:memory` 验证 Node 的 Bundle、Base64、5,000 图片、50,000 引用与密集 Override 压力；`pnpm test:browser` 包含 Player 100 次 A/B 加载/卸载、图片解码上限和音频回收。测量方法、门禁阈值与未验证的 GPU 指标见 [T3 内存压力验收](./docs/architecture.md#内存压力门禁)。
-
-完整发布门禁还会安装真实 npm tarball 并启动其中的 CLI，以及在 Chromium 中验证 Viewer/Player 像素 Golden、Import Draft Visual Evidence 与交付/隔离故障回归：
-
-```powershell
-pnpm exec playwright install --no-shell chromium
-pnpm verify:release
-```
-
-门禁先校验 `vendor-runtime.lock.json`、实际 runtime 字节和第三方声明的一致性，`npm pack` 的 `prepack` 也执行该检查。需要联网复核固定上游快照时运行 `pnpm verify:runtime --upstream`；复制来源和复现边界见[第三方声明](./THIRD_PARTY_NOTICES.md)。
-
-每次浏览器测试在 `test-results/browser/run-*/` 留存 reference/actual/diff、阈值、来源/组件/Broker 版本和诊断报告；CI 成败均上传并保留 14 天。未预期 Console/CSP/网络错误阻断测试。Viewer 的真实 FIG、Player 原生图形与设计源导入的固定字体文字/按钮四态/List 使用独立零差异 Golden，不覆盖任意系统字体保真。详见[证据闭环](./docs/architecture.md#浏览器测试证据)与[设计源导入的语义 Golden](./docs/design-import.md#测试与基线)。
-
-测试固定使用 ANGLE/SwiftShader；含文字的语义截图使用 Windows/Linux 独立基线，以容纳系统字体栅格化差异。测试不改变正常 Workbench 浏览器的 GPU 配置，也不放宽零像素差异阈值。发布验收必须记录同一个提交的本地结果和完整 CI 矩阵，不能用不同提交的绿灯拼接通过。
-
-仅当渲染变化符合预期时显式生成新基线；CI 禁止该开关，功能或诊断检查失败不会写回 Golden。更新后审查图片并关闭开关重跑：
-
-```powershell
-$env:UPDATE_VISUAL_GOLDENS = "1"
-pnpm test:browser
-Remove-Item Env:UPDATE_VISUAL_GOLDENS
-pnpm test:browser
-```
-
-Artifact Store 启动时会重新校验 manifest、文件大小、SHA-256、整体 digest 和包目录；不一致的 Artifact 保留在磁盘但不会载入。中断遗留的 `imports/import_<uuid>` 临时目录会在下次启动时清理。
+交互式工程授权依赖 File System Access API，Firefox 与 Safari 不在支持范围。Viewer 只解释 UAM 已表达的 Web UI 语义；Unity、Cocos Creator、游戏业务脚本、自定义宿主扩展和完整像素一致性不在 `0.1.x` 范围内。
 
 ## 升级与卸载
 
@@ -333,31 +158,14 @@ npm install --global @openfairygui/fairygui-maker@0.1.2
 npm uninstall --global @openfairygui/fairygui-maker
 ```
 
-`npx` 使用者没有全局包需要卸载。卸载不会删除 `--data-dir` 或 `.fairygui-maker`；确认不再需要其中的 Artifact 后再由用户手动删除该目录。
-
-## 发布 npm 包
-
-当前版本按早期实验版本定位。发布说明应明确“开发初期，暂不能用于实际项目开发”；通过发布门禁或分发 npm 包不代表项目已经成熟可用。
-
-FairyGUI Maker 自身采用 [MIT License](./LICENSE)，公开仓库为 [OpenFairyGUI/FairyGUI-Maker](https://github.com/OpenFairyGUI/FairyGUI-Maker)。npm 包名为 `@openfairygui/fairygui-maker`，发布者登录在 npm `openfairygui` 组织中有发布权限的账号后执行：
-
-```powershell
-pnpm install --frozen-lockfile
-pnpm verify:release
-npm publish --access public
-```
-
-GitHub CI 在推送 `main` 和 PR 时运行：Windows/Linux 与 Node.js 22/24 执行 runtime 校验、构建、单元测试和内存压力测试，Linux Chromium 再运行浏览器烟测、安装包烟测和 Agent 评测自检。依赖审计不进入 CI，只在本地 `pnpm verify:release` 和发布工作流中执行。发布工作流只响应人工发布的 `v<package-version>` GitHub Release；首发采用临时 token，完成配置后采用 npm Trusted Publishing，并请求生成 provenance。
-
-首次发布前需确认 `@openfairygui/fairygui-maker` 名称仍然可用，并核对 npm 组织发布权限。首次 GitHub Release 需要发布者临时配置可发布该 scope、启用 Bypass 2FA 的 granular `NPM_TOKEN` repository secret。首次发布成功后，在 npm package settings 中把 `OpenFairyGUI/FairyGUI-Maker` 和 `release.yml` 配置为允许 `npm publish` 的 trusted publisher，并删除该 secret、撤销临时 token；后续发布由 OIDC 认证，不再保存长期 npm token。
+卸载不会删除 `--data-dir` 或 `.fairygui-maker`；确认不再需要其中的 Artifact 后再手动删除。
 
 ## 文档
 
-- [参与开发与验证约定](./CONTRIBUTING.md)
-- [产品定位与技术架构](./docs/architecture.md)
+- [架构](./docs/architecture.md)：Host、Viewer/Player、授权与隔离、render session 协议、Artifact、接口和限制
 - [设计源导入（已冻结）](./docs/design-import.md)
 - [Agent 任务评测](./docs/agent-evals.md)：`pnpm eval:agent` 的任务、隔离、判定与各版本结果
-- [第三方运行时与补充声明](./THIRD_PARTY_NOTICES.md)；生产构建还会生成并发行 `dist/web/THIRD_PARTY_LICENSES.md`
+- [参与开发](./CONTRIBUTING.md)：本地开发、测试与 Golden 更新
 - [发布检查清单](./docs/release-checklist.md)
+- [第三方运行时与补充声明](./THIRD_PARTY_NOTICES.md)；生产构建还会生成并发行 `dist/web/THIRD_PARTY_LICENSES.md`
 - [MIT License](./LICENSE)
-- [OpenFairyGUI](https://github.com/OpenFairyGUI/OpenFairyGUI)
