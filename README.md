@@ -198,25 +198,17 @@ Claude 工程使用 `.claude/skills/use-fairygui-maker` 作为目标目录，仍
 
 > 设计源导入已冻结：保留现有功能和测试，只修复阻断性问题，不再增加新功能。
 
-CLI 可以把 `.fig`、`.psd` 或 [Maker Import Bundle v1](./docs/maker-import-bundle-v1.md) 目录转换成新的 FairyGUI 工程目录：
+CLI 可以把 `.fig`、`.psd` 或 Maker Import Bundle v1 目录转换成新的 FairyGUI 工程，并在源变化后预览、批准重导入：
 
 ```powershell
 fairygui-maker import E:\Design\hud.fig --out E:\Projects\hud-imported
-fairygui-maker import inspect E:\Design\hud.fig
-fairygui-maker import plan E:\Design\hud.fig --out E:\Design\hud-plan.json
-fairygui-maker import E:\Design\hud.fig --dry-run
 fairygui-maker reimport E:\Projects\hud-imported --dry-run
 fairygui-maker reimport E:\Projects\hud-imported --apply <上一步的planDigest>
-fairygui-maker view E:\Projects\hud-imported
 ```
 
-所有导入都会先把源复制到 `--data-dir/import-drafts/<draftId>`，再依次保存 Source IR、BuildPlan、UAM 和 Draft 工程。`inspect` 不编译，`plan` 只额外写入指定的计划 JSON，`import --dry-run` 只编译 Draft；只有普通 `import --out` 会在校验完成后物化目标目录。`--out` 目录必须尚不存在，Maker 通过同盘临时目录和原子改名避免覆盖或留下半成品，并在工程目录写入 State v2 与不可变生成快照。Draft 带 revision，可在 Host 重启后恢复；七天未更新的 Draft 会在下次启动时清理。
+Draft 流程、Bundle 与 fixture 格式、确定性规则、保真诊断和重导入的失败恢复见[设计源导入](./docs/design-import.md)。
 
-BuildPlan v2 绑定源结构、图片和 Binding 摘要及 Planner/Compiler 版本；首次导入 ID 确定性生成，重导入优先保留旧 ID，Plan 无法删除源诊断。同一输入和固定版本可复现生成文件；旧 Plan 需在 Workbench 点击“重新生成 Build Plan”。身份范围与兼容边界见 [批次 18](docs/workbench.md#213-确定性-plannercompiler批次-18)。
-
-`reimport <project> --dry-run` 重新读取本地源文件，返回 `added`、`changed`、`removed`、`preserved`、`conflict`、`blockers` 和 `planDigest`，不修改工程。关闭该工程的 Host/编辑器会话并核对结果后，用 `--apply <planDigest>` 明确批准这一份计划。源文件、工程内容或 Import State 有变化时，旧摘要会被拒绝；有冲突、PSD 图层身份不确定或 Backend 不支持的内容时不写回。工程与新的源生成快照/State 在同一次 Backend 暂存目录提交中更新；用户字段、不重叠的修改和用户自建资源会保留。上传型 Workbench 导入没有稳定本地源路径，仍不能 CLI 重导入。完整边界与失败恢复见 [T4 安全重导入](docs/reimport.md)。本地命令不改变 Host/MCP 的独立保存审批流程。
-
-Host 同时提供带 bearer token 保护的 `/api/import-drafts` 创建、列表、详情、删除、`parse`、`plan`、`compile` 和 `materialize` 接口。所有变更请求都必须提交当前 `expectedRevision`；`view <project-path>` 只读模式禁用这些接口。编译后的 Draft 还可上传一张 PNG Reference Image，从同页 Viewer 捕获结果，并持久化 Reference、Capture、Pixel Diff 与原始像素指标；Workbench 提供透明度叠加、并排和热图视图，不设置跨字体、平台或 rasterizer 的全局相似度通过线。
+## Artifact 与上传
 
 浏览器上传尚未完成的 Draft 和 Artifact Import 单独采用 30 分钟空闲有效期；每次成功上传文件续期。Host 按实际流量限制请求体，二进制先写 `.part`、校验后原子改名；Artifact manifest 必须为每个文件声明 SHA-256，同尺寸不同内容重试返回 `409`。JSON、视觉证据、并发、容量与取消接口见 [有界上传管线](./docs/workbench.md#25-有界上传管线批次-10)。
 
@@ -316,7 +308,7 @@ pnpm verify:release
 
 门禁先校验 `vendor-runtime.lock.json`、实际 runtime 字节和第三方声明的一致性，`npm pack` 的 `prepack` 也执行该检查。需要联网复核固定上游快照时运行 `pnpm verify:runtime --upstream`；复制来源和复现边界见[第三方声明](./THIRD_PARTY_NOTICES.md)。
 
-每次浏览器测试在 `test-results/browser/run-*/` 留存 reference/actual/diff、阈值、来源/组件/Broker 版本和诊断报告；CI 成败均上传并保留 14 天。未预期 Console/CSP/网络错误阻断测试。Viewer 的真实 FIG、Player 原生图形与 T5 新增的固定字体文字/按钮四态/List 使用独立零差异 Golden，不覆盖任意系统字体保真。详见[证据闭环](./docs/workbench.md#214-视觉与故障证据闭环批次-19)与[T5 字体、布局、组件库和栅格策略](./docs/import-fidelity.md)。
+每次浏览器测试在 `test-results/browser/run-*/` 留存 reference/actual/diff、阈值、来源/组件/Broker 版本和诊断报告；CI 成败均上传并保留 14 天。未预期 Console/CSP/网络错误阻断测试。Viewer 的真实 FIG、Player 原生图形与设计源导入的固定字体文字/按钮四态/List 使用独立零差异 Golden，不覆盖任意系统字体保真。详见[证据闭环](./docs/workbench.md#214-视觉与故障证据闭环批次-19)与[设计源导入的语义 Golden](./docs/design-import.md#测试与基线)。
 
 测试固定使用 ANGLE/SwiftShader；含文字的语义截图使用 Windows/Linux 独立基线，以容纳系统字体栅格化差异。测试不改变正常 Workbench 浏览器的 GPU 配置，也不放宽零像素差异阈值。发布验收必须记录同一个提交的本地结果和完整 CI 矩阵，不能用不同提交的绿灯拼接通过。
 

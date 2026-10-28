@@ -78,9 +78,7 @@ Workbench controls -> REST -> same Render Session Broker
 
 Node Host 是项目记录、import draft、render session 和发布产物的所有者。设计源先复制进 data dir；Parse、Plan 和 Compile 只更新带 revision 的 Draft，Materialize 才通过临时目录写入用户指定的新目录。Draft 的 Visual Evidence 复用同页 Viewer Capture，由浏览器原生 Canvas 生成 Pixel Diff，Host 只持久化经过 PNG 尺寸与 revision 校验的 Reference、Capture、Diff 和原始指标；是否接受差异由 fixture 或人工审查决定，不存在全局相似度阈值。Draft 可在 Host 重启后恢复，过期或损坏的 Draft 会在启动时清理。交互式工程绑定仍由浏览器 Project Source Client 按需读取；用户授权的 `FileSystemDirectoryHandle` 只保存在同源浏览器，不发送给 Host、Agent 或 runtime iframe。自动化 `view` 则由 Host 在启动时读取唯一显式目录并保存只读内存快照，Agent 只能按相对路径读取该快照。两种来源都用 `sourceRevision` 绑定 renderer；源 revision 改变后旧 renderer 和 render session 立即失效。Host 重启时重新校验 Artifact manifest、文件大小、SHA-256、整体 digest 和包目录，并清理不能恢复的中断导入目录；不一致的 Artifact 不载入但也不会被自动删除。
 
-批次 18 的 Host/CLI Compiler 接受严格校验的 `FairyBuildPlanV2`：源结构、图片字节和 imageBindings 绑定内容摘要，Planner/Compiler 各有显式版本；诊断从源和当前计划重新计算。首次生成使用分角色的确定性 8 位 ID，重导入优先复用 State v2 的旧映射；旧计划只能显式重建，不能自动套用新源。身份范围、版本兼容与回归证据见 [Workbench 批次 18](./workbench.md#213-确定性-plannercompiler批次-18)。
-
-T4 的本地 `reimport --dry-run` / `--apply <planDigest>` 复用这些身份与 Backend 事务、独占锁、暂存目录提交；工程和源生成基线同时更新，不新增 Host/MCP 保存入口。字段所有权、双边冲突、PSD 身份和故障恢复边界见 [安全重导入](./reimport.md)。
+设计源导入（已冻结）的 BuildPlan、稳定 ID、重导入与故障恢复规则见[设计源导入](./design-import.md)。
 
 Viewer 工程绑定固定为只读。浏览器按需读取当前工程，用 OpenFairyGUI UAM 构建所选组件的 `ViewerScene` 依赖闭包，再传给隔离 iframe 直接构造 FairyGUI 对象；这个过程不调用发布流程、不生成 `.fui`、不写回项目目录，也不生成持久 artifact。完整模式下单独存在的 OpenFairyGUI backend session 才能在 revision 检查和明确 save 后写工程。Agent 对 Viewer 的数据驱动只修改 render session 临时状态。
 
