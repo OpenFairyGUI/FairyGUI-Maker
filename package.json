@@ -43,7 +43,7 @@
 		"test:memory": "node --import tsx scripts/memory-stress.ts",
 		"eval:agent": "node --import tsx scripts/agent-evals.ts",
 		"verify:runtime": "node scripts/verify-release-inputs.mjs",
-		"verify:release": "pnpm verify:runtime && pnpm test && pnpm test:memory && pnpm test:browser && pnpm audit --prod && node scripts/release-smoke.mjs"
+		"verify:release": "pnpm verify:runtime && pnpm test && pnpm test:memory && pnpm test:browser && pnpm audit --prod && node scripts/release-smoke.mjs --audit"
 	},
 	"dependencies": {
 		"@hono/node-server": "2.1.0",
