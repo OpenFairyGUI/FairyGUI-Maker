@@ -354,7 +354,7 @@ pnpm verify:release
 npm publish --access public
 ```
 
-GitHub CI 会在 Windows/Linux 与 Node.js 22/24 上执行 runtime 校验、构建和单元测试，并在 Linux Chromium 中运行同一套发布门禁。发布工作流只响应人工发布的 `v<package-version>` GitHub Release；首发采用临时 token，完成配置后采用 npm Trusted Publishing，并请求生成 provenance。
+GitHub CI 在推送 `main` 和 PR 时运行：Windows/Linux 与 Node.js 22/24 执行 runtime 校验、构建、单元测试和内存压力测试，Linux Chromium 再运行浏览器烟测、安装包烟测和 Agent 评测自检。依赖审计不进入 CI，只在本地 `pnpm verify:release` 和发布工作流中执行。发布工作流只响应人工发布的 `v<package-version>` GitHub Release；首发采用临时 token，完成配置后采用 npm Trusted Publishing，并请求生成 provenance。
 
 首次发布前需确认 `@openfairygui/fairygui-maker` 名称仍然可用，并核对 npm 组织发布权限。首次 GitHub Release 需要发布者临时配置可发布该 scope、启用 Bypass 2FA 的 granular `NPM_TOKEN` repository secret。首次发布成功后，在 npm package settings 中把 `OpenFairyGUI/FairyGUI-Maker` 和 `release.yml` 配置为允许 `npm publish` 的 trusted publisher，并删除该 secret、撤销临时 token；后续发布由 OIDC 认证，不再保存长期 npm token。
 

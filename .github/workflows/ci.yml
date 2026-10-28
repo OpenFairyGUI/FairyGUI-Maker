@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -51,7 +52,10 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps --no-shell chromium
-      - run: pnpm verify:release
+      # The test matrix covers runtime checks, unit and memory tests; dependency audits gate publishing only (release.yml).
+      - run: pnpm build
+      - run: pnpm test:browser
+      - run: node scripts/release-smoke.mjs
       # Deterministic harness and judge self-check; real model runs stay manual (docs/agent-evals.md).
       - name: Agent evaluation self-check (reference runner, no model)
         timeout-minutes: 10
@@ -63,7 +67,6 @@ jobs:
           name: browser-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             test-results/browser/
-            test-results/memory/
             test-results/agent-evals/report.json
             test-results/agent-evals/cases/
           if-no-files-found: warn
