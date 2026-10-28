@@ -19,12 +19,12 @@ pnpm exec playwright install --no-shell chromium
 pnpm verify:release
 ```
 
-`--upstream` 联网逐字节校验三个固定来源；默认校验完全本地执行。`npm pack` 的 `prepack` 在构建前也执行本地校验。发行 smoke 安装实际 tarball 到全新消费目录，检查 runtime 清单及字节、CLI、Workbench/MCP、导入确定性、保存授权、iframe 隔离和 Artifact 完整性，不等同于真实 npm 发布。
+`--upstream` 联网逐字节校验三个固定来源；默认校验完全本地执行。`npm pack` 的 `prepack` 在构建前也执行本地校验。发行 smoke 安装实际 tarball 到全新消费目录；由 `verify:release` 调用时先对安装结果执行 `npm audit --omit=dev`，再检查 runtime 清单及字节、CLI、Workbench/MCP、导入确定性、保存授权、iframe 隔离和 Artifact 完整性，不等同于真实 npm 发布。`pnpm audit --prod` 只看本仓库 lockfile（含 pnpm overrides），用户安装得到的是 npm 按已发布版本范围解析的依赖树，两者都要通过：任一审计发现已知漏洞即失败，发布工作流随之拒绝发布。`package.json` 的 `pnpm.overrides` 暂把 `@openfairygui/functions` 依赖的 sharp 固定为 0.35.5，只作用于本仓库开发与 CI；OpenFairyGUI 0.7.0 把 sharp 限定在 `<0.35.0`，npm 用户仍会装到有漏洞的版本（[OpenFairyGUI#170](https://github.com/OpenFairyGUI/OpenFairyGUI/issues/170)）。上游放宽范围后移除该 override。
 
 ## 同一提交的退出条件
 
 1. 干净 checkout 的完整 SHA 已记录；依赖采用 frozen lockfile。
-2. 本地 `pnpm verify:release` 全程退出 0，包括生产依赖审计和全新 tarball 消费测试。
+2. 本地 `pnpm verify:release` 全程退出 0，包括本仓库生产依赖审计、安装后依赖审计和全新 tarball 消费测试。
 3. 同一 SHA 的 CI 四个单元测试组合（Windows/Linux × Node 22.18/24）与 Linux `release-smoke` 全部通过。超时、进行中、旧 SHA 和部分绿灯均不能算通过。CI 不运行依赖审计，审计以第 2 条和发布工作流为准。
 4. 浏览器证据保留 reference/actual/diff、运行环境与诊断报告。合成图形使用固定 SwiftShader；含文字的语义截图分别使用 Windows/Linux 基线，Viewer/Player 的像素阈值仍为 0。更新 Golden 必须人工检查图片，并在关闭更新开关后重跑完整门禁。
 5. 所有变更审查完成；实际发布前再核对 npm 包状态与发布权限。任意文件改变都需要以新 SHA 重新验收。
