@@ -33,7 +33,7 @@ Host 提供带 bearer token 保护的 `/api/import-drafts` 创建、列表、详
 - **旧 Plan**：持久化的 v1 Draft 元数据仍能恢复，但旧 BuildPlan 不会自动加盖新摘要，必须重新调用 Plan，或在 Workbench planned/compiled 状态点击“重新生成 Build Plan”。校验失败不改变 Draft revision。
 - **物化与恢复**：Materialize 在提交目标前持久化目标、请求 revision 与生成目录的完整内容摘要。若工程已写入但 Draft 完成状态写入失败，REST 返回 `409 / materialize_recovery_required`、`committed: true`、`draftId` 和 `outputDirectory`；CLI 错误文本也包含 Draft ID、revision 与目标，这种情况不能理解为“未写盘”。重启后 Draft 详情仍提供 `materializeAttempt`，Workbench 可“核对并完成上次物化”。用原参数重试时，Host 只在目标与已记录内容完全一致时恢复状态并返回 `recovered: true`；不会覆盖已有修改，也不会把没有匹配尝试记录的既有目录视为成功。成功响应丢失后，同一请求可重复读取结果而不再次写工程。已物化的 Draft 保留完成记录，不能再改稿。
 - **视觉证据**：编译后的 Draft 可上传一张 PNG Reference Image，从同页 Viewer 捕获结果，并持久化 Reference、Capture、Pixel Diff 与原始像素指标。Workbench 提供透明度叠加、并排和热图视图，不设置跨字体、平台或 rasterizer 的全局相似度通过线。
-- 浏览器上传的 Draft 遵循[有界上传管线](./workbench.md#25-有界上传管线批次-10)：未完成上传 30 分钟空闲过期，已完成上传的 Draft 保留七天。
+- 浏览器上传的 Draft 遵循[有界上传管线](./architecture.md#有界上传)：未完成上传 30 分钟空闲过期，已完成上传的 Draft 保留七天。
 
 Workbench 只提供单节点映射；字体库存与组件库策略只能通过 Plan API 或程序调用输入。
 

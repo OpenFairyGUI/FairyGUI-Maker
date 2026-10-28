@@ -114,11 +114,11 @@ npx @openfairygui/fairygui-maker@0.1.2 --allow-save E:\Projects\MyFairyGUIProjec
 
 `--allow-save` 可重复，接受工程目录或其中的 `.fairy` 文件，启动时解析为真实路径，不存在则拒绝启动。它只匹配这些工程目录本身（不含子目录或其他工程），只在本次 Host 进程有效，只能由启动 Host 的所有者设置，MCP 客户端无法授予；Dashboard 的“工程保存权限”卡片会列出它们。revision、路径和磁盘冲突检查照常进行。
 
-`force: true`、任何显式 `targetPath`、`materializeCleanSession` 和 `materialize_session` 始终单次确认，预授权也不例外。待确认请求及单次授权从请求创建起 5 分钟内有效，单次授权在执行前消耗，失败或响应不确定时先读回状态，不自动重试。完整规则见 [Host Save Grant](./docs/workbench.md#210-host-save-grant批次-15)。
+`force: true`、任何显式 `targetPath`、`materializeCleanSession` 和 `materialize_session` 始终单次确认，预授权也不例外。待确认请求及单次授权从请求创建起 5 分钟内有效，单次授权在执行前消耗，失败或响应不确定时先读回状态，不自动重试。完整规则见 [Host Save Grant](./docs/architecture.md#保存授权)。
 
 ## Agent 与 MCP
 
-Viewer/Player 使用不透明源 iframe：不能访问 Workbench DOM、Cookie、目录句柄或 Host API；资源由父页面校验后通过一次性 nonce 绑定的 MessageChannel 传入。主动上传的 HTML/SVG/JS 只作为文件下载。完整边界与限制见 [Iframe 隔离](./docs/workbench.md#211-iframe-隔离批次-16)。
+Viewer/Player 使用不透明源 iframe：不能访问 Workbench DOM、Cookie、目录句柄或 Host API；资源由父页面校验后通过一次性 nonce 绑定的 MessageChannel 传入。主动上传的 HTML/SVG/JS 只作为文件下载。完整边界与限制见 [Iframe 隔离](./docs/architecture.md#iframe-隔离)。
 
 MCP 客户端连接 `/mcp` 时需要发送：
 
@@ -210,11 +210,11 @@ Draft 流程、Bundle 与 fixture 格式、确定性规则、保真诊断和重�
 
 ## Artifact 与上传
 
-浏览器上传尚未完成的 Draft 和 Artifact Import 单独采用 30 分钟空闲有效期；每次成功上传文件续期。Host 按实际流量限制请求体，二进制先写 `.part`、校验后原子改名；Artifact manifest 必须为每个文件声明 SHA-256，同尺寸不同内容重试返回 `409`。JSON、视觉证据、并发、容量与取消接口见 [有界上传管线](./docs/workbench.md#25-有界上传管线批次-10)。
+浏览器上传尚未完成的 Draft 和 Artifact Import 单独采用 30 分钟空闲有效期；每次成功上传文件续期。Host 按实际流量限制请求体，二进制先写 `.part`、校验后原子改名；Artifact manifest 必须为每个文件声明 SHA-256，同尺寸不同内容重试返回 `409`。JSON、视觉证据、并发、容量与取消接口见 [有界上传管线](./docs/architecture.md#有界上传)。
 
 Artifact 的 `verification.content: host-validated` 仅表示字节、摘要和包元数据已校验；`verification.source: client-declared` 表示来源由客户端声明。`browser-publish` 和 `projectId/sourceRevision` 都不是 Host 验证过的发布证明，REST、MCP 和 Workbench 显示相同的可信度边界。
 
-Artifact 同内容只存一份字节，每次导入独立保留名称、来源和时间；完成请求跨重启幂等，列表显示最近一次来源和导入次数。文件读取时重新校验实际字节，篡改或链接替换返回 `409`。旧 manifest 只读兼容；备份应包含整个 data dir，且一个 data dir 只能由一个 Host 写入。格式与历史/分页 API 见 [Artifact 持久化语义](./docs/workbench.md#212-artifact-持久化语义批次-17)。
+Artifact 同内容只存一份字节，每次导入独立保留名称、来源和时间；完成请求跨重启幂等，列表显示最近一次来源和导入次数。文件读取时重新校验实际字节，篡改或链接替换返回 `409`。旧 manifest 只读兼容；备份应包含整个 data dir，且一个 data dir 只能由一个 Host 写入。格式与历史/分页 API 见 [Artifact 持久化语义](./docs/architecture.md#artifact-存储)。
 
 ## CLI 只读预览
 
@@ -231,7 +231,7 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 
 交互模式则由用户在 Dashboard 中通过系统目录选择器授权只读访问；目录句柄保存在同源浏览器的 IndexedDB 中，不传给 Agent 或 runtime iframe。
 
-浏览器与 CLI 统一按实际工程依赖读取快照，不读取目录中的无关文件；隐藏路径（含 `.env`、`.git`、Maker state）、私钥与常见构建目录默认排除。`sourceRevision` 使用排序后的文件内容 SHA-256，而非大小/修改时间。浏览器 Viewer 刷新与 Asset Manager 重扫先校验 Host 旧 revision，成功后失效旧 Renderer 与分析；CLI 快照仍需重启 Host 更新。Dashboard 可移除项目和清理过期未注册授权，均不删除源文件。扫描预算与完整接口见 [Revision 与快照隐私](./docs/workbench.md#29-revision-与快照隐私批次-14)。
+浏览器与 CLI 统一按实际工程依赖读取快照，不读取目录中的无关文件；隐藏路径（含 `.env`、`.git`、Maker state）、私钥与常见构建目录默认排除。`sourceRevision` 使用排序后的文件内容 SHA-256，而非大小/修改时间。浏览器 Viewer 刷新与 Asset Manager 重扫先校验 Host 旧 revision，成功后失效旧 Renderer 与分析；CLI 快照仍需重启 Host 更新。Dashboard 可移除项目和清理过期未注册授权，均不删除源文件。扫描预算与完整接口见 [Revision 与快照隐私](./docs/architecture.md#快照与-sourcerevision)。
 
 ## Workbench 入口
 
@@ -251,14 +251,14 @@ fairygui-maker view E:\Projects\MyFairyGUIProject
 - 项目整体仍处于开发初期，暂不能用于实际项目开发。下列内容描述已接入的能力与当前限制，不构成完整性、稳定性或生产可用性承诺。
 - 已接入 Backend `0.7.0`：`query_entity` 读取当前属性；`read_session_state` 与 `read_resource_bytes` 提供绑定 revision 的模型和主资源字节。事务后必须读回所改字段，不能只用成功返回或 revision 变化证明结果。
 - Backend 最多同时打开 32 个工程会话，并会关闭空闲 30 分钟且没有未保存修改的会话；之后使用该 `sessionId` 得到 `session_not_found`，需要重新打开工程。Dashboard 在该会话下一次被调用时将其移除。
-- Dashboard 的“预览会话”和 `open_session_preview` 可预览未保存修改。模型和所选组件资源来自公开 Backend 接口；编辑、保存或关闭会话会使旧 renderer 失效，刷新后读取新版本。详情见 [会话预览](./docs/session-preview.md)。
-- Maker 与 Backend 工具通过同一 MCP 服务发现；Host 使用公开 `instructions` 和 `toolPolicies` 接口保留自己的指引及保存授权结果。批准后由 Backend 执行一次保存，保留 revision、路径和磁盘检查；完整读回、预览、授权保存与重开验收见[会话预览接入验收](./docs/session-preview.md)。
+- Dashboard 的“预览会话”和 `open_session_preview` 可预览未保存修改。模型和所选组件资源来自公开 Backend 接口；编辑、保存或关闭会话会使旧 renderer 失效，刷新后读取新版本。详情见 [会话预览](./docs/architecture.md#backend-会话预览)。
+- Maker 与 Backend 工具通过同一 MCP 服务发现；Host 使用公开 `instructions` 和 `toolPolicies` 接口保留自己的指引及保存授权结果。批准后由 Backend 执行一次保存，保留 revision、路径和磁盘检查；完整读回、预览、授权保存与重开验收见[会话预览接入验收](./docs/architecture.md#backend-会话预览)。
 - Host 只绑定 `127.0.0.1`，并校验 Host、Origin 和访问令牌。
 - 同一 Host 最多保留 32 个 MCP session；客户端应正常发送 MCP `DELETE` 关闭不再使用的 session。
 - Host 支持工程会话普通保存授权及特殊操作单次确认；仅持有 MCP token 或普通 Workbench Cookie 不能授予权限。授权状态仅存内存，最多保留 128 条记录；所有者验证最多保留 32 个浏览器会话。
 - Viewer 使用原始工程 UAM；Player 只消费固定 Artifact，两条渲染链路不会互相降级。
 - Viewer 和 Player 都只接受白名单语义操作，不执行任意 JavaScript、表达式或业务 JSON。
-- Workbench 与 Agent 共用 Broker；语义状态和 zoom/background/viewport 分别计版本，截图记录实际捕获的双版本。`stateVersion` 保留为语义版本别名，详见[统一 Broker 状态](./docs/workbench.md#28-统一-broker-状态批次-13)。
+- Workbench 与 Agent 共用 Broker；语义状态和 zoom/background/viewport 分别计版本，截图记录实际捕获的双版本。`stateVersion` 保留为语义版本别名，详见[统一 Broker 状态](./docs/architecture.md#版本顺序与幂等)。
 - 每个 render session 最多保留最近 256 个 request ID 用于安全重试；更早的已完成请求可能被淘汰。
 - `run_ui_scenario` 已支持连续语义操作、状态/Controller/交互断言、条件等待和一次 PNG 截图；绑定现有 renderer 与 source revision，失败即停止且不回滚。每个 renderer 保留最近 8 次场景回执。输入、限制与恢复见[连续 UI 场景验收](./.agents/skills/use-fairygui-maker/references/ui-scenarios.md)。
 - 普通 Viewer/Player 截图直接作为 MCP `image/png` 返回，不持久化 ScreenshotRef；Import Draft 的 Visual Evidence 是独立、带 revision 的审查记录。
@@ -297,7 +297,7 @@ pnpm dev:host
 
 `pnpm dev:web` 仅用于可信源码的前端 UI 调试，不代替 Host 的安全响应头和隔离预览验收。
 
-`pnpm test:memory` 验证 Node 的 Bundle、Base64、5,000 图片、50,000 引用与密集 Override 压力；`pnpm test:browser` 包含 Player 100 次 A/B 加载/卸载、图片解码上限和音频回收。测量方法、门禁阈值与未验证的 GPU 指标见 [T3 内存压力验收](./docs/memory-stress.md)。
+`pnpm test:memory` 验证 Node 的 Bundle、Base64、5,000 图片、50,000 引用与密集 Override 压力；`pnpm test:browser` 包含 Player 100 次 A/B 加载/卸载、图片解码上限和音频回收。测量方法、门禁阈值与未验证的 GPU 指标见 [T3 内存压力验收](./docs/architecture.md#内存压力门禁)。
 
 完整发布门禁还会安装真实 npm tarball 并启动其中的 CLI，以及在 Chromium 中验证 Viewer/Player 像素 Golden、Import Draft Visual Evidence 与交付/隔离故障回归：
 
@@ -308,7 +308,7 @@ pnpm verify:release
 
 门禁先校验 `vendor-runtime.lock.json`、实际 runtime 字节和第三方声明的一致性，`npm pack` 的 `prepack` 也执行该检查。需要联网复核固定上游快照时运行 `pnpm verify:runtime --upstream`；复制来源和复现边界见[第三方声明](./THIRD_PARTY_NOTICES.md)。
 
-每次浏览器测试在 `test-results/browser/run-*/` 留存 reference/actual/diff、阈值、来源/组件/Broker 版本和诊断报告；CI 成败均上传并保留 14 天。未预期 Console/CSP/网络错误阻断测试。Viewer 的真实 FIG、Player 原生图形与设计源导入的固定字体文字/按钮四态/List 使用独立零差异 Golden，不覆盖任意系统字体保真。详见[证据闭环](./docs/workbench.md#214-视觉与故障证据闭环批次-19)与[设计源导入的语义 Golden](./docs/design-import.md#测试与基线)。
+每次浏览器测试在 `test-results/browser/run-*/` 留存 reference/actual/diff、阈值、来源/组件/Broker 版本和诊断报告；CI 成败均上传并保留 14 天。未预期 Console/CSP/网络错误阻断测试。Viewer 的真实 FIG、Player 原生图形与设计源导入的固定字体文字/按钮四态/List 使用独立零差异 Golden，不覆盖任意系统字体保真。详见[证据闭环](./docs/architecture.md#浏览器测试证据)与[设计源导入的语义 Golden](./docs/design-import.md#测试与基线)。
 
 测试固定使用 ANGLE/SwiftShader；含文字的语义截图使用 Windows/Linux 独立基线，以容纳系统字体栅格化差异。测试不改变正常 Workbench 浏览器的 GPU 配置，也不放宽零像素差异阈值。发布验收必须记录同一个提交的本地结果和完整 CI 矩阵，不能用不同提交的绿灯拼接通过。
 
@@ -355,7 +355,7 @@ GitHub CI 在推送 `main` 和 PR 时运行：Windows/Linux 与 Node.js 22/24 �
 
 - [参与开发与验证约定](./CONTRIBUTING.md)
 - [产品定位与技术架构](./docs/architecture.md)
-- [Maker Workbench、Viewer、Player 与 render session 协议](./docs/workbench.md)
+- [设计源导入（已冻结）](./docs/design-import.md)
 - [Agent 任务评测](./docs/agent-evals.md)：`pnpm eval:agent` 的任务、隔离、判定与各版本结果
 - [第三方运行时与补充声明](./THIRD_PARTY_NOTICES.md)；生产构建还会生成并发行 `dist/web/THIRD_PARTY_LICENSES.md`
 - [发布检查清单](./docs/release-checklist.md)
